@@ -1,9 +1,13 @@
+use tauri::Manager;
+
+pub mod app_exit;
 pub mod autostart;
 pub mod autostart_commands;
 pub mod gateway_commands;
 pub mod gateway_control;
 pub mod gateway_env;
 pub mod gateway_process;
+pub mod tray;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -16,7 +20,25 @@ pub fn run() {
             // 规范生命周期「软件启动→网关未运行则拉起」：自启软件本身，它再拉起网关；
             // 8787 已有网关则接管，不重复拉起
             gateway_commands::auto_start_on_launch(app.handle());
+            // T5：系统托盘常驻（左键切换面板 / 右键菜单）。失败不阻塞壳（面板仍可用），
+            // 仅记录到 stderr（release 无控制台时不可见，托盘缺失属可见问题，不影响网关安全）
+            if let Err(e) = tray::build_tray(app.handle()) {
+                eprintln!("托盘初始化失败（面板不受影响）：{e}");
+            }
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            // T5：点 ×（含等价系统关窗）保持默认链放行 = 退出软件，不做最小化到托盘；
+            // 只把退出来源记入壳侧日志。托盘「退出」/面板「退出」经 app.exit(0) 不经过本事件，
+            // 三种来源在日志里可区分，最终都汇入下方 RunEvent::Exit 的优雅停网关钩子。
+            if let tauri::WindowEvent::CloseRequested { .. } = event {
+                if window.label() == "main" {
+                    app_exit::log_exit_source(
+                        window.app_handle(),
+                        app_exit::ExitSource::WindowClose,
+                    );
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             gateway_commands::start_gateway,
@@ -24,13 +46,15 @@ pub fn run() {
             gateway_commands::restart_gateway,
             gateway_commands::open_logs_dir,
             autostart_commands::get_autostart,
-            autostart_commands::set_autostart_enabled
+            autostart_commands::set_autostart_enabled,
+            app_exit::quit_app
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
             if let tauri::RunEvent::Exit = event {
-                // 关窗即退出的默认链；退出前同步优雅停网关（≤10 秒），幂等
+                // 关窗即退出的默认链；托盘「退出」/面板「退出」经 app.exit(0) 同样汇入此钩子；
+                // 退出前同步优雅停网关（≤10 秒），幂等
                 gateway_commands::shutdown_blocking_on_exit(app);
             }
         });

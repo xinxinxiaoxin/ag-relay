@@ -44,17 +44,18 @@
         </label>
       </section>
 
-      <!-- 操作按钮区：启动/停止/安全重启经 Rust 命令层真实控制 8787 网关；退出按钮 T5 接入 -->
+      <!-- 操作按钮区：启动/停止/安全重启经 Rust 命令层真实控制 8787 网关；
+           退出按钮走同一命令层 quit_app（记退出来源后退出软件，行为与点 × 一致） -->
       <section class="actions" aria-label="网关操作">
         <button type="button" id="btn-start" class="action-btn enabled">启动网关</button>
         <button type="button" id="btn-stop" class="action-btn enabled">停止网关</button>
         <button type="button" id="btn-restart" class="action-btn enabled">安全重启</button>
         <button type="button" id="btn-logs" class="action-btn enabled">打开日志文件夹</button>
-        <button type="button" id="btn-quit" class="action-btn" disabled>退出</button>
+        <button type="button" id="btn-quit" class="action-btn enabled">退出</button>
       </section>
 
       <p class="action-hint" id="action-hint" aria-live="polite">
-        点击「启动网关」拉起本地 8787 网关；关闭窗口会自动优雅停止（最多等 10 秒）。
+        点击「启动网关」拉起本地 8787 网关；关闭窗口、托盘「退出」或面板「退出」都会先优雅停止网关（最多等 10 秒）再退出软件。
       </p>
     </main>
 

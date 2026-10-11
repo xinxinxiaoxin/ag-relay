@@ -1,6 +1,6 @@
 // T2：启动/停止网关按钮 → Rust 命令层（start_gateway / stop_gateway）。
 // T6：开机自启开关 → get_autostart / set_autostart_enabled。
-// 其余按钮（安全重启/打开日志/退出）T3/T4/T5 接入。
+// T4：安全重启 / 打开日志文件夹已接入；T5：退出按钮接入 quit_app（与点 × 行为一致）。
 
 const { invoke } = window.__TAURI__.core;
 
@@ -8,6 +8,7 @@ const btnStart = document.getElementById('btn-start');
 const btnStop = document.getElementById('btn-stop');
 const btnRestart = document.getElementById('btn-restart');
 const btnLogs = document.getElementById('btn-logs');
+const btnQuit = document.getElementById('btn-quit');
 const hint = document.getElementById('action-hint');
 const stateValue = document.querySelector('[data-key="state"]');
 
@@ -120,6 +121,17 @@ btnStop.addEventListener('click', async () => {
     setHint(`失败：调用命令层出错 ${err}`, true);
   } finally {
     setBusy(false);
+  }
+});
+
+// ---- T5：退出按钮（后端 quit_app：记退出来源 panel_button 后 app.exit(0)，
+// 与点 × / 托盘「退出」殊途同归，都汇入 RunEvent::Exit 钩子优雅停网关） ----
+btnQuit.addEventListener('click', async () => {
+  setHint('正在退出软件（网关将先优雅停止，最多等 10 秒）…');
+  try {
+    await invoke('quit_app');
+  } catch (err) {
+    setHint(`退出失败：调用命令层出错 ${err}`, true);
   }
 });
 
