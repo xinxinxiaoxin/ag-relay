@@ -10,7 +10,7 @@
 //!   重试才能成功（free 后立即 attach 稳定报 err=6 INVALID_HANDLE），故此处带重试。
 
 use std::fmt;
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpListener;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
@@ -354,6 +354,7 @@ pub fn get_relay_status(port: u16) -> Result<RelayStatus, String> {
 mod tests {
     use super::*;
     use crate::gateway_env::gateway_env_table;
+    use std::net::TcpStream;
     use std::sync::Mutex as TestMutex;
 
     /// 触碰 8787 端口与全局控制台的测试串行执行
