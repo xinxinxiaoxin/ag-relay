@@ -10,7 +10,7 @@
 //!   重试才能成功（free 后立即 attach 稳定报 err=6 INVALID_HANDLE），故此处带重试。
 
 use std::fmt;
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpListener;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
@@ -41,6 +41,12 @@ pub const GATEWAY_HOST: &str = "127.0.0.1";
 
 /// 优雅关停默认预算（工单：最多等 10 秒后强杀）。
 pub const STOP_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// 广播 CTRL_C 前的启动缓冲。node 需要数百毫秒引导后才注册 SIGINT 处理器，
+/// 过早广播会命中引导期的默认处置：进程以 STATUS_CONTROL_C_EXIT（0xC000013A）裸死，
+/// 完全不优雅（高负载下 node 引导变慢，T5 基线实测桩测试间歇复现）。
+/// 缓冲期间子进程若自行退出则按优雅提前返回。对常驻网关只是把广播推迟约一瞬。
+const BOOT_GRACE: Duration = Duration::from_millis(1_500);
 
 /// 串行化整个进程生命周期序列（spawn 与 stop）。原因：
 /// 1) 「忽略 CTRL_C」属性是进程级且会被子进程继承，spawn 前要清、广播时要设、
@@ -250,6 +256,18 @@ fn stop_managed_locked(proc: &mut ManagedChild, timeout: Duration) -> StopOutcom
         return StopOutcome::Graceful { exit_code: status.code() };
     }
 
+    // 启动缓冲：等子进程完成引导、注册好 SIGINT 处理器再广播（见 BOOT_GRACE 注释）。
+    // 期间自行退出（含刚被外部杀掉）都按优雅处理，提前返回。
+    let grace_deadline = Instant::now() + BOOT_GRACE;
+    while Instant::now() < grace_deadline {
+        match proc.child.try_wait() {
+            Ok(Some(status)) => return StopOutcome::Graceful { exit_code: status.code() },
+            Ok(None) => {}
+            Err(_) => break,
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
     broadcast_ctrl_c_to_child_console(proc.supervisor_pid);
 
     let deadline = Instant::now() + timeout;
@@ -336,6 +354,7 @@ pub fn get_relay_status(port: u16) -> Result<RelayStatus, String> {
 mod tests {
     use super::*;
     use crate::gateway_env::gateway_env_table;
+    use std::net::TcpStream;
     use std::sync::Mutex as TestMutex;
 
     /// 触碰 8787 端口与全局控制台的测试串行执行

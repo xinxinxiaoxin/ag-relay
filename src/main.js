@@ -4,6 +4,7 @@
 //     「启动网关」点了若已在运行，给「已在运行」提示而非重复拉起。
 //   - 网关不可达 → 「未运行」灰态；字段缺失/类型不对 → 该卡「未知」。不弹错、不闪退。
 // T4：安全重启/打开日志按钮；T6：开机自启开关 + 启动即拉网关（Rust 侧 setup 编排）。
+// T5：退出按钮接入 quit_app（与点 × 行为一致）。
 
 const { invoke } = window.__TAURI__.core;
 
@@ -11,6 +12,7 @@ const btnStart = document.getElementById('btn-start');
 const btnStop = document.getElementById('btn-stop');
 const btnRestart = document.getElementById('btn-restart');
 const btnLogs = document.getElementById('btn-logs');
+const btnQuit = document.getElementById('btn-quit');
 const hint = document.getElementById('action-hint');
 
 const cardEls = {
@@ -176,6 +178,17 @@ btnStop.addEventListener('click', async () => {
   } finally {
     setBusy(false);
     pollStatus();
+  }
+});
+
+// ---- T5：退出按钮（后端 quit_app：记退出来源 panel_button 后 app.exit(0)，
+// 与点 × / 托盘「退出」殊途同归，都汇入 RunEvent::Exit 钩子优雅停网关） ----
+btnQuit.addEventListener('click', async () => {
+  setHint('正在退出软件（网关将先优雅停止，最多等 10 秒）…');
+  try {
+    await invoke('quit_app');
+  } catch (err) {
+    setHint(`退出失败：调用命令层出错 ${err}`, true);
   }
 });
 
