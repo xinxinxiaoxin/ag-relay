@@ -22,6 +22,8 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
 
 use crate::gateway_diagnostics::{localize_line, ActivityEvent, ActivityLevel};
+// 诊断文件名的单一真值在 gateway_process（与 resolve_paths 同源），本模块复用以防两处漂移。
+use crate::gateway_process::DIAGNOSTICS_FILE_NAME;
 
 /// 「最近活动」内存缓冲容量（只保留最近这么多条活动事件）。
 const RECENT_CAPACITY: usize = 50;
@@ -31,8 +33,6 @@ const DEFAULT_PAGE_SIZE: usize = 50;
 const MAX_PAGE_SIZE: usize = 500;
 /// 反向分块读取块大小（64 KiB）。
 const REVERSE_CHUNK: usize = 64 * 1024;
-/// live 诊断文件名（上游网关固定落位；与 gateway_process::resolve_paths 的文件名一致）。
-const DIAGNOSTICS_FILE_NAME: &str = "relay-diagnostics.jsonl";
 
 // ───────────────────────── 查询 IPC 形状（命令 ② 的请求/响应） ─────────────────────────
 
@@ -466,6 +466,14 @@ mod tests {
             std::ffi::OsStr::new("relay-diagnostics.jsonl.1")
         );
         assert_eq!(rotated.parent(), live.parent(), "目录不变，仅文件名加 .1");
+    }
+
+    #[test]
+    fn 诊断文件名_单一真值_钉死在上游固定落位名() {
+        // 读取层复用 gateway_process 的 DIAGNOSTICS_FILE_NAME（import），此处把它钉死在
+        // 上游网关固定落位的 live 诊断文件名上：resolve_paths 与读取层由此共享同一真值，
+        // 任一侧若改回各写字面量而漂移即红（防 finding E 回归）。
+        assert_eq!(DIAGNOSTICS_FILE_NAME, "relay-diagnostics.jsonl");
     }
 
     #[test]
