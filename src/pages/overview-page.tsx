@@ -304,11 +304,11 @@ export function OverviewPage({ snapshot, events, onAction, onNavigate, appVersio
                 {recentEvents.length > 0 ? (
                   <ItemGroup className="gap-0">
                     {recentEvents.map((event, index) => (
-                      <Fragment key={event.id}>
+                      <Fragment key={`${event.time}-${index}`}>
                         {index > 0 && <Separator />}
                         <Item className="items-start gap-3 px-0 py-3">
-                          <ItemMedia className="mt-1 shrink-0" aria-label={event.level === 'error' ? '错误' : event.level === 'warning' ? '提示' : '信息'}>
-                            {event.level === 'error' ? <TriangleAlert className="size-4 text-destructive" aria-hidden="true" /> : event.level === 'warning' ? <CircleAlert className="size-4 text-muted-foreground" aria-hidden="true" /> : <Activity className="size-4 text-muted-foreground" aria-hidden="true" />}
+                          <ItemMedia className="mt-1 shrink-0" aria-label={event.level === 'error' ? '错误' : event.level === 'warn' ? '警告' : '信息'}>
+                            {event.level === 'error' ? <TriangleAlert className="size-4 text-destructive" aria-hidden="true" /> : event.level === 'warn' ? <CircleAlert className="size-4 text-muted-foreground" aria-hidden="true" /> : <Activity className="size-4 text-muted-foreground" aria-hidden="true" />}
                           </ItemMedia>
                           <ItemContent className="min-w-0 gap-1">
                             <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
