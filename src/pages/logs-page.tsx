@@ -30,6 +30,7 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { queryActivityEvents } from '@/lib/gateway'
 import type { ActivityLevelFilter, ActivityPage } from '@/lib/gateway'
+import { formatEventTime } from '@/lib/types'
 import type { ActivityEvent, PageProps } from '@/lib/types'
 
 const LEVEL_LABELS: Record<ActivityEvent['level'], string> = {
@@ -190,7 +191,7 @@ export function LogsPage(props: PageProps) {
                   {events.map((event, index) => (
                     <TableRow key={`${event.time}-${index}`} className="border-border">
                       <TableCell className="py-4 pl-5 align-top text-xs leading-5 whitespace-normal text-muted-foreground tabular-nums">
-                        {event.time}
+                        <time dateTime={event.time}>{formatEventTime(event.time)}</time>
                       </TableCell>
                       <TableCell className="py-4 align-top">
                         <Badge

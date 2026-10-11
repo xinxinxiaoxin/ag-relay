@@ -21,6 +21,24 @@ export interface ActivityEvent {
   detail: string
   time: string
 }
+// 活动事件时间「展示层」格式化（纯函数，仅渲染时调用）：数据层始终保留原始 ISO8601 透传，
+// 绝不改写。规则：今天 → HH:MM:SS；非今天 → MM-DD HH:MM（本地时区）。无法解析为合法日期
+// （如浏览器 mock 的 "14:18:36" 或缺省空串）→ 原样返回，不破坏回退数据。
+// 单一来源：总览「最近活动」与诊断日志页共用本助手，避免两处时间格式漂移。
+export function formatEventTime(raw: string): string {
+  const date = new Date(raw)
+  if (Number.isNaN(date.getTime())) return raw
+  const pad = (n: number) => String(n).padStart(2, '0')
+  const hh = pad(date.getHours())
+  const mm = pad(date.getMinutes())
+  const now = new Date()
+  const sameDay =
+    date.getFullYear() === now.getFullYear() &&
+    date.getMonth() === now.getMonth() &&
+    date.getDate() === now.getDate()
+  if (sameDay) return `${hh}:${mm}:${pad(date.getSeconds())}`
+  return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${hh}:${mm}`
+}
 export interface PageProps {
   snapshot: GatewaySnapshot
   events: ActivityEvent[]
@@ -39,8 +57,12 @@ export interface GatewayErrorInfo {
 export type SettingsPageProps = PageProps
 export const ENDPOINT = 'http://127.0.0.1:8787'
 export const DISPLAY_ENDPOINT = '127.0.0.1:8787'
-export const APP_VERSION = 'v0.1.0'
+// 应用版本的单一来源是动态状态（gateway.ts 的 getAppVersion()，回退 FALLBACK_APP_VERSION）；
+// 侧栏/页脚/总览/设置页统一渲染该状态，显示层各自加 "v" 前缀——此处不再留静态版本常量以防分叉。
+// 网关状态 → 中文短名（用于 App 全局 sr-only 实时播报）。
+// external 刻意取「运行中（外部实例）」：与总览大标题「运行中」+「外部实例」徽标一致，
+// 使屏幕阅读器播报与所见状态相符，并保留 ADR-0003 的外部实例醒目标记（a11y 亦不丢失）。
 export const stateNames: Record<GatewayState, string> = {
-  running: '运行中', stopped: '未启动', external: '外部实例',
+  running: '运行中', stopped: '未启动', external: '运行中（外部实例）',
   error: '端口冲突', starting: '正在启动', draining: '正在排空',
 }

@@ -31,10 +31,10 @@ import { Toaster } from '@/components/ui/sonner'
 import { OverviewPage } from '@/pages/overview-page'
 import { LogsPage } from '@/pages/logs-page'
 import { SettingsPage } from '@/pages/settings-page'
-import { ENDPOINT, APP_VERSION, stateNames } from '@/lib/types'
+import { ENDPOINT, stateNames } from '@/lib/types'
 import type { ActivityEvent, GatewayAction, GatewayErrorInfo, GatewaySnapshot, PageId } from '@/lib/types'
 import {
-  getStatus, deriveSnapshot, getRecentEvents, getAppVersion,
+  getStatus, deriveSnapshot, getRecentActivity, getAppVersion, FALLBACK_APP_VERSION,
   startGateway, stopGateway, restartGateway, openLogsDir, quitApp, STATUS_POLL_MS,
 } from '@/lib/gateway'
 
@@ -54,9 +54,9 @@ const navigation = [
   { id: 'settings' as const, name: '偏好设置', icon: Settings2Icon },
 ]
 
-function AppSidebar({ page, onNavigate, onSearch, onAction }: {
+function AppSidebar({ page, onNavigate, onSearch, onAction, appVersion }: {
   page: PageId; onNavigate: (page: PageId) => void; onSearch: () => void;
-  onAction: (action: GatewayAction) => void;
+  onAction: (action: GatewayAction) => void; appVersion: string;
 }) {
   const { isMobile, setOpenMobile } = useSidebar()
   const navigate = (next: PageId) => { onNavigate(next); if (isMobile) setOpenMobile(false) }
@@ -102,7 +102,7 @@ function AppSidebar({ page, onNavigate, onSearch, onAction }: {
         <SidebarMenu><SidebarMenuItem>
           <DropdownMenu><DropdownMenuTrigger asChild><SidebarMenuButton size="lg" className="gap-3 rounded-[18px]" tooltip="本机设备菜单">
             <div className="flex size-9 shrink-0 items-center justify-center rounded-[12px] bg-muted"><MonitorIcon className="size-4" /></div>
-            <div className="grid min-w-0 gap-0.5"><span className="text-sm font-medium">本机设备</span><span className="whitespace-nowrap text-xs text-muted-foreground">Windows · {APP_VERSION}</span></div><MoreHorizontalIcon className="ml-auto size-4" />
+            <div className="grid min-w-0 gap-0.5"><span className="text-sm font-medium">本机设备</span><span className="whitespace-nowrap text-xs text-muted-foreground">Windows · v{appVersion}</span></div><MoreHorizontalIcon className="ml-auto size-4" />
           </SidebarMenuButton></DropdownMenuTrigger>
             <DropdownMenuContent side="top" align="start" className="w-56">
               <DropdownMenuLabel>本地工作空间</DropdownMenuLabel><DropdownMenuSeparator />
@@ -134,8 +134,9 @@ export default function App() {
   const [busy, setBusy] = useState<null | 'starting' | 'draining'>(null)
   // 网关生命周期错误态（T7，ADR-0003）：由变更型命令的真实失败结果驱动，在总览上持久、可操作地呈现。
   const [gatewayError, setGatewayError] = useState<GatewayErrorInfo | null>(null)
-  // 运行版本「主显」：应用版本（Tauri app.getVersion()，浏览器回退 0.1.0）。
-  const [appVersion, setAppVersion] = useState('0.1.0')
+  // 运行版本「主显」：应用版本（Tauri app.getVersion()，浏览器回退 FALLBACK_APP_VERSION）。
+  // 单一来源：侧栏、页脚、总览均渲染此状态；初值取同一回退常量，不再散落字面量。
+  const [appVersion, setAppVersion] = useState(FALLBACK_APP_VERSION)
   const mainRef = useRef<HTMLElement>(null)
 
   // 立即刷新一次状态（变更型动作完成后调用，不等下一轮 3 秒轮询）。
@@ -144,17 +145,23 @@ export default function App() {
   }, [])
 
   // 状态轮询：挂载即首刷，此后每 STATUS_POLL_MS 刷新（8787 上有网关即接管显示）。
+  // 「最近活动」随同一轮询并行拉取（与 getStatus 各自独立更新、互不阻塞）：启动后新产生的
+  // 事件无需重启面板即可点亮；读取层只读、失败兜空，不改变 status 的轮询节奏。
   useEffect(() => {
     let active = true
-    const tick = async () => {
-      const status = await getStatus()
-      if (!active) return
-      setSnapshot(deriveSnapshot(status))
-      // 端口冲突态在网关恢复可达后自动消解（其余错误条保留到用户重试或忽略）。
-      if (status.available) setGatewayError(prev => (prev?.portConflict ? null : prev))
+    const tick = () => {
+      void getStatus().then(status => {
+        if (!active) return
+        setSnapshot(deriveSnapshot(status))
+        // 端口冲突态在网关恢复可达后自动消解（其余错误条保留到用户重试或忽略）。
+        if (status.available) setGatewayError(prev => (prev?.portConflict ? null : prev))
+      })
+      void getRecentActivity().then(list => {
+        if (active) setEvents(list)
+      })
     }
-    void tick()
-    const timer = setInterval(() => void tick(), STATUS_POLL_MS)
+    tick()
+    const timer = setInterval(tick, STATUS_POLL_MS)
     return () => { active = false; clearInterval(timer) }
   }, [])
 
@@ -162,13 +169,6 @@ export default function App() {
   useEffect(() => {
     let active = true
     void getAppVersion().then(v => { if (active) setAppVersion(v) })
-    return () => { active = false }
-  }, [])
-
-  // 最近活动事件（T1 占位：mock；真实命令在 T5）。
-  useEffect(() => {
-    let active = true
-    void getRecentEvents().then(list => { if (active) setEvents(list) })
     return () => { active = false }
   }, [])
 
@@ -301,7 +301,7 @@ export default function App() {
   return (
     <TooltipProvider delayDuration={200}>
       <SidebarProvider defaultOpen style={{ '--sidebar-width': '15rem', '--sidebar-width-icon': '4rem' } as React.CSSProperties}>
-        <AppSidebar page={page} onNavigate={navigate} onSearch={() => setCommandOpen(true)} onAction={act} />
+        <AppSidebar page={page} onNavigate={navigate} onSearch={() => setCommandOpen(true)} onAction={act} appVersion={appVersion} />
         <SidebarInset className="min-w-0 bg-background">
           <header className="app-header flex h-[72px] shrink-0 items-center justify-between gap-3 border-b border-border bg-white px-5 lg:px-8">
             <div className="flex min-w-0 items-center gap-3"><SidebarTrigger className="-ml-1 size-8 shrink-0" aria-label="展开或收起侧栏" /><Separator orientation="vertical" className="!h-4" />
@@ -315,7 +315,7 @@ export default function App() {
               {page === 'settings' && <SettingsPage {...common} />}
             </div>
           </main>
-          <footer className="flex flex-wrap items-center justify-between gap-2 border-t border-border bg-white/60 px-6 py-3.5 text-xs text-muted-foreground lg:px-8"><span>AG Relay · 本地网关工作空间</span><span className="tabular-nums">{APP_VERSION}</span></footer>
+          <footer className="flex flex-wrap items-center justify-between gap-2 border-t border-border bg-white/60 px-6 py-3.5 text-xs text-muted-foreground lg:px-8"><span>AG Relay · 本地网关工作空间</span><span className="tabular-nums">v{appVersion}</span></footer>
         </SidebarInset>
       </SidebarProvider>
       <CommandDialog open={commandOpen} onOpenChange={setCommandOpen} title="搜索页面与快捷操作" description="搜索页面和可用操作。">

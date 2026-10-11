@@ -285,14 +285,6 @@ function mockQueryActivityEvents(query: ActivityQuery, page: number, pageSize: n
   return { events, page, pageSize, hasMore: start + events.length < filtered.length }
 }
 
-/**
- * 最近活动事件（兼容既有 App.tsx 调用方；委托 getRecentActivity）。
- * Tauri 内走真实 get_recent_activity，浏览器回退 MOCK_EVENTS。
- */
-export async function getRecentEvents(): Promise<ActivityEvent[]> {
-  return getRecentActivity()
-}
-
 // ── T3 偏好设置接线（additive；getAppVersion 与 T2 共享，合并时去重） ──
 
 /** 开机自启状态（get_autostart 返回；字段原样 snake_case）。 */

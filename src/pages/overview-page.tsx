@@ -37,7 +37,7 @@ import { Input } from '@/components/ui/input'
 import { Item, ItemContent, ItemDescription, ItemGroup, ItemMedia, ItemTitle } from '@/components/ui/item'
 import { Separator } from '@/components/ui/separator'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import { ENDPOINT, type GatewayErrorInfo, type GatewayState, type PageProps } from '@/lib/types'
+import { ENDPOINT, formatEventTime, type GatewayErrorInfo, type GatewayState, type PageProps } from '@/lib/types'
 
 const endpoint = new URL(ENDPOINT)
 
@@ -48,6 +48,28 @@ const stateCopy: Record<GatewayState, { title: string; description: string }> = 
   error: { title: '端口冲突', description: '网关未能启动，请先检查端口占用情况。' },
   starting: { title: '正在启动', description: '正在准备网关，请稍候。' },
   draining: { title: '正在排空', description: '正在等待进行中的请求结束，请稍候。' },
+}
+
+// 网关控制说明文案：按「归属/状态」优先级早返回（替代原多层嵌套三元，便于阅读与增删分支）。
+function controlNoteFor(
+  state: GatewayState,
+  isExternal: boolean,
+  isManaged: boolean,
+  isPending: boolean,
+): string {
+  if (isExternal) {
+    return '该网关并非本窗口拉起（外部实例）。可停止或重启，但会先二次确认，并仅在经 supervisor 父链核实归属后执行——宁可不杀，不可误杀。'
+  }
+  if (state === 'running' && !isManaged) {
+    return '端口上有网关在运行，但尚未核实归属，停止与重启暂不可用（宁可不杀，不可误杀）。'
+  }
+  if (isPending) {
+    return '状态切换期间，控制操作暂不可用。'
+  }
+  if (state === 'error') {
+    return '端口冲突解决前，启动与重启不可用。请先检查占用程序。'
+  }
+  return '仅管理当前窗口启动的网关，不会终止其他进程。'
 }
 
 export function OverviewPage({ snapshot, events, onAction, onNavigate, appVersion, gatewayError, onDismissError }: PageProps & { appVersion: string; gatewayError: GatewayErrorInfo | null; onDismissError: () => void }) {
@@ -83,15 +105,7 @@ export function OverviewPage({ snapshot, events, onAction, onNavigate, appVersio
     : canStopOrRestart ? '停止网关' : '启动网关'
   // 主控制按钮：未启动→启动，否则停止。破坏性守卫（外部二次确认 / 安全重启确认）集中在壳层 act()，本页只发意图。
   const handlePrimary = () => { onAction(canStart ? 'start' : 'stop') }
-  const controlNote = isExternal
-    ? '该网关并非本窗口拉起（外部实例）。可停止或重启，但会先二次确认，并仅在经 supervisor 父链核实归属后执行——宁可不杀，不可误杀。'
-    : state === 'running' && !isManaged
-      ? '端口上有网关在运行，但尚未核实归属，停止与重启暂不可用（宁可不杀，不可误杀）。'
-      : isPending
-        ? '状态切换期间，控制操作暂不可用。'
-        : state === 'error'
-          ? '端口冲突解决前，启动与重启不可用。请先检查占用程序。'
-          : '仅管理当前窗口启动的网关，不会终止其他进程。'
+  const controlNote = controlNoteFor(state, isExternal, isManaged, isPending)
 
   return (
     <div className="flex w-full min-w-0 flex-col gap-6">
@@ -136,7 +150,7 @@ export function OverviewPage({ snapshot, events, onAction, onNavigate, appVersio
                 网关控制
               </CardTitle>
               <Badge variant="secondary" className="text-xs font-normal">
-                {isExternal ? '接管显示' : isManaged ? '当前窗口管理' : '本地网关'}
+                {snapshot.owner === 'window' ? '受管网关' : snapshot.owner === 'external' ? '外部实例' : '无'}
               </Badge>
             </div>
           </CardHeader>
@@ -289,7 +303,7 @@ export function OverviewPage({ snapshot, events, onAction, onNavigate, appVersio
                           <ItemContent className="min-w-0 gap-1">
                             <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
                               <ItemTitle className={`min-w-0 break-words text-sm [overflow-wrap:anywhere] ${event.level === 'error' ? 'text-destructive' : ''}`}>{event.title}</ItemTitle>
-                              <time className="shrink-0 text-xs leading-5 tabular-nums text-muted-foreground">{event.time}</time>
+                              <time dateTime={event.time} className="shrink-0 text-xs leading-5 tabular-nums text-muted-foreground">{formatEventTime(event.time)}</time>
                             </div>
                             <ItemDescription className="break-words text-sm leading-6 [overflow-wrap:anywhere]">{event.detail}</ItemDescription>
                           </ItemContent>
