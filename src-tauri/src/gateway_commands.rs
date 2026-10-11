@@ -6,8 +6,10 @@ use std::sync::Mutex;
 use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
 
+use crate::gateway_control::{self, ControlError, DEFAULT_RESTART_TIMEOUT};
 use crate::gateway_process::{
-    resolve_paths, stop_managed, GatewayError, GatewayPaths, ManagedChild, STOP_TIMEOUT,
+    resolve_paths, stop_managed, GatewayError, GatewayPaths, ManagedChild, GATEWAY_HOST,
+    GATEWAY_PORT, STOP_TIMEOUT,
 };
 
 /// 壳的全局网关状态：当前受管的 supervisor 子进程（None = 未由本壳启动）。
@@ -115,12 +117,92 @@ fn stop_and_clear(state: &State<GatewayState>) -> GatewayActionResult {
     }
 }
 
+/// 安全重启结果（前端按 kind 给中文提示）。
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RestartResult {
+    /// 网关已受理重启（排空后由 supervisor 重新拉起）
+    Restarted,
+    /// 8787 上没有网关
+    NotRunning,
+    /// 等待网关响应超时（可能仍在排空在途请求）
+    Timeout,
+    /// 其他失败，detail 为人可读原因
+    Failed { detail: String },
+}
+
+/// 安全重启（与 UI「安全重启」按钮同一命令）：POST /_relay/restart + 控制头，60 秒上限。
+/// 不依赖网关是否由本壳启动——只要是 8787 上的网关即可重启。
+#[tauri::command]
+pub async fn restart_gateway() -> RestartResult {
+    // 同步阻塞调用（最长 60 秒）放进阻塞线程池，避免占用命令执行器
+    match tauri::async_runtime::spawn_blocking(move || {
+        gateway_control::post_restart(GATEWAY_HOST, GATEWAY_PORT, DEFAULT_RESTART_TIMEOUT)
+    })
+    .await
+    {
+        Ok(Ok(())) => RestartResult::Restarted,
+        Ok(Err(ControlError::NotRunning)) => RestartResult::NotRunning,
+        Ok(Err(ControlError::Timeout)) => RestartResult::Timeout,
+        Ok(Err(ControlError::Failed(detail))) => RestartResult::Failed { detail },
+        Err(e) => RestartResult::Failed { detail: format!("内部任务失败：{e}") },
+    }
+}
+
+/// 打开日志文件夹结果。
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LogsDirResult {
+    /// 已在资源管理器中打开
+    Opened { path: String },
+    Failed { detail: String },
+}
+
+/// 打开日志文件夹（与 UI「打开日志文件夹」按钮同一命令）：
+/// 目录与诊断日志一致（%APPDATA%\ag-relay\logs），不存在则先创建。
+#[tauri::command]
+pub async fn open_logs_dir(app: AppHandle) -> LogsDirResult {
+    let app_data = match app.path().app_data_dir() {
+        Ok(d) => d,
+        Err(e) => return LogsDirResult::Failed { detail: format!("解析应用数据目录失败：{e}") },
+    };
+    let dir = match gateway_control::ensure_logs_dir(&app_data) {
+        Ok(d) => d,
+        Err(detail) => return LogsDirResult::Failed { detail },
+    };
+    match std::process::Command::new("explorer").arg(&dir).spawn() {
+        Ok(_) => LogsDirResult::Opened { path: dir.display().to_string() },
+        Err(e) => LogsDirResult::Failed { detail: format!("打开资源管理器失败：{e}") },
+    }
+}
+
 /// 应用退出钩子（RunEvent::Exit）：同步阻塞地停掉网关，≤10 秒。
 /// 幂等：按钮已停过 / 从未启动过都是 no-op。刻意在 Exit 事件内做——
 /// tauri 事件循环回调之后直接 std::process::exit，`.run()` 之后的代码不保证执行。
 pub fn shutdown_blocking_on_exit(app: &AppHandle) {
     let state: State<GatewayState> = app.state();
     let _ = stop_and_clear(&state);
+}
+
+/// 应用启动钩子（lib.rs setup 调用）：规范生命周期「软件启动→网关未运行则拉起」。
+/// 自启换新（T6）的目的就是「开机自启的是软件本身，它再拉起网关」，故随本票落地。
+/// 8787 已被占（含面板外已有实例/别的壳实例）则直接接管：不重复拉起、不报错；
+/// 失败静默（面板显示已停止，用户可手动启动），绝不阻塞窗口出现。
+pub fn auto_start_on_launch(app: &AppHandle) {
+    if crate::gateway_process::port_in_use(
+        crate::gateway_process::GATEWAY_HOST,
+        crate::gateway_process::GATEWAY_PORT,
+    ) {
+        return; // 已有网关在跑：接管语义，不重复拉起
+    }
+    let state: State<GatewayState> = app.state();
+    let paths = match resolve_runtime_paths(app) {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    if let Ok(child) = crate::gateway_process::start_gateway_process(&paths) {
+        state.store(child);
+    }
 }
 
 /// 运行期路径解析：node.exe / gateway 脚本目录都在主程序 exe 旁，

@@ -149,3 +149,35 @@ body {
 .action-hint.error {
   color: #f87171;
 }
+
+/* T6：开机自启开关（状态区下方角落，样式从简） */
+.autostart-line {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 12px;
+  margin-top: -10px;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+.autostart-note.error {
+  color: #f87171;
+}
+
+.autostart-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  color: var(--text);
+}
+
+.autostart-toggle input {
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.autostart-toggle input:disabled {
+  cursor: wait;
+}

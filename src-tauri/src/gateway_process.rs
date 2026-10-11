@@ -458,6 +458,8 @@ mod tests {
 
     #[test]
     fn 桩1_收到CTRL_C应优雅退出_耗时远小于10秒上限() {
+        // CTRL_C 广播会送达同控制台的所有子进程，桩测试必须串行（本锁是 T2 既定设计）
+        let _guard = PORT_TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let script = fixtures_dir().join("stub_graceful.mjs");
         let mut proc = spawn_ready_stub(&script);
         let (outcome, elapsed) = timed_stop_locked(&mut proc, STOP_TIMEOUT);
@@ -477,6 +479,8 @@ mod tests {
 
     #[test]
     fn 桩2_忽略CTRL_C_须在10秒上限后被强杀且进程消失() {
+        // 同桩1：广播影响同控制台全部子进程，必须串行
+        let _guard = PORT_TESTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let script = fixtures_dir().join("stub_stubborn.mjs");
         let mut proc = spawn_ready_stub(&script);
         let (outcome, elapsed) = timed_stop_locked(&mut proc, STOP_TIMEOUT);
