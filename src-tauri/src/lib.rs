@@ -1,6 +1,7 @@
 pub mod autostart;
 pub mod autostart_commands;
 pub mod gateway_commands;
+pub mod gateway_control;
 pub mod gateway_env;
 pub mod gateway_process;
 
@@ -20,6 +21,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             gateway_commands::start_gateway,
             gateway_commands::stop_gateway,
+            gateway_commands::restart_gateway,
+            gateway_commands::open_logs_dir,
             autostart_commands::get_autostart,
             autostart_commands::set_autostart_enabled
         ])
