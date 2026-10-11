@@ -5,6 +5,8 @@ const { invoke } = window.__TAURI__.core;
 
 const btnStart = document.getElementById('btn-start');
 const btnStop = document.getElementById('btn-stop');
+const btnRestart = document.getElementById('btn-restart');
+const btnLogs = document.getElementById('btn-logs');
 const hint = document.getElementById('action-hint');
 const stateValue = document.querySelector('[data-key="state"]');
 
@@ -29,6 +31,48 @@ function setBusy(isBusy) {
   btnStart.disabled = isBusy;
   btnStop.disabled = isBusy;
 }
+
+function setBusy(isBusy) {
+  btnStart.disabled = isBusy;
+  btnStop.disabled = isBusy;
+  btnRestart.disabled = isBusy;
+}
+
+// 安全重启不改变本壳的启停状态（supervisor 排空后自行重新拉起），故只在提示区反馈结果
+btnRestart.addEventListener('click', async () => {
+  setBusy(true);
+  setHint('正在安全重启网关（优雅排空在途请求后重新拉起，最长等 60 秒）…');
+  try {
+    const res = await invoke('restart_gateway');
+    if (res.kind === 'restarted') {
+      setHint('安全重启已受理：网关正在排空并重新启动，稍后即可继续使用。');
+    } else if (res.kind === 'not_running') {
+      setHint('网关未运行——请先「启动网关」，再执行安全重启。', true);
+    } else if (res.kind === 'timeout') {
+      setHint('重启等待超时：网关可能仍在排空在途请求，未收到完成确认。', true);
+    } else {
+      setHint(`安全重启失败：${res.detail}`, true);
+    }
+  } catch (err) {
+    setHint(`失败：调用命令层出错 ${err}`, true);
+  } finally {
+    setBusy(false);
+  }
+});
+
+btnLogs.addEventListener('click', async () => {
+  setHint('正在打开日志文件夹…');
+  try {
+    const res = await invoke('open_logs_dir');
+    if (res.kind === 'opened') {
+      setHint(`已打开日志文件夹：${res.path}`);
+    } else {
+      setHint(`打开日志文件夹失败：${res.detail}`, true);
+    }
+  } catch (err) {
+    setHint(`失败：调用命令层出错 ${err}`, true);
+  }
+});
 
 btnStart.addEventListener('click', async () => {
   setBusy(true);
