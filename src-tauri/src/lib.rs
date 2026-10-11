@@ -5,6 +5,7 @@ pub mod autostart;
 pub mod autostart_commands;
 pub mod gateway_commands;
 pub mod gateway_control;
+pub mod gateway_diagnostics;
 pub mod gateway_env;
 pub mod gateway_process;
 pub mod gateway_status;
