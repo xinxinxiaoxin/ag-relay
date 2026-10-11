@@ -10,7 +10,6 @@
 //!   重试才能成功（free 后立即 attach 稳定报 err=6 INVALID_HANDLE），故此处带重试。
 
 use std::fmt;
-use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -323,28 +322,10 @@ pub struct RelayStatus {
 }
 
 /// GET http://127.0.0.1:{port}/_relay/status（网关本地控制端点要求 Host 头精确匹配端口）。
-/// 用 HTTP/1.0 请求避免 chunked 编码，Host 头不可省（缺失会被网关 403）。
+/// HTTP 细节（HTTP/1.0 + 仅 Host 头、超时）统一在 gateway_status::fetch_status_body。
 pub fn get_relay_status(port: u16) -> Result<RelayStatus, String> {
-    let mut stream = TcpStream::connect((GATEWAY_HOST, port))
-        .map_err(|e| format!("连接 {GATEWAY_HOST}:{port} 失败：{e}"))?;
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .map_err(|e| format!("设置读超时失败：{e}"))?;
-    let request = format!("GET /_relay/status HTTP/1.0\r\nHost: {GATEWAY_HOST}:{port}\r\n\r\n");
-    stream
-        .write_all(request.as_bytes())
-        .map_err(|e| format!("发送请求失败：{e}"))?;
-    let mut raw = String::new();
-    stream
-        .read_to_string(&mut raw)
-        .map_err(|e| format!("读取响应失败：{e}"))?;
-    let (head, body) = raw
-        .split_once("\r\n\r\n")
-        .ok_or_else(|| format!("响应缺少分隔符：{:.80}", raw))?;
-    if !(head.starts_with("HTTP/1.1 200") || head.starts_with("HTTP/1.0 200")) {
-        return Err(format!("状态接口返回异常：{}", head.lines().next().unwrap_or("")));
-    }
-    serde_json::from_str(body).map_err(|e| format!("解析状态 JSON 失败：{e}"))
+    let body = crate::gateway_status::fetch_status_body(GATEWAY_HOST, port)?;
+    serde_json::from_str(body.as_str()).map_err(|e| format!("解析状态 JSON 失败：{e}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -360,6 +341,55 @@ mod tests {
     /// 触碰 8787 端口与全局控制台的测试串行执行
     static PORT_TESTS_LOCK: TestMutex<()> = TestMutex::new(());
 
+    /// 等 8787 空闲再动它。PORT_TESTS_LOCK 只串行本测试进程——同一台机器上
+    /// 并行工单的测试（各自 worktree）也会占用 8787，瞬时争用属正常排队，
+    /// 最多等 120 秒；超时仍被占才按「环境不干净（残留网关）」失败。
+    fn wait_port_free() {
+        let deadline = Instant::now() + Duration::from_secs(120);
+        while port_in_use(GATEWAY_HOST, GATEWAY_PORT) {
+            assert!(
+                Instant::now() < deadline,
+                "8787 持续被占用超过 120 秒，测试环境不干净（可能有残留网关）"
+            );
+            std::thread::sleep(Duration::from_millis(500));
+        }
+    }
+
+    /// 占住 8787 给「端口被占」测试用：等待与绑定之间仍可能被并行测试抢先，
+    /// 故 bind 失败就重试（同一 120 秒预算），把瞬时争用变成排队。
+    fn occupy_port_for_test() -> TcpListener {
+        let deadline = Instant::now() + Duration::from_secs(120);
+        loop {
+            match TcpListener::bind((GATEWAY_HOST, GATEWAY_PORT)) {
+                Ok(listener) => return listener,
+                Err(_) => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "8787 持续被占用超过 120 秒，测试环境不干净（可能有残留网关）"
+                    );
+                    std::thread::sleep(Duration::from_millis(500));
+                }
+            }
+        }
+    }
+
+    /// 持 LIFECYCLE_LOCK 后执行 stop 并返回（耗时不含与并行测试排队等锁的时间）。
+    /// 等价于 stop_managed，只是把「持锁」与「计时」的责任留给调用方——
+    /// 直接用 stop_managed 计时会把锁排队时间算进优雅关停耗时（桩2 的强杀窗口
+    /// 持锁约 10 秒，桩1 满载下排队 + 0.7 秒优雅退出 > 10 秒断言，误报）。
+    fn timed_stop_locked(proc: &mut ManagedChild, timeout: Duration) -> (StopOutcome, Duration) {
+        let lifecycle = LIFECYCLE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let started = Instant::now();
+        let outcome = stop_managed_locked(proc, timeout);
+        let elapsed = started.elapsed();
+        drop(lifecycle);
+        // 与 stop_managed 收尾一致：解除广播期间设置的「忽略 CTRL_C」属性
+        unsafe {
+            SetConsoleCtrlHandler(None, 0);
+        }
+        (outcome, elapsed)
+    }
+
     fn manifest_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
     }
@@ -370,6 +400,40 @@ mod tests {
 
     fn fixtures_dir() -> PathBuf {
         manifest_dir().join("tests").join("fixtures")
+    }
+
+    /// 领一个空闲端口给桩当就绪信号用（先占后放，桩会立刻绑定）。
+    fn free_port() -> u16 {
+        let listener = TcpListener::bind((GATEWAY_HOST, 0)).expect("bind 随机端口");
+        listener.local_addr().expect("local_addr").port()
+    }
+
+    /// 等桩就绪：以「桩监听的 STUB_READY_PORT 可连接」为信号。
+    /// 端口可连 = node 引导完成、用户 JS 已运行、SIGINT 控制台处理器已注册。
+    /// 不等它就广播 CTRL_C 会在高负载下命中 node 引导窗口，桩以
+    /// STATUS_CONTROL_C_EXIT 默认终止（实测：全量并行测试时稳定复现的竞态）。
+    fn wait_stub_ready(port: u16) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if TcpStream::connect((GATEWAY_HOST, port)).is_ok() {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "桩 10 秒内未就绪（STUB_READY_PORT={port}）"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// spawn 一个带就绪信号的桩并等到它真正可用。
+    fn spawn_ready_stub(script: &Path) -> ManagedChild {
+        let ready_port = free_port();
+        let env = vec![("STUB_READY_PORT".to_string(), ready_port.to_string())];
+        let proc = spawn_managed(&sidecar_node(), script, &fixtures_dir(), &env)
+            .expect("spawn 桩");
+        wait_stub_ready(ready_port);
+        proc
     }
 
     #[test]
@@ -395,11 +459,8 @@ mod tests {
     #[test]
     fn 桩1_收到CTRL_C应优雅退出_耗时远小于10秒上限() {
         let script = fixtures_dir().join("stub_graceful.mjs");
-        let mut proc = spawn_managed(&sidecar_node(), &script, &fixtures_dir(), &[])
-            .expect("spawn 桩1");
-        let started = Instant::now();
-        let outcome = stop_managed(&mut proc, STOP_TIMEOUT);
-        let elapsed = started.elapsed();
+        let mut proc = spawn_ready_stub(&script);
+        let (outcome, elapsed) = timed_stop_locked(&mut proc, STOP_TIMEOUT);
 
         match outcome {
             StopOutcome::Graceful { exit_code } => {
@@ -417,11 +478,8 @@ mod tests {
     #[test]
     fn 桩2_忽略CTRL_C_须在10秒上限后被强杀且进程消失() {
         let script = fixtures_dir().join("stub_stubborn.mjs");
-        let mut proc = spawn_managed(&sidecar_node(), &script, &fixtures_dir(), &[])
-            .expect("spawn 桩2");
-        let started = Instant::now();
-        let outcome = stop_managed(&mut proc, STOP_TIMEOUT);
-        let elapsed = started.elapsed();
+        let mut proc = spawn_ready_stub(&script);
+        let (outcome, elapsed) = timed_stop_locked(&mut proc, STOP_TIMEOUT);
 
         assert!(matches!(outcome, StopOutcome::ForceKilled), "桩2 忽略 CTRL_C，应被强杀，实际 {:?}", outcome);
         assert!(
@@ -449,8 +507,8 @@ mod tests {
             gateway_dir: manifest.join("resources").join("gateway"),
             diagnostics_file: std::env::temp_dir().join("ag-relay-port-test").join("diag.jsonl"),
         };
-        // 占住 8787
-        let listener = TcpListener::bind((GATEWAY_HOST, GATEWAY_PORT)).expect("测试占口");
+        // 占住 8787（含等并行测试放口 + bind 重试）
+        let listener = occupy_port_for_test();
         let result = start_gateway_process(&paths);
         drop(listener);
         match result {
@@ -482,12 +540,23 @@ mod tests {
             diagnostics_file: diag.clone(),
         };
 
-        assert!(
-            !port_in_use(GATEWAY_HOST, GATEWAY_PORT),
-            "8787 已被占用，测试环境不干净（可能有残留网关）"
-        );
-
-        let mut gw = start_gateway_process(&paths).expect("启动真网关");
+        wait_port_free();
+        // 启动真网关：wait 与 start 之间仍可能被并行测试抢走 8787，PortAlreadyInUse 就重试
+        let smoke_deadline = Instant::now() + Duration::from_secs(120);
+        let mut gw = loop {
+            match start_gateway_process(&paths) {
+                Ok(gw) => break gw,
+                Err(GatewayError::PortAlreadyInUse { .. }) => {
+                    assert!(
+                        Instant::now() < smoke_deadline,
+                        "8787 被并行测试反复抢占，冒烟无法开始"
+                    );
+                    std::thread::sleep(Duration::from_millis(500));
+                    wait_port_free();
+                }
+                Err(e) => panic!("启动真网关失败：{e:?}"),
+            }
+        };
 
         // 断言失败也要把网关停掉，避免污染后续测试
         let result = catch_unwind(AssertUnwindSafe(|| {

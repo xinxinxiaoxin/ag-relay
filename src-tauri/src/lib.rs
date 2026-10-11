@@ -1,6 +1,7 @@
 pub mod gateway_commands;
 pub mod gateway_env;
 pub mod gateway_process;
+pub mod gateway_status;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -8,7 +9,8 @@ pub fn run() {
         .manage(gateway_commands::GatewayState::default())
         .invoke_handler(tauri::generate_handler![
             gateway_commands::start_gateway,
-            gateway_commands::stop_gateway
+            gateway_commands::stop_gateway,
+            gateway_status::get_status
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
