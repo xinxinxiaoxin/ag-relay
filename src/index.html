@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AG Relay · 网关</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="app-header">
+      <div class="app-title">
+        <h1>AG Relay · 网关</h1>
+        <p class="app-subtitle">relay-retry-proxy 桌面管理面板</p>
+      </div>
+    </header>
+
+    <main class="app-main">
+      <!-- 状态区（后续工单由 _relay/status 接口填充） -->
+      <section class="status-grid" aria-label="网关状态">
+        <div class="status-card" id="card-status">
+          <span class="status-label">运行状态</span>
+          <span class="status-value" data-key="state">—</span>
+        </div>
+        <div class="status-card" id="card-version">
+          <span class="status-label">版本</span>
+          <span class="status-value" data-key="version">—</span>
+        </div>
+        <div class="status-card" id="card-active">
+          <span class="status-label">在途请求数</span>
+          <span class="status-value" data-key="activeRequests">—</span>
+        </div>
+        <div class="status-card" id="card-uptime">
+          <span class="status-label">已运行时长</span>
+          <span class="status-value" data-key="uptime">—</span>
+        </div>
+      </section>
+
+      <!-- 操作按钮区（后续工单接入网关控制后启用） -->
+      <section class="actions" aria-label="网关操作">
+        <button type="button" id="btn-start" class="action-btn" disabled>启动网关</button>
+        <button type="button" id="btn-stop" class="action-btn" disabled>停止网关</button>
+        <button type="button" id="btn-restart" class="action-btn" disabled>安全重启</button>
+        <button type="button" id="btn-logs" class="action-btn" disabled>打开日志文件夹</button>
+        <button type="button" id="btn-quit" class="action-btn" disabled>退出</button>
+      </section>
+
+      <p class="placeholder-note">骨架阶段：以上按钮将在后续工单接入网关后启用。</p>
+    </main>
+
+    <script src="main.js"></script>
+  </body>
+</html>
