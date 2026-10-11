@@ -15,7 +15,7 @@
     </header>
 
     <main class="app-main">
-      <!-- 状态区（后续工单由 _relay/status 接口填充） -->
+      <!-- 状态区：每 3 秒轮询 /_relay/status 刷新（网关不可达显示未运行灰态，字段不可读显示未知） -->
       <section class="status-grid" aria-label="网关状态">
         <div class="status-card" id="card-status">
           <span class="status-label">运行状态</span>
@@ -55,7 +55,7 @@
       </section>
 
       <p class="action-hint" id="action-hint" aria-live="polite">
-        点击「启动网关」拉起本地 8787 网关；关闭窗口、托盘「退出」或面板「退出」都会先优雅停止网关（最多等 10 秒）再退出软件。
+        若 8787 已有网关在跑，面板会直接接管显示其状态；点击「启动网关」拉起本地网关；关闭窗口、托盘「退出」或面板「退出」都会退出软件并优雅停止本面板启动的网关（最多等 10 秒）。
       </p>
     </main>
 

@@ -7,6 +7,7 @@ pub mod gateway_commands;
 pub mod gateway_control;
 pub mod gateway_env;
 pub mod gateway_process;
+pub mod gateway_status;
 pub mod tray;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -43,6 +44,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             gateway_commands::start_gateway,
             gateway_commands::stop_gateway,
+            gateway_status::get_status,
             gateway_commands::restart_gateway,
             gateway_commands::open_logs_dir,
             autostart_commands::get_autostart,
