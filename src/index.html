@@ -35,6 +35,15 @@
         </div>
       </section>
 
+      <!-- T6：开机自启开关（状态区下方角落，样式从简） -->
+      <section class="autostart-line" aria-label="开机自启">
+        <span class="autostart-note" id="autostart-note" aria-live="polite"></span>
+        <label class="autostart-toggle">
+          <input type="checkbox" id="autostart-toggle" />
+          开机自启
+        </label>
+      </section>
+
       <!-- 操作按钮区：启动/停止经 Rust 命令层真实控制 8787 网关；其余按钮后续工单接入 -->
       <section class="actions" aria-label="网关操作">
         <button type="button" id="btn-start" class="action-btn enabled">启动网关</button>

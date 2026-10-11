@@ -123,6 +123,27 @@ pub fn shutdown_blocking_on_exit(app: &AppHandle) {
     let _ = stop_and_clear(&state);
 }
 
+/// 应用启动钩子（lib.rs setup 调用）：规范生命周期「软件启动→网关未运行则拉起」。
+/// 自启换新（T6）的目的就是「开机自启的是软件本身，它再拉起网关」，故随本票落地。
+/// 8787 已被占（含面板外已有实例/别的壳实例）则直接接管：不重复拉起、不报错；
+/// 失败静默（面板显示已停止，用户可手动启动），绝不阻塞窗口出现。
+pub fn auto_start_on_launch(app: &AppHandle) {
+    if crate::gateway_process::port_in_use(
+        crate::gateway_process::GATEWAY_HOST,
+        crate::gateway_process::GATEWAY_PORT,
+    ) {
+        return; // 已有网关在跑：接管语义，不重复拉起
+    }
+    let state: State<GatewayState> = app.state();
+    let paths = match resolve_runtime_paths(app) {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    if let Ok(child) = crate::gateway_process::start_gateway_process(&paths) {
+        state.store(child);
+    }
+}
+
 /// 运行期路径解析：node.exe / gateway 脚本目录都在主程序 exe 旁，
 /// 诊断日志在 %APPDATA%\ag-relay\logs\（identifier=ag-relay 决定）。
 fn resolve_runtime_paths(app: &AppHandle) -> Result<GatewayPaths, GatewayError> {
