@@ -1,4 +1,4 @@
-import { Fragment, useState, type ReactNode } from 'react'
+import { Fragment, type ReactNode } from 'react'
 import {
   Activity,
   ArrowRight,
@@ -16,23 +16,11 @@ import {
   Server,
   Settings2,
   Shield,
-  ShieldAlert,
   Square,
   TriangleAlert,
   X,
 } from 'lucide-react'
 
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogMedia,
-  AlertDialogTitle,
-} from '@/components/ui/alert-dialog'
 import { Alert, AlertAction, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -74,9 +62,6 @@ export function OverviewPage({ snapshot, events, onAction, onNavigate, appVersio
   // 停止/重启能力：受管运行中 或 外部实例 均保留（ADR-0003：外部非只读，但破坏性操作加二次确认）。
   const canStopOrRestart = isManaged || isExternal
   const primaryDisabled = !canStopOrRestart && !canStart
-  // 二次确认（AlertDialog）就地管理于本页：受管「安全重启」+ 外部实例「停止 / 重启」。
-  const [confirmRestartOpen, setConfirmRestartOpen] = useState(false)
-  const [externalConfirm, setExternalConfirm] = useState<null | 'stop' | 'restart'>(null)
   const inflight = metricsAvailable && snapshot.inflight !== null
     ? snapshot.inflight.toLocaleString('zh-CN')
     : '—'
@@ -96,17 +81,8 @@ export function OverviewPage({ snapshot, events, onAction, onNavigate, appVersio
   const primaryLabel = isPending
     ? state === 'starting' ? '正在启动' : '正在排空'
     : canStopOrRestart ? '停止网关' : '启动网关'
-  // 主控制按钮：未启动→启动；外部实例→停止前二次确认；受管运行中→直接停止。
-  const handlePrimary = () => {
-    if (canStart) { onAction('start'); return }
-    if (isExternal) { setExternalConfirm('stop'); return }
-    onAction('stop')
-  }
-  // 重启：外部实例→二次确认；受管→安全重启确认（排空 + 60 秒上限）。
-  const handleRestart = () => {
-    if (isExternal) setExternalConfirm('restart')
-    else setConfirmRestartOpen(true)
-  }
+  // 主控制按钮：未启动→启动，否则停止。破坏性守卫（外部二次确认 / 安全重启确认）集中在壳层 act()，本页只发意图。
+  const handlePrimary = () => { onAction(canStart ? 'start' : 'stop') }
   const controlNote = isExternal
     ? '该网关并非本窗口拉起（外部实例）。可停止或重启，但会先二次确认，并仅在经 supervisor 父链核实归属后执行——宁可不杀，不可误杀。'
     : state === 'running' && !isManaged
@@ -217,7 +193,7 @@ export function OverviewPage({ snapshot, events, onAction, onNavigate, appVersio
                 {isPending ? <LoaderCircle className="animate-spin motion-reduce:animate-none" aria-hidden="true" /> : canStopOrRestart ? <Square aria-hidden="true" /> : <Play aria-hidden="true" />}
                 {primaryLabel}
               </Button>
-              <Button variant="outline" disabled={!canStopOrRestart} aria-describedby="gateway-control-note" onClick={handleRestart} className="text-sm">
+              <Button variant="outline" disabled={!canStopOrRestart} aria-describedby="gateway-control-note" onClick={() => onAction('restart')} className="text-sm">
                 <RotateCw aria-hidden="true" />重启
               </Button>
               <Button variant="ghost" onClick={() => onAction('open-logs')} className="ml-auto text-sm">
@@ -383,51 +359,6 @@ export function OverviewPage({ snapshot, events, onAction, onNavigate, appVersio
           </CardContent>
         </Card>
       </section>
-
-      <AlertDialog open={confirmRestartOpen} onOpenChange={setConfirmRestartOpen}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>安全重启网关？</AlertDialogTitle>
-            <AlertDialogDescription>
-              将先优雅排空在途请求，再重启网关，最长等待 60 秒。网关受理重启不等于已恢复，恢复后面板状态会自动刷新。
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>取消</AlertDialogCancel>
-            <AlertDialogAction onClick={() => onAction('restart')}>确认重启</AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-
-      {/* 外部实例破坏性操作二次确认（ADR-0003）：外部网关非只读，停止/重启前须确认。 */}
-      <AlertDialog open={externalConfirm !== null} onOpenChange={(open) => { if (!open) setExternalConfirm(null) }}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogMedia>
-              <ShieldAlert aria-hidden="true" />
-            </AlertDialogMedia>
-            <AlertDialogTitle>{externalConfirm === 'restart' ? '重启外部实例？' : '停止外部实例？'}</AlertDialogTitle>
-            <AlertDialogDescription>
-              {externalConfirm === 'restart'
-                ? '将优雅排空在途请求后，重启监听端口上的外部网关，最长等待 60 秒。'
-                : '将优雅停止监听端口上的外部网关（先排空在途请求）。'}
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <div className="space-y-2 text-xs leading-5 text-muted-foreground">
-            <p>该网关<span className="font-medium text-foreground">并非本窗口拉起</span>（外部实例）。</p>
-            <p>仅在经 supervisor 父链核实其父进程后才会真正执行；无法核实则保持不动——宁可不杀，不可误杀。</p>
-          </div>
-          <AlertDialogFooter>
-            <AlertDialogCancel>取消</AlertDialogCancel>
-            <AlertDialogAction
-              variant="destructive"
-              onClick={() => { const action = externalConfirm; setExternalConfirm(null); if (action) onAction(action) }}
-            >
-              {externalConfirm === 'restart' ? '确认重启' : '确认停止'}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
     </div>
   )
 }

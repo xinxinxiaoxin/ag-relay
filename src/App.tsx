@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
-  ActivityIcon, ArrowUpRightIcon, CheckIcon, CopyIcon, FileTextIcon, MonitorIcon,
+  ActivityIcon, ArrowUpRightIcon, CheckIcon, CopyIcon, FileTextIcon, LogOutIcon, MonitorIcon,
   MoreHorizontalIcon, NetworkIcon, PlayIcon, RotateCwIcon, SearchIcon, Settings2Icon,
-  ShieldCheckIcon, SquareIcon, TerminalIcon,
+  ShieldAlertIcon, ShieldCheckIcon, SquareIcon, TerminalIcon,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { Card, CardContent } from '@/components/ui/card'
@@ -19,6 +19,10 @@ import {
   Command, CommandDialog, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList,
   CommandSeparator, CommandShortcut,
 } from '@/components/ui/command'
+import {
+  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription,
+  AlertDialogFooter, AlertDialogHeader, AlertDialogMedia, AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { TooltipProvider } from '@/components/ui/tooltip'
@@ -31,7 +35,7 @@ import { ENDPOINT, APP_VERSION, stateNames } from '@/lib/types'
 import type { ActivityEvent, GatewayAction, GatewayErrorInfo, GatewaySnapshot, PageId } from '@/lib/types'
 import {
   getStatus, deriveSnapshot, getRecentEvents, getAppVersion,
-  startGateway, stopGateway, restartGateway, openLogsDir, STATUS_POLL_MS,
+  startGateway, stopGateway, restartGateway, openLogsDir, quitApp, STATUS_POLL_MS,
 } from '@/lib/gateway'
 
 const pageNames: Record<PageId, string> = { overview: '网关总览', logs: '诊断日志', settings: '偏好设置' }
@@ -117,9 +121,15 @@ export default function App() {
   const [page, setPage] = useState<PageId>('overview')
   const [snapshot, setSnapshot] = useState<GatewaySnapshot>({ state: 'stopped', inflight: null, uptime: null, version: null, owner: 'none' })
   const [events, setEvents] = useState<ActivityEvent[]>([])
-  const [autostart, setAutostart] = useState(false)
   const [commandOpen, setCommandOpen] = useState(false)
   const [copyFallbackOpen, setCopyFallbackOpen] = useState(false)
+  // 破坏性操作二次确认（T8：集中到壳层，使命令面板 / 页面按钮 / 侧栏菜单共用同一组守卫）。
+  //  - confirmRestart：受管网关「安全重启」确认（排空 + 60 秒上限）。
+  //  - externalConfirm：外部网关「停止 / 重启」二次确认（ADR-0003，非只读）。
+  //  - confirmExit：退出应用确认（受管/外部语义不同，退出前优雅停网关）。
+  const [confirmRestart, setConfirmRestart] = useState(false)
+  const [externalConfirm, setExternalConfirm] = useState<null | 'stop' | 'restart'>(null)
+  const [confirmExit, setConfirmExit] = useState(false)
   // 变更型命令进行中的瞬态（受管启停/重启期间覆盖状态为 starting/draining，禁用控制并显示进度）。
   const [busy, setBusy] = useState<null | 'starting' | 'draining'>(null)
   // 网关生命周期错误态（T7，ADR-0003）：由变更型命令的真实失败结果驱动，在总览上持久、可操作地呈现。
@@ -257,15 +267,24 @@ export default function App() {
     else toast.error(`打开日志文件夹失败：${r.detail}`)
   }
 
+  // 动作分发（T8 守卫中枢）：命令面板 / 页面按钮 / 侧栏菜单统一经此进入，确保三处共享同一组守卫。
+  // 破坏性操作先弹二次确认，确认后才调真实命令（见下方 AlertDialog）；非破坏性动作直通。
+  //  - 停止/重启外部网关 → 外部实例二次确认（ADR-0003）；受管重启 → 安全重启确认；退出 → 退出确认。
   const act = (action: GatewayAction) => {
     setCommandOpen(false)
     switch (action) {
       case 'copy': void copyEndpoint(); break
       case 'start': void runStart(); break
-      case 'stop': void runStop(); break
-      case 'restart': void runRestart(); break
+      case 'stop':
+        if (snapshot.owner === 'external') setExternalConfirm('stop')
+        else void runStop()
+        break
+      case 'restart':
+        if (snapshot.owner === 'external') setExternalConfirm('restart')
+        else setConfirmRestart(true)
+        break
       case 'open-logs': void runOpenLogs(); break
-      case 'exit': toast('退出功能将随偏好设置页一并接入。'); break
+      case 'exit': setConfirmExit(true); break
     }
   }
 
@@ -275,6 +294,9 @@ export default function App() {
   const view: GatewaySnapshot = !busy && gatewayError?.portConflict && base.state === 'stopped'
     ? { ...base, state: 'error' }
     : base
+  // 命令面板动作可用性（与总览页按钮同源）：启动仅「未启动」可用；停止/重启 = 受管运行中 或 外部实例。
+  const canStart = view.state === 'stopped'
+  const canStopOrRestart = (view.state === 'running' && view.owner === 'window') || view.state === 'external'
   const common = { snapshot: view, events, onAction: act, onNavigate: navigate }
   return (
     <TooltipProvider delayDuration={200}>
@@ -290,7 +312,7 @@ export default function App() {
             <div className="mx-auto w-full max-w-[1280px]">
               {page === 'overview' && <OverviewPage {...common} appVersion={appVersion} gatewayError={gatewayError} onDismissError={() => setGatewayError(null)} />}
               {page === 'logs' && <LogsPage {...common} />}
-              {page === 'settings' && <SettingsPage {...common} autostart={autostart} onAutostartChange={value => { setAutostart(value); toast(value ? '占位：登录后启动将在后续版本接入' : '占位：已关闭（登录后启动将在后续版本接入）') }} />}
+              {page === 'settings' && <SettingsPage {...common} />}
             </div>
           </main>
           <footer className="flex flex-wrap items-center justify-between gap-2 border-t border-border bg-white/60 px-6 py-3.5 text-xs text-muted-foreground lg:px-8"><span>AG Relay · 本地网关工作空间</span><span className="tabular-nums">{APP_VERSION}</span></footer>
@@ -303,15 +325,95 @@ export default function App() {
           <CommandGroup heading="页面">{navigation.map(item => <CommandItem key={item.id} value={`${item.name} ${item.id}`} onSelect={() => navigate(item.id)}><item.icon /><span>{item.name}</span><CommandShortcut>↵</CommandShortcut></CommandItem>)}</CommandGroup>
           <CommandSeparator /><CommandGroup heading="网关操作">
             <CommandItem onSelect={() => act('copy')}><CopyIcon />复制连接地址</CommandItem>
-            <CommandItem disabled={snapshot.state !== 'stopped'} onSelect={() => act('start')}><PlayIcon />启动网关</CommandItem>
-            <CommandItem disabled={snapshot.state !== 'running'} onSelect={() => act('restart')}><RotateCwIcon />安全重启</CommandItem>
-            <CommandItem disabled={snapshot.state !== 'running'} onSelect={() => act('stop')}><SquareIcon />停止网关</CommandItem>
+            <CommandItem disabled={!canStart} onSelect={() => act('start')}><PlayIcon />启动网关</CommandItem>
+            <CommandItem disabled={!canStopOrRestart} onSelect={() => act('restart')}><RotateCwIcon />安全重启</CommandItem>
+            <CommandItem disabled={!canStopOrRestart} onSelect={() => act('stop')}><SquareIcon />停止网关</CommandItem>
             <CommandItem onSelect={() => act('open-logs')}><TerminalIcon />日志文件夹</CommandItem>
           </CommandGroup>
         </CommandList>
         </Command>
       </CommandDialog>
       <Dialog open={copyFallbackOpen} onOpenChange={setCopyFallbackOpen}><DialogContent><DialogHeader><DialogTitle>复制连接地址</DialogTitle><DialogDescription>系统暂不允许自动复制，请选中下方地址手动复制。</DialogDescription></DialogHeader><Input aria-label="手动复制的连接地址" value={ENDPOINT} readOnly autoFocus onFocus={event => event.currentTarget.select()} className="font-mono" /></DialogContent></Dialog>
+
+      {/* 受管网关「安全重启」确认（排空 + 60 秒上限）。页面按钮与命令面板共用。 */}
+      <AlertDialog open={confirmRestart} onOpenChange={setConfirmRestart}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>安全重启网关？</AlertDialogTitle>
+            <AlertDialogDescription>
+              将先优雅排空在途请求，再重启网关，最长等待 60 秒。网关受理重启不等于已恢复，恢复后面板状态会自动刷新。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction onClick={() => void runRestart()}>确认重启</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* 外部网关破坏性操作二次确认（ADR-0003：外部实例非只读，停止/重启前须确认）。页面按钮与命令面板共用。 */}
+      <AlertDialog open={externalConfirm !== null} onOpenChange={(open) => { if (!open) setExternalConfirm(null) }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogMedia>
+              <ShieldAlertIcon aria-hidden="true" />
+            </AlertDialogMedia>
+            <AlertDialogTitle>{externalConfirm === 'restart' ? '重启外部实例？' : '停止外部实例？'}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {externalConfirm === 'restart'
+                ? '将优雅排空在途请求后，重启监听端口上的外部网关，最长等待 60 秒。'
+                : '将优雅停止监听端口上的外部网关（先排空在途请求）。'}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <div className="space-y-2 text-xs leading-5 text-muted-foreground">
+            <p>该网关<span className="font-medium text-foreground">并非本窗口拉起</span>（外部实例）。</p>
+            <p>仅在经 supervisor 父链核实其父进程后才会真正执行；无法核实则保持不动——宁可不杀，不可误杀。</p>
+          </div>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              onClick={() => { if (externalConfirm === 'restart') void runRestart(); else void runStop() }}
+            >
+              {externalConfirm === 'restart' ? '确认重启' : '确认停止'}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* 退出应用确认（T3 语义，受管/外部网关退出不同）。侧栏菜单与偏好设置页的退出按钮共用。 */}
+      <AlertDialog open={confirmExit} onOpenChange={setConfirmExit}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogMedia>
+              <LogOutIcon aria-hidden="true" />
+            </AlertDialogMedia>
+            <AlertDialogTitle>退出 AG Relay？</AlertDialogTitle>
+            <AlertDialogDescription>
+              退出前会先优雅排空在途请求（最多等待 10 秒），再停止网关并退出应用。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <div className="space-y-2 text-xs leading-5 text-muted-foreground">
+            <p>
+              <span className="font-medium text-foreground">受管网关</span>
+              （本窗口拉起）：会被优雅停止，超时则强制结束其进程树。
+              {view.owner === 'window' ? '当前实例由本窗口管理。' : ''}
+            </p>
+            <p>
+              <span className="font-medium text-foreground">外部网关</span>
+              （外部实例）：仅在核实其父进程后一并优雅停止，否则保持不动（宁可不杀，不可误杀）。
+              {view.owner === 'external' ? '当前监听端口上为外部实例。' : ''}
+            </p>
+          </div>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction variant="destructive" onClick={() => void quitApp()}>
+              退出应用
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
       <Toaster theme="light" position="bottom-right" closeButton />
       <div className="sr-only" aria-live="polite" aria-atomic="true">{stateNames[view.state]}。{view.inflight === null ? '暂无运行数据' : `在途请求 ${view.inflight} 个`}</div>
     </TooltipProvider>

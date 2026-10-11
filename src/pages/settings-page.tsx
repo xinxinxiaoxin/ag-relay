@@ -1,18 +1,6 @@
 import { useEffect, useId, useState } from 'react'
 import { Copy, LogOut } from 'lucide-react'
 
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogMedia,
-  AlertDialogTitle,
-  AlertDialogTrigger,
-} from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
 import {
   Card,
@@ -30,13 +18,12 @@ import {
   FALLBACK_APP_VERSION,
   getAppVersion,
   getAutostart,
-  quitApp,
   setAutostartEnabled,
 } from '@/lib/gateway'
 
 export function SettingsPage(props: SettingsPageProps) {
   const id = useId()
-  const { snapshot, onAction } = props
+  const { onAction } = props
 
   // 开机自启：挂载读 get_autostart 实况；切换写 set_autostart_enabled 后回读，往返与注册表一致（失败回弹）。
   const [autostart, setAutostart] = useState(false)
@@ -76,10 +63,6 @@ export function SettingsPage(props: SettingsPageProps) {
       active = false
     }
   }, [])
-
-  // 退出确认：受管/外部网关退出语义不同（见 README「关(退出语义)」/ GLOSSARY）。
-  const managedRunning = snapshot.owner === 'window'
-  const externalRunning = snapshot.owner === 'external'
 
   return (
     <section
@@ -202,50 +185,15 @@ export function SettingsPage(props: SettingsPageProps) {
               退出前会先优雅排空在途请求（最多等待 10 秒），再停止网关并退出。
             </CardDescription>
           </div>
-          <AlertDialog>
-            <AlertDialogTrigger asChild>
-              <Button
-                type="button"
-                variant="outline"
-                className="text-destructive hover:text-destructive"
-              >
-                <LogOut data-icon="inline-start" aria-hidden="true" />
-                退出应用
-              </Button>
-            </AlertDialogTrigger>
-            <AlertDialogContent>
-              <AlertDialogHeader>
-                <AlertDialogMedia>
-                  <LogOut aria-hidden="true" />
-                </AlertDialogMedia>
-                <AlertDialogTitle>退出 AG Relay？</AlertDialogTitle>
-                <AlertDialogDescription>
-                  退出前会先优雅排空在途请求（最多等待 10 秒），再停止网关并退出应用。
-                </AlertDialogDescription>
-              </AlertDialogHeader>
-              <div className="space-y-2 text-xs leading-5 text-muted-foreground">
-                <p>
-                  <span className="font-medium text-foreground">受管网关</span>
-                  （本窗口拉起）：会被优雅停止，超时则强制结束其进程树。
-                  {managedRunning ? '当前实例由本窗口管理。' : ''}
-                </p>
-                <p>
-                  <span className="font-medium text-foreground">外部网关</span>
-                  （外部实例）：仅在核实其父进程后一并优雅停止，否则保持不动（宁可不杀，不可误杀）。
-                  {externalRunning ? '当前监听端口上为外部实例。' : ''}
-                </p>
-              </div>
-              <AlertDialogFooter>
-                <AlertDialogCancel>取消</AlertDialogCancel>
-                <AlertDialogAction
-                  variant="destructive"
-                  onClick={() => void quitApp()}
-                >
-                  退出应用
-                </AlertDialogAction>
-              </AlertDialogFooter>
-            </AlertDialogContent>
-          </AlertDialog>
+          <Button
+            type="button"
+            variant="outline"
+            className="text-destructive hover:text-destructive"
+            onClick={() => onAction('exit')}
+          >
+            <LogOut data-icon="inline-start" aria-hidden="true" />
+            退出应用
+          </Button>
         </CardContent>
       </Card>
     </section>

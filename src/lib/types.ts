@@ -35,10 +35,8 @@ export interface GatewayErrorInfo {
   title: string
   detail: string
 }
-export interface SettingsPageProps extends PageProps {
-  autostart: boolean
-  onAutostartChange: (value: boolean) => void
-}
+// 偏好设置页 props：目前与通用页 props 相同（开机自启由页面自管读写，退出走 onAction('exit')）。
+export type SettingsPageProps = PageProps
 export const ENDPOINT = 'http://127.0.0.1:8787'
 export const DISPLAY_ENDPOINT = '127.0.0.1:8787'
 export const APP_VERSION = 'v0.1.0'
