@@ -62,13 +62,13 @@ $env:CARGO_TARGET_DIR='D:\zcode项目\ag-relay-build\target'; npm install; npm r
 
 | 项 | 值 |
 | --- | --- |
-| 打包日期 | 2026-10-11 19:59（UTC+8） |
+| 打包日期 | 2026-10-11 21:13（UTC+8，含 code-review 修复，main `06241a3`） |
 | 上游仓库提交 | `28b764d`（xinxinxiaoxin/relay-retry-proxy，fix: Codex 跨资源错误最多尝试 5 次后直接报错） |
 | `relay-retry-proxy.mjs` sha256 | `e8395e0f90fe46bf1059bfcbac77e65d887d09d4ed5057490f85847e5cde85dc` |
 | `relay-supervisor.mjs` sha256 | `f2f030b46999f84afc77f7f92643075c1d1f1ddf7ad3c327fbd92f5593dff77c` |
 | `relay-start-check.mjs` sha256 | `bb54cc7255b4f570ba1bdcfda255f19f0ca0a70fa6d028d0ed4e44f8146037c4` |
 | `gateway-config.bat` sha256 | `102865c82e8785fcf1630260f25db32e2b9f4ba3a990c768bfc9fce3deaa1faa`（环境变量真值，无密钥） |
-| `ag-relay.exe` sha256 | `d4e35a4bb68b17fc92343a99c9cb5abb340bb73261508602f17cd5fdfd962001`（隔离 target-t7 release 产物，9,314,304 字节） |
+| `ag-relay.exe` sha256 | `10029eba3f33506d8bde32108842909f312378d12bb648022149318297964f2a`（`target\release\ag-relay.exe`，含审查修复：外部网关停止语义、202 契约、停止后再启动修复等） |
 | 本票验收证据 | `D:\zcode项目\ag-relay-notes\t7-verification.md`（7 条验收逐项记录） |
 
 ## 冒烟自检
