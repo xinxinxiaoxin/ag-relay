@@ -2,7 +2,15 @@
 
 AG Relay —— relay-retry-proxy 网关的 Tauri 桌面封装。
 
-规范与工单见仓库 Issues（规范 #1，骨架工单 #2）。
+规范与工单见仓库 Issues（规范 #1，骨架工单 #2，网关工单 #3）。
+
+## 日常使用
+
+双击 `ag-relay.exe`（自用裸目录产物：`ag-relay.exe` 旁边必须有 `node.exe` 和 `resources\gateway\`，整个 release 目录一起拷贝即可，无需安装、无需系统 Node）：
+
+- **开**：点「启动网关」，本地 `127.0.0.1:8787` 网关即拉起（端口已被占用时会明确提示，不重复拉起）。
+- **关**：直接关闭窗口即可——退出时网关自动优雅排空（在途请求清零后退出），最多等 10 秒；超时则强制结束整个网关进程树。也可以点「停止网关」手动停。
+- 诊断日志写在 `%APPDATA%\ag-relay\logs\relay-diagnostics.jsonl`。
 
 ## 构建（一条命令打包 exe）
 
