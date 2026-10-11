@@ -100,7 +100,8 @@ export function deriveSnapshot(status: StatusSnapshot): GatewaySnapshot {
 // 应用版本（运行版本「主显」）：优先 Tauri app.getVersion()（取自 tauri.conf.json 的 version），
 // 浏览器（无 window.__TAURI__）或权限/运行时异常时回退常量 "0.1.0"。返回裸语义版本（无 v 前缀）。
 // SHARED CONTRACT（T3/合并者）：若将来必须走 Rust 命令，统一命名 get_app_version → String。
-const FALLBACK_APP_VERSION = '0.1.0'
+// settings-page 以此为初值，故导出。
+export const FALLBACK_APP_VERSION = '0.1.0'
 export async function getAppVersion(): Promise<string> {
   const getVersion = tauriGlobal()?.app?.getVersion
   if (typeof getVersion === 'function') {
@@ -213,24 +214,7 @@ export async function setAutostartEnabled(
     return { kind: 'failed', reason: String(error) }
   }
 }
-/**
- * 应用版本（Tauri 配置 version，如 0.1.0）——与 T2 共享的 helper。
- * Tauri 内走全局 window.__TAURI__.app.getVersion()（withGlobalTauri）；
- * 浏览器或调用失败回退常量。返回裸版本号，显示层自行加 "v" 前缀。
- */
-export const FALLBACK_APP_VERSION = '0.1.0'
-
-export async function getAppVersion(): Promise<string> {
-  const app = (
-    globalThis as { __TAURI__?: { app?: { getVersion?: () => Promise<string> } } }
-  ).__TAURI__?.app
-  if (!app?.getVersion) return FALLBACK_APP_VERSION
-  try {
-    return await app.getVersion()
-  } catch {
-    return FALLBACK_APP_VERSION
-  }
-}
+// getAppVersion / FALLBACK_APP_VERSION 已与 T2 版本去重（见上方 getAppVersion 定义）。
 
 /**
  * 面板退出：调用现有 quit_app（触发 RunEvent::Exit 优雅停网关 ≤10s——
