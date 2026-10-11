@@ -170,3 +170,77 @@ export async function getRecentEvents(): Promise<ActivityEvent[]> {
   // T5 落地后：Tauri 内改为 invoke 真实命令，浏览器仍回退 MOCK_EVENTS。
   return MOCK_EVENTS
 }
+
+// ── T3 偏好设置接线（additive；getAppVersion 与 T2 共享，合并时去重） ──
+
+/** 开机自启状态（get_autostart 返回；字段原样 snake_case）。 */
+export interface AutostartStatus {
+  enabled: boolean
+  exe_path: string | null
+  notes: string[]
+}
+
+/** set_autostart_enabled 返回（serde tag=kind）。 */
+export type AutostartSetResult =
+  | { kind: 'ok'; status: AutostartStatus }
+  | { kind: 'failed'; reason: string }
+
+// 浏览器回退：默认未开启（仅供开发渲染/截图）。
+const MOCK_AUTOSTART: AutostartStatus = { enabled: false, exe_path: null, notes: [] }
+
+/** 读取开机自启实况：Tauri 内走真实 get_autostart，浏览器回退 mock。 */
+export async function getAutostart(): Promise<AutostartStatus> {
+  if (!isTauri()) return MOCK_AUTOSTART
+  try {
+    return await invoke<AutostartStatus>('get_autostart')
+  } catch {
+    return MOCK_AUTOSTART
+  }
+}
+
+/**
+ * 写开机自启（即时写注册表 Run 键）。调用方据结果回读实况：
+ * ok → 用 status.enabled；failed → 另行 getAutostart() 回读真值并回弹。
+ * 浏览器回退：回显 ok，使开关可在截图里切换。
+ */
+export async function setAutostartEnabled(
+  enabled: boolean,
+): Promise<AutostartSetResult> {
+  if (!isTauri()) return { kind: 'ok', status: { enabled, exe_path: null, notes: [] } }
+  try {
+    return await invoke<AutostartSetResult>('set_autostart_enabled', { enabled })
+  } catch (error) {
+    return { kind: 'failed', reason: String(error) }
+  }
+}
+/**
+ * 应用版本（Tauri 配置 version，如 0.1.0）——与 T2 共享的 helper。
+ * Tauri 内走全局 window.__TAURI__.app.getVersion()（withGlobalTauri）；
+ * 浏览器或调用失败回退常量。返回裸版本号，显示层自行加 "v" 前缀。
+ */
+export const FALLBACK_APP_VERSION = '0.1.0'
+
+export async function getAppVersion(): Promise<string> {
+  const app = (
+    globalThis as { __TAURI__?: { app?: { getVersion?: () => Promise<string> } } }
+  ).__TAURI__?.app
+  if (!app?.getVersion) return FALLBACK_APP_VERSION
+  try {
+    return await app.getVersion()
+  } catch {
+    return FALLBACK_APP_VERSION
+  }
+}
+
+/**
+ * 面板退出：调用现有 quit_app（触发 RunEvent::Exit 优雅停网关 ≤10s——
+ * 受管网关与经核实的外部网关一视同仁，再退出）。浏览器回退为空操作。
+ */
+export async function quitApp(): Promise<void> {
+  if (!isTauri()) return
+  try {
+    await invoke<void>('quit_app')
+  } catch {
+    // 退出收尾时 IPC 可能断开，静默即可。
+  }
+}

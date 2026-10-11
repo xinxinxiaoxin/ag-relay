@@ -1,6 +1,18 @@
-import { useId } from 'react'
+import { useEffect, useId, useState } from 'react'
 import { Copy, LogOut } from 'lucide-react'
 
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogMedia,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
 import {
   Card,
@@ -13,14 +25,61 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Separator } from '@/components/ui/separator'
 import { Switch } from '@/components/ui/switch'
+import { DISPLAY_ENDPOINT, type SettingsPageProps } from '@/lib/types'
 import {
-  APP_VERSION,
-  DISPLAY_ENDPOINT,
-  type SettingsPageProps,
-} from '@/lib/types'
+  FALLBACK_APP_VERSION,
+  getAppVersion,
+  getAutostart,
+  quitApp,
+  setAutostartEnabled,
+} from '@/lib/gateway'
 
 export function SettingsPage(props: SettingsPageProps) {
   const id = useId()
+  const { snapshot, onAction } = props
+
+  // 开机自启：挂载读 get_autostart 实况；切换写 set_autostart_enabled 后回读，往返与注册表一致（失败回弹）。
+  const [autostart, setAutostart] = useState(false)
+  const [autostartBusy, setAutostartBusy] = useState(false)
+
+  useEffect(() => {
+    let active = true
+    void getAutostart().then((status) => {
+      if (active) setAutostart(status.enabled)
+    })
+    return () => {
+      active = false
+    }
+  }, [])
+
+  const handleAutostartChange = async (next: boolean) => {
+    setAutostartBusy(true)
+    setAutostart(next) // 乐观反馈，随后以命令结果校正
+    const result = await setAutostartEnabled(next)
+    if (result.kind === 'ok') {
+      setAutostart(result.status.enabled) // 以注册表实况为准
+    } else {
+      const status = await getAutostart() // 失败：回读真值，开关回弹
+      setAutostart(status.enabled)
+    }
+    setAutostartBusy(false)
+  }
+
+  // 应用版本：Tauri 取 window.__TAURI__.app.getVersion()，浏览器回退常量；显示加 "v" 前缀。
+  const [appVersion, setAppVersion] = useState(FALLBACK_APP_VERSION)
+  useEffect(() => {
+    let active = true
+    void getAppVersion().then((version) => {
+      if (active) setAppVersion(version)
+    })
+    return () => {
+      active = false
+    }
+  }, [])
+
+  // 退出确认：受管/外部网关退出语义不同（见 README「关(退出语义)」/ GLOSSARY）。
+  const managedRunning = snapshot.owner === 'window'
+  const externalRunning = snapshot.owner === 'external'
 
   return (
     <section
@@ -63,8 +122,9 @@ export function SettingsPage(props: SettingsPageProps) {
               </div>
               <Switch
                 id={`${id}-autostart`}
-                checked={props.autostart}
-                onCheckedChange={props.onAutostartChange}
+                checked={autostart}
+                onCheckedChange={(value) => void handleAutostartChange(value)}
+                disabled={autostartBusy}
                 aria-describedby={`${id}-autostart-hint`}
                 className="mt-0.5 shrink-0"
               />
@@ -106,7 +166,7 @@ export function SettingsPage(props: SettingsPageProps) {
                   type="button"
                   variant="outline"
                   aria-label="复制连接地址"
-                  onClick={() => props.onAction('copy')}
+                  onClick={() => onAction('copy')}
                 >
                   <Copy data-icon="inline-start" aria-hidden="true" />
                   复制
@@ -119,7 +179,7 @@ export function SettingsPage(props: SettingsPageProps) {
             <div className="space-y-4">
               <dl className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
                 <dt className="text-sm text-muted-foreground">应用版本</dt>
-                <dd className="text-sm font-medium tabular-nums">{APP_VERSION}</dd>
+                <dd className="text-sm font-medium tabular-nums">v{appVersion}</dd>
               </dl>
               <div className="space-y-1.5">
                 <h3 className="text-sm font-medium leading-5">外部实例</h3>
@@ -139,18 +199,53 @@ export function SettingsPage(props: SettingsPageProps) {
               <h2>退出应用</h2>
             </CardTitle>
             <CardDescription className="text-xs leading-5">
-              退出前先排空自有网关，外部实例不受此操作影响。
+              退出前会先优雅排空在途请求（最多等待 10 秒），再停止网关并退出。
             </CardDescription>
           </div>
-          <Button
-            type="button"
-            variant="outline"
-            className="text-destructive hover:text-destructive"
-            onClick={() => props.onAction('exit')}
-          >
-            <LogOut data-icon="inline-start" aria-hidden="true" />
-            退出应用
-          </Button>
+          <AlertDialog>
+            <AlertDialogTrigger asChild>
+              <Button
+                type="button"
+                variant="outline"
+                className="text-destructive hover:text-destructive"
+              >
+                <LogOut data-icon="inline-start" aria-hidden="true" />
+                退出应用
+              </Button>
+            </AlertDialogTrigger>
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogMedia>
+                  <LogOut aria-hidden="true" />
+                </AlertDialogMedia>
+                <AlertDialogTitle>退出 AG Relay？</AlertDialogTitle>
+                <AlertDialogDescription>
+                  退出前会先优雅排空在途请求（最多等待 10 秒），再停止网关并退出应用。
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <div className="space-y-2 text-xs leading-5 text-muted-foreground">
+                <p>
+                  <span className="font-medium text-foreground">受管网关</span>
+                  （本窗口拉起）：会被优雅停止，超时则强制结束其进程树。
+                  {managedRunning ? '当前实例由本窗口管理。' : ''}
+                </p>
+                <p>
+                  <span className="font-medium text-foreground">外部网关</span>
+                  （外部实例）：仅在核实其父进程后一并优雅停止，否则保持不动（宁可不杀，不可误杀）。
+                  {externalRunning ? '当前监听端口上为外部实例。' : ''}
+                </p>
+              </div>
+              <AlertDialogFooter>
+                <AlertDialogCancel>取消</AlertDialogCancel>
+                <AlertDialogAction
+                  variant="destructive"
+                  onClick={() => void quitApp()}
+                >
+                  退出应用
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
         </CardContent>
       </Card>
     </section>
