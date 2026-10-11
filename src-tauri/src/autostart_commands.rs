@@ -43,13 +43,12 @@ pub enum AutostartSetResult {
     Failed { reason: String },
 }
 
-fn status_of(app: &AppHandle, notes: Vec<String>) -> AutostartStatus {
+fn status_of(notes: Vec<String>) -> AutostartStatus {
     let store = AutostartStore::production();
     let exe_path = std::env::current_exe()
         .ok()
         .map(|p| p.to_string_lossy().into_owned());
     let enabled = autostart::current_enabled(&store).unwrap_or(false);
-    let _ = app; // 预留：后续需要 app_data_dir 时使用
     AutostartStatus { enabled, exe_path, notes }
 }
 
@@ -75,13 +74,12 @@ pub fn sync_on_launch(app: &AppHandle) {
 #[tauri::command]
 pub fn get_autostart(app: AppHandle) -> AutostartStatus {
     let state: State<AutostartUiState> = app.state();
-    let notes = state.take_notes();
-    status_of(&app, notes)
+    status_of(state.take_notes())
 }
 
 /// 手动开关开机自启，即时生效（写注册表）。
 #[tauri::command]
-pub fn set_autostart_enabled(app: AppHandle, enabled: bool) -> AutostartSetResult {
+pub fn set_autostart_enabled(enabled: bool) -> AutostartSetResult {
     let store = AutostartStore::production();
     let exe = match std::env::current_exe() {
         Ok(p) => p,
@@ -93,7 +91,7 @@ pub fn set_autostart_enabled(app: AppHandle, enabled: bool) -> AutostartSetResul
     };
     match autostart::set_enabled(&store, &exe, enabled) {
         Ok(_) => AutostartSetResult::Ok {
-            status: status_of(&app, Vec::new()),
+            status: status_of(Vec::new()),
         },
         Err(e) => AutostartSetResult::Failed { reason: e.to_string() },
     }

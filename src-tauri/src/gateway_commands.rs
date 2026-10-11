@@ -41,9 +41,13 @@ impl GatewayState {
 pub enum GatewayActionResult {
     /// 网关已拉起（supervisor PID）
     Started { supervisor_pid: u32 },
-    /// 网关已停止（graceful=优雅排空；false 表示 10 秒超时后强杀）
+    /// 本壳受管的网关已停止（graceful=优雅排空；false 表示 10 秒超时后强杀）
     Stopped { graceful: bool, exit_code: Option<i32> },
-    /// 当前没有由本壳启动的网关（重复停止是安全的幂等操作）
+    /// 面板外启动的外部网关已停止（F1：本壳未受管但 8787 上核实到了可停的 supervisor）
+    StoppedExternal { graceful: bool },
+    /// 检测到疑似外部网关，但 pid 链无法核实（宁可不杀不可误杀），未执行停止
+    ExternalStopAbandoned,
+    /// 当前没有可识别的网关在运行（重复停止是安全的幂等操作）
     NotRunning,
     /// 启动/停止失败，reason 为机器可读枚举
     Failed { reason: GatewayFailureReason },
@@ -96,16 +100,16 @@ pub async fn start_gateway(app: AppHandle) -> GatewayActionResult {
 }
 
 /// 停止网关（与 UI「停止网关」按钮同一命令）：CTRL_C 优雅排空 ≤10 秒，超时强杀整树。
-/// 重复调用安全（无运行中网关时返回 NotRunning）。
+/// F1：本壳没有受管网关时，8787 上若有外部网关（面板外启动的实例）同样优雅停止——
+/// 「关了就彻底关了」。重复调用安全（无可识别网关时返回 NotRunning）。
 #[tauri::command]
 pub async fn stop_gateway(app: AppHandle) -> GatewayActionResult {
     let state: State<GatewayState> = app.state();
-    stop_and_clear(&state)
+    stop_and_clear(&app, &state)
 }
 
-fn stop_and_clear(state: &State<GatewayState>) -> GatewayActionResult {
+fn stop_and_clear(app: &AppHandle, state: &State<GatewayState>) -> GatewayActionResult {
     match state.take_for_stop() {
-        None => GatewayActionResult::NotRunning,
         Some(mut gw) => match stop_managed(&mut gw, STOP_TIMEOUT) {
             crate::gateway_process::StopOutcome::Graceful { exit_code } => {
                 GatewayActionResult::Stopped { graceful: true, exit_code }
@@ -114,6 +118,31 @@ fn stop_and_clear(state: &State<GatewayState>) -> GatewayActionResult {
                 GatewayActionResult::Stopped { graceful: false, exit_code: None }
             }
         },
+        // F1：无受管网关——8787 上有可核实的外部网关则优雅停止
+        None => stop_external(app),
+    }
+}
+
+/// 外部网关停止路径（F1）：识别→广播 CTRL_C→等≤10s→taskkill 兜底，
+/// 结果按白名单记入壳侧日志（shell-exit.log 的 event=external_stop_*）。
+fn stop_external(app: &AppHandle) -> GatewayActionResult {
+    use crate::app_exit::ExternalStopEvent;
+    use crate::gateway_process::ExternalStopOutcome;
+
+    match crate::gateway_process::stop_external_gateway(GATEWAY_PORT, STOP_TIMEOUT) {
+        ExternalStopOutcome::NoGateway => GatewayActionResult::NotRunning,
+        ExternalStopOutcome::StoppedGraceful => {
+            crate::app_exit::log_external_stop(app, ExternalStopEvent::Graceful);
+            GatewayActionResult::StoppedExternal { graceful: true }
+        }
+        ExternalStopOutcome::ForceKilled => {
+            crate::app_exit::log_external_stop(app, ExternalStopEvent::Forced);
+            GatewayActionResult::StoppedExternal { graceful: false }
+        }
+        ExternalStopOutcome::Abandoned => {
+            crate::app_exit::log_external_stop(app, ExternalStopEvent::Abandoned);
+            GatewayActionResult::ExternalStopAbandoned
+        }
     }
 }
 
@@ -177,11 +206,12 @@ pub async fn open_logs_dir(app: AppHandle) -> LogsDirResult {
 }
 
 /// 应用退出钩子（RunEvent::Exit）：同步阻塞地停掉网关，≤10 秒。
-/// 幂等：按钮已停过 / 从未启动过都是 no-op。刻意在 Exit 事件内做——
+/// 幂等：按钮已停过 / 从未启动过都是 no-op。F1：本壳没有受管网关但 8787 上有
+/// 外部网关时同样优雅停止（关了就彻底关了）。刻意在 Exit 事件内做——
 /// tauri 事件循环回调之后直接 std::process::exit，`.run()` 之后的代码不保证执行。
 pub fn shutdown_blocking_on_exit(app: &AppHandle) {
     let state: State<GatewayState> = app.state();
-    let _ = stop_and_clear(&state);
+    let _ = stop_and_clear(app, &state);
 }
 
 /// 应用启动钩子（lib.rs setup 调用）：规范生命周期「软件启动→网关未运行则拉起」。

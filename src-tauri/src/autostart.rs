@@ -6,16 +6,23 @@ use std::path::Path;
 use winreg::enums::{HKEY_CURRENT_USER, KEY_READ, KEY_WRITE};
 use winreg::RegKey;
 
-/// 注册表操作失败（包装 io 错误信息）。
+/// 自启相关错误（F2 错误诚实化：注册表环节与 PowerShell/COM 脚本环节分开命名，
+/// 不得把脚本环节失败显示成「注册表操作失败」误导排查方向）。
 #[derive(Debug)]
 pub enum AutostartError {
+    /// 注册表（Run 键 / opt-out 标记）读写失败。
     Registry(String),
+    /// 非注册表的环境操作失败：PowerShell/COM（解析、删除旧 lnk）与启动目录探测。
+    ScriptStep(String),
 }
 
 impl fmt::Display for AutostartError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             AutostartError::Registry(why) => write!(f, "注册表操作失败：{why}"),
+            AutostartError::ScriptStep(why) => {
+                write!(f, "自启脚本环节失败（PowerShell/COM/启动目录）：{why}")
+            }
         }
     }
 }
@@ -67,8 +74,9 @@ pub enum LegacyLnkOutcome {
 }
 
 impl AutostartError {
-    fn ps(why: String) -> Self {
-        AutostartError::Registry(why) // PowerShell 环节与注册表同归「环境操作失败」
+    /// PowerShell/COM/启动目录等非注册表环节的失败（F2：不再混入 Registry 变体）。
+    fn script_step(why: String) -> Self {
+        AutostartError::ScriptStep(why)
     }
 }
 
@@ -104,32 +112,32 @@ fn run_powershell(script: &str) -> Result<String, AutostartError> {
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .map_err(|e| AutostartError::ps(format!("启动 PowerShell 失败：{e}")))?;
+        .map_err(|e| AutostartError::script_step(format!("启动 PowerShell 失败：{e}")))?;
 
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
                 let output = child.wait_with_output().map_err(|e| {
-                    AutostartError::ps(format!("读取 PowerShell 输出失败：{e}"))
+                    AutostartError::script_step(format!("读取 PowerShell 输出失败：{e}"))
                 })?;
                 let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
                 if status.success() {
                     return Ok(stdout);
                 }
-                return Err(AutostartError::ps(format!(
+                return Err(AutostartError::script_step(format!(
                     "PowerShell 退出码 {:?}：{}",
                     status.code(),
                     String::from_utf8_lossy(&output.stderr).trim()
                 )));
             }
             Ok(None) => {}
-            Err(e) => return Err(AutostartError::ps(format!("等待 PowerShell 失败：{e}"))),
+            Err(e) => return Err(AutostartError::script_step(format!("等待 PowerShell 失败：{e}"))),
         }
         if Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
-            return Err(AutostartError::ps("PowerShell 执行超时（20 秒）".to_string()));
+            return Err(AutostartError::script_step("PowerShell 执行超时（20 秒）".to_string()));
         }
         std::thread::sleep(Duration::from_millis(25));
     }
@@ -148,7 +156,7 @@ pub fn resolve_lnk(lnk: &Path) -> Result<LnkInfo, AutostartError> {
         a: String,
     }
     let raw: Raw = serde_json::from_str(stdout.trim())
-        .map_err(|e| AutostartError::ps(format!("解析 lnk 输出失败：{e}；原文：{stdout:.120}")))?;
+        .map_err(|e| AutostartError::script_step(format!("解析 lnk 输出失败：{e}；原文：{stdout:.120}")))?;
     Ok(LnkInfo { target: raw.t, arguments: raw.a })
 }
 
@@ -162,7 +170,7 @@ fn delete_lnk(lnk: &Path) -> Result<(), AutostartError> {
 /// 当前用户启动文件夹：%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup。
 pub fn user_startup_dir() -> Result<std::path::PathBuf, AutostartError> {
     let appdata = std::env::var("APPDATA")
-        .map_err(|e| AutostartError::ps(format!("读取 APPDATA 环境变量失败：{e}")))?;
+        .map_err(|e| AutostartError::script_step(format!("读取 APPDATA 环境变量失败：{e}")))?;
     Ok(std::path::PathBuf::from(appdata)
         .join(r"Microsoft\Windows\Start Menu\Programs\Startup"))
 }
@@ -447,6 +455,24 @@ mod tests {
 
     fn cleanup(store: &AutostartStore) {
         store.delete_all_test_keys();
+    }
+
+    /// F2 错误诚实化：注册表环节与脚本环节的文案必须可区分，
+    /// 脚本环节（PowerShell/lnk）绝不能显示成「注册表操作失败」。
+    #[test]
+    fn 错误文案_注册表与脚本环节各自诚实命名() {
+        let registry = AutostartError::Registry("拒绝访问".to_string());
+        assert_eq!(registry.to_string(), "注册表操作失败：拒绝访问");
+
+        let script = AutostartError::ScriptStep("PowerShell 退出码 Some(1)".to_string());
+        assert_eq!(
+            script.to_string(),
+            "自启脚本环节失败（PowerShell/COM/启动目录）：PowerShell 退出码 Some(1)"
+        );
+        assert!(
+            !script.to_string().contains("注册表"),
+            "脚本环节失败不得出现「注册表」字样：{script}"
+        );
     }
 
     #[test]

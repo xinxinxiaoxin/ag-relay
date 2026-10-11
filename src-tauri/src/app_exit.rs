@@ -4,9 +4,11 @@
 //! 关窗路径不调 exit：默认链放行（CloseRequested → ExitRequested(None) → Exit），只记日志。
 
 use std::io::Write;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use tauri::{AppHandle, Manager};
+
+use crate::gateway_control::logs_dir;
+use crate::timeutil::{civil_from_days, now_unix_secs};
 
 /// 壳侧退出来源日志文件名（与网关诊断日志同目录，便于一并查看）。
 pub const EXIT_LOG_FILE: &str = "shell-exit.log";
@@ -32,16 +34,8 @@ impl ExitSource {
     }
 }
 
-/// 当前 Unix 秒（时钟异常时按 0 处理，日志行仍然成形）。
-pub fn now_unix_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
 /// Unix 秒 → UTC 时间字符串（RFC3339 Z 形，秒精度）。
-/// 手写 civil_from_days 换算避免加依赖；纪元 / 闰日 / 远期锚点由单测锁定。
+/// 历法换算复用共享模块 timeutil（civil_from_days）；纪元 / 闰日 / 远期锚点由单测锁定。
 pub fn format_utc_timestamp(secs: u64) -> String {
     let days = (secs / 86_400) as i64;
     let rem = (secs % 86_400) as u32;
@@ -54,20 +48,6 @@ pub fn format_utc_timestamp(secs: u64) -> String {
     )
 }
 
-/// 天数（自 1970-01-01，可为负）→（年, 月, 日）。Howard Hinnant 的 civil_from_days 算法。
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    let z = z + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = (z - era * 146_097) as u64;
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    (if m <= 2 { y + 1 } else { y }, m, d)
-}
-
 /// 一条退出来源日志行的完整格式（唯一内容：UTC 时间 + 白名单枚举值）。
 pub fn format_exit_record(unix_secs: u64, source: ExitSource) -> String {
     format!(
@@ -77,17 +57,57 @@ pub fn format_exit_record(unix_secs: u64, source: ExitSource) -> String {
     )
 }
 
+/// 外部网关停止事件（F1 白名单扩展；与退出来源写入同一 shell-exit.log，
+/// 只允许这三个枚举值，不写任何其他内容）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalStopEvent {
+    /// 外部 supervisor 已在预算内优雅退出
+    Graceful,
+    /// 优雅窗口超时，已 taskkill 强杀 supervisor 进程树
+    Forced,
+    /// pid 链无法核实，宁可不杀不可误杀，未执行停止
+    Abandoned,
+}
+
+impl ExternalStopEvent {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ExternalStopEvent::Graceful => "external_stop_graceful",
+            ExternalStopEvent::Forced => "external_stop_forced",
+            ExternalStopEvent::Abandoned => "external_stop_abandoned",
+        }
+    }
+}
+
+/// 一条外部停止事件日志行的完整格式（UTC 时间 + event=白名单枚举值）。
+pub fn format_external_stop_record(unix_secs: u64, event: ExternalStopEvent) -> String {
+    format!("{} event={}", format_utc_timestamp(unix_secs), event.as_str())
+}
+
+/// 把外部停止事件追加到壳侧日志（与退出来源同一文件，便于一并查看）。
+pub fn log_external_stop(app: &AppHandle, event: ExternalStopEvent) {
+    append_shell_log(app, &format_external_stop_record(now_unix_secs(), event));
+}
+
 /// 把退出来源追加到壳侧日志（%APPDATA%\ag-relay\logs\shell-exit.log）。
 /// 尽力而为：目录建不了 / 写不进去都不影响退出流程本身。
 pub fn log_exit_source(app: &AppHandle, source: ExitSource) {
+    append_shell_log(
+        app,
+        &format_exit_record(now_unix_secs(), source),
+    );
+}
+
+/// 追加一行到壳侧日志（shell-exit.log）；日志目录复用 gateway_control::logs_dir。
+/// 尽力而为：失败静默，绝不影响退出/停止流程。
+fn append_shell_log(app: &AppHandle, line: &str) {
     let Ok(app_data) = app.path().app_data_dir() else {
         return;
     };
-    let dir = app_data.join("logs");
+    let dir = logs_dir(&app_data);
     if std::fs::create_dir_all(&dir).is_err() {
         return;
     }
-    let line = format_exit_record(now_unix_secs(), source);
     let _ = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -141,6 +161,23 @@ mod tests {
         assert_eq!(
             format_exit_record(1_760_169_059, ExitSource::TrayMenu),
             "2025-10-11T07:50:59Z exit_source=tray_menu"
+        );
+    }
+
+    /// F1：外部停止事件也走白名单（固定枚举值，不携带任何自由文本）。
+    #[test]
+    fn 外部停止事件行_只有时间与白名单枚举() {
+        assert_eq!(
+            format_external_stop_record(0, ExternalStopEvent::Graceful),
+            "1970-01-01T00:00:00Z event=external_stop_graceful"
+        );
+        assert_eq!(
+            format_external_stop_record(1_760_169_059, ExternalStopEvent::Forced),
+            "2025-10-11T07:50:59Z event=external_stop_forced"
+        );
+        assert_eq!(
+            format_external_stop_record(1_760_169_059, ExternalStopEvent::Abandoned),
+            "2025-10-11T07:50:59Z event=external_stop_abandoned"
         );
     }
 }
