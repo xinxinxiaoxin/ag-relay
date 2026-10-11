@@ -8,6 +8,7 @@ pub mod gateway_control;
 pub mod gateway_env;
 pub mod gateway_process;
 pub mod gateway_status;
+pub mod timeutil;
 pub mod tray;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

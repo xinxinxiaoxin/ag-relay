@@ -13,6 +13,8 @@
 //!   - 端点不可达 / 非 200 / 响应体不是完整 JSON 对象 ⇒ 整体离线（四卡「未运行/—」）；
 //!   - JSON 合法但某字段缺失或类型不对 ⇒ 仅该卡为 None（前端显示「未知」）。
 
+use crate::timeutil::{days_from_civil, system_time_ms};
+
 /// 把网关 `startedAt`（ISO 8601 UTC，如 `2026-10-11T08:30:00.000Z`）换算成 epoch 毫秒。
 /// 格式不符 / 越界日期一律 None（调用方按「未知」处理）。只认 Z 结尾的 UTC。
 pub fn parse_iso8601_utc_ms(s: &str) -> Option<i64> {
@@ -97,17 +99,6 @@ fn is_leap_year(y: i64) -> bool {
     (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
 }
 
-/// 天数换算（Howard Hinnant 的 days_from_civil 算法，公历纪元）。
-fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = y - era * 400; // [0, 399]
-    let mp = (m + 9) % 12; // 3 月=0
-    let doy = (153 * mp + 2) / 5 + d - 1; // [0, 365]
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
-    era * 146_097 + doe - 719_468
-}
-
 /// 由 startedAt 与当前时刻换算「x小时y分」；不足 1 小时显示「y分钟」。
 /// startedAt 在未来（时钟偏差）按 0 计；非法输入返回 None（前端显示「未知」）。
 pub fn format_uptime(started_at_ms: i64, now_ms: i64) -> Option<String> {
@@ -180,11 +171,14 @@ fn short_version(s: &str) -> String {
     s.chars().take(8).collect()
 }
 
-fn system_time_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
+/// 从 `/_relay/status` 响应体提取网关进程 pid（外部停止链 F1 的起点）。
+/// status 顶层的 `pid` 是网关脚本自身的 process.pid（relay-retry-proxy.mjs:1344），
+/// 它由 supervisor fork 出来——其父进程即 supervisor。
+/// 非 JSON / 无 pid / pid 不是正整数 → None（调用方按「不可识别」处理）。
+pub fn parse_status_pid(body: &str) -> Option<u32> {
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    let pid = v.as_object()?.get("pid")?.as_u64()?;
+    u32::try_from(pid).ok().filter(|p| *p != 0)
 }
 
 /// 本地状态端点的连接/读超时。端点应答为毫秒级；前端轮询 3 秒一次，
@@ -384,6 +378,27 @@ mod tests {
         assert_eq!(snap.uptime_text, None, "非 Z 形式不猜时区 → 未知");
         assert_eq!(snap.version.as_deref(), Some("abcd1234"));
         assert_eq!(snap.active_requests, Some(0));
+    }
+
+    // ------------------------------------------------------------------
+    // 外部停止链起点：status → 网关 pid（F1）
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn pid解析_正常体取pid_畸形体一律None() {
+        assert_eq!(parse_status_pid(&full_body()), Some(123), "full_body 里的 pid");
+        assert_eq!(parse_status_pid(r#"{"pid":7}"#), Some(7));
+        // pid 0 不是合法进程 id（System Idle）→ 不可识别
+        assert_eq!(parse_status_pid(r#"{"pid":0}"#), None);
+        // 缺字段 / 类型不对 / 非 JSON / 半截 JSON
+        assert_eq!(parse_status_pid(r#"{"loadedVersion":"abc"}"#), None);
+        assert_eq!(parse_status_pid(r#"{"pid":null}"#), None);
+        assert_eq!(parse_status_pid(r#"{"pid":"123"}"#), None);
+        assert_eq!(parse_status_pid(r#"{"pid":-5}"#), None);
+        // u64 超出 u32（防溢出误杀无关 pid）
+        assert_eq!(parse_status_pid(r#"{"pid":99999999999}"#), None);
+        assert_eq!(parse_status_pid("not json"), None);
+        assert_eq!(parse_status_pid(r#"{"pid":12"#), None);
     }
 
     // ------------------------------------------------------------------

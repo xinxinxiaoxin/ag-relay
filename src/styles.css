@@ -84,13 +84,8 @@ body {
   color: var(--accent);
 }
 
-/* 未运行灰态（网关不可达时整组置灰） */
-.status-value.off {
-  color: var(--text-dim);
-  font-weight: 500;
-}
-
-/* 运行中但某字段不可读：显示「未知」 */
+/* 未运行灰态（网关不可达时整组置灰）与「运行中但某字段不可读 → 未知」共用同一视觉 */
+.status-value.off,
 .status-value.unknown {
   color: var(--text-dim);
   font-weight: 500;

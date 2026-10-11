@@ -166,8 +166,17 @@ btnStop.addEventListener('click', async () => {
       } else {
         setHint('优雅排空超时，已强制结束网关进程树。', true);
       }
+    } else if (res.kind === 'stopped_external') {
+      // F1：本壳未受管网关、但 8787 上有外部网关时也会真正停掉它（关了就彻底关了）
+      if (res.graceful) {
+        setHint('已停止面板外启动的网关（优雅排空完成）。');
+      } else {
+        setHint('外部网关未在 10 秒内优雅退出，已强制结束其进程树。', true);
+      }
+    } else if (res.kind === 'external_stop_abandoned') {
+      setHint('检测到 8787 上有网关，但无法确认其归属（宁可不杀不可误杀），未自动停止。', true);
     } else if (res.kind === 'not_running') {
-      setHint('网关当前未由面板启动（无需停止，可放心重复点击）。');
+      setHint('8787 上没有可识别的网关在运行（无需停止，可放心重复点击）。');
     } else if (res.kind === 'failed') {
       setHint(FAILURE_TEXT[res.reason] || `失败：${res.reason}`, true);
     } else {

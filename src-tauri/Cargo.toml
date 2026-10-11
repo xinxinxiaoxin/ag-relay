@@ -22,6 +22,10 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_Console",
     "Win32_System_JobObjects",
     "Win32_System_Threading",
+    # F1 外部网关停止：进程快照（父 pid 定位）+ 跨进程读命令行（PEB）
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Diagnostics_Debug",
+    "Wdk_System_Threading",
 ] }
 
 [profile.release]

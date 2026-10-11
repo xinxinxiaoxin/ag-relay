@@ -1,7 +1,9 @@
 //! 网关环境变量装配。
 //!
-//! 17 项值来自共享笔记《env-vars-and-gateway-facts.md》第 1 节（2026-10-11 逐项读取
-//! gateway-config.bat 抄录），一个不能少、值不能改；漏设或错值都会改变网关行为。
+//! 17 项值的独立真值：上游 `gateway-config.bat`（已与三个 .mjs 同目录入库到
+//! `src-tauri/resources/gateway/`，该文件只含环境变量默认值、不含任何密钥）。
+//! 测试逐项断言环境变量表与 bat 解析结果一致，bat 改了这里就会红。
+//! 历史来源：共享笔记《env-vars-and-gateway-facts.md》第 1 节（2026-10-11 抄录）。
 //! 另有壳必须补设的一项：PROXY_DIAGNOSTICS_FILE（诊断日志指向应用数据目录）。
 //! PROXY_SUPERVISED=1 由 supervisor 自己设置，壳不设。
 
@@ -50,10 +52,11 @@ pub fn gateway_env_pairs(diagnostics_file: &Path) -> Vec<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
-    /// 独立于实现的真值来源：共享笔记 env-vars-and-gateway-facts.md 第 1 节原文逐项抄录。
-    /// 任何一项遗漏或错值，本测试必须失败。
+    /// 手抄兜底真值（仅在 bat fixture 缺失时使用）：
+    /// 共享笔记 env-vars-and-gateway-facts.md 第 1 节原文逐项抄录。
+    /// 独立真值是 resources/gateway/gateway-config.bat（F7），优先用它。
     const EXPECTED_17: [(&str, &str); 17] = [
         ("PROXY_UPSTREAM", "https://agentrouter.org"),
         ("PROXY_HOST", "127.0.0.1"),
@@ -74,17 +77,69 @@ mod tests {
         ("PROXY_VERBOSE", "1"),
     ];
 
+    /// 独立真值 fixture：上游 gateway-config.bat（与三个 .mjs 同目录入库）。
+    fn bat_fixture_path() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("resources")
+            .join("gateway")
+            .join("gateway-config.bat")
+    }
+
+    /// 解析 bat 里的环境变量赋值：仅取 `set "K=V"` 行
+    /// （@echo off / REM 注释 / exit /b 一律忽略；键值两侧 trim，值原样保留）。
+    fn parse_bat_env(text: &str) -> Vec<(String, String)> {
+        let mut pairs = Vec::new();
+        for line in text.lines() {
+            let line = line.trim();
+            let Some(rest) = line.strip_prefix("set \"") else {
+                continue;
+            };
+            let Some(assign) = rest.strip_suffix('"') else {
+                continue;
+            };
+            let Some((key, value)) = assign.split_once('=') else {
+                continue;
+            };
+            pairs.push((key.trim().to_string(), value.to_string()));
+        }
+        pairs
+    }
+
     #[test]
-    fn 配置表恰好是笔记里的17项且名值逐项一致() {
+    fn 配置表与上游gateway_config_bat逐项一致() {
+        let path = bat_fixture_path();
+        if !path.is_file() {
+            // fixture 缺失时的兜底：退回手抄真值（笔记第 1 节），仍保有一层契约保护。
+            // 正常情况下 bat 已入库，本分支不应触发（README 重打包步骤第 1 步负责补齐）。
+            let table = gateway_env_table();
+            assert_eq!(table.len(), 17, "必须恰好 17 项（漏一项或多一项都不合格）");
+            for (i, (name, value)) in EXPECTED_17.iter().enumerate() {
+                assert_eq!(table[i], (*name, *value), "第 {} 项与笔记第 1 节不一致", i + 1);
+            }
+            return;
+        }
+        let text = std::fs::read_to_string(&path).expect("读取 bat fixture 失败");
+        let bat = parse_bat_env(&text);
+
+        assert_eq!(bat.len(), 17, "bat 应恰好 set 17 项，实际：{bat:?}");
+        // 键不重复且顺序与表一致（bat 就是真值排序）
+        let bat_keys: Vec<&str> = bat.iter().map(|(k, _)| k.as_str()).collect();
+        let mut deduped = bat_keys.clone();
+        deduped.sort_unstable();
+        deduped.dedup();
+        assert_eq!(deduped.len(), 17, "bat 不得有重复键：{bat_keys:?}");
+
         let table = gateway_env_table();
-        assert_eq!(table.len(), 17, "必须恰好 17 项（漏一项或多一项都不合格）");
-        for (i, (name, value)) in EXPECTED_17.iter().enumerate() {
+        assert_eq!(table.len(), 17, "环境变量表必须恰好 17 项");
+        for (index, (name, value)) in table.iter().enumerate() {
             assert_eq!(
-                table[i],
-                (*name, *value),
-                "第 {} 项与笔记第 1 节不一致",
-                i + 1
+                bat_keys.get(index),
+                Some(name),
+                "第 {} 项键与 bat 不一致（bat 键序：{bat_keys:?}）",
+                index + 1
             );
+            let bat_value = &bat[index].1;
+            assert_eq!(bat_value, value, "环境变量 {name} 的值与 bat 不一致");
         }
     }
 
