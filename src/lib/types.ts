@@ -13,13 +13,13 @@ export interface GatewaySnapshot {
   owner: 'window' | 'external' | 'none'
 }
 // 活动事件（GLOSSARY）：壳侧把英文诊断记录提炼成的分级中文事件。
-// T1 为占位结构；真实字段与来源在 T5/T6 落地。
+// T6 定型：逐字对齐 T5 命令的 ActivityEvent（serde camelCase，最新在前，无 id）。
+// 级别 token 用 info|warn|error；中文级别（信息/警告/错误）由展示层映射。
 export interface ActivityEvent {
-  id: string
-  time: string
-  level: 'info' | 'warning' | 'error'
+  level: 'info' | 'warn' | 'error'
   title: string
   detail: string
+  time: string
 }
 export interface PageProps {
   snapshot: GatewaySnapshot

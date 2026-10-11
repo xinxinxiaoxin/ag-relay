@@ -61,11 +61,23 @@ const MOCK_STATUS: StatusSnapshot = {
   available: true, version: 'e8395e0f', activeRequests: 3, uptimeText: '2 小时 18 分', owner: 'window',
 }
 
+// 浏览器回退 mock：译后活动事件样例（最新在前），混合 信息/警告/错误 三级并给够条数，
+// 使诊断日志页在 vite 预览下可演示级别筛选 / 搜索 / 分页 / 空态。仅限开发渲染/截图。
 const MOCK_EVENTS: ActivityEvent[] = [
-  { id: 'mock-1', time: '14:18:36', level: 'info', title: '运行状态已更新', detail: '网关保持运行，当前有在途请求正在处理。' },
-  { id: 'mock-2', time: '12:00:01', level: 'info', title: '本地端点就绪', detail: '网关开始监听 127.0.0.1:8787。' },
-  { id: 'mock-3', time: '12:00:00', level: 'info', title: '网关启动完成', detail: '由当前窗口创建并管理此实例。' },
-  { id: 'mock-4', time: '11:59:59', level: 'info', title: '工作空间已准备', detail: '本地运行环境初始化完成。' },
+  { time: '14:18:36', level: 'info', title: '运行状态已更新', detail: '网关保持运行，当前有 3 个在途请求正在处理。' },
+  { time: '14:12:04', level: 'warn', title: '上游响应变慢', detail: '一次转发的首字节延迟超过预期，已记录以便观察。' },
+  { time: '14:05:51', level: 'error', title: '上游连接失败', detail: '与上游建立连接超时，该请求已按重试策略处理。' },
+  { time: '13:58:20', level: 'info', title: '请求流式结束', detail: '一次 SSE 响应正常收尾，连接已释放。' },
+  { time: '13:40:12', level: 'warn', title: '请求被限流', detail: '上游返回限流，网关已按退避策略稍后重试。' },
+  { time: '13:22:47', level: 'info', title: '安全重启完成', detail: '排空在途请求后已重新拉起网关。' },
+  { time: '13:21:30', level: 'info', title: '开始优雅排空', detail: '重启前等待在途请求自然结束，预算 10 秒。' },
+  { time: '12:47:15', level: 'error', title: '请求异常中止', detail: '一次响应在完成前中断，客户端需重试。' },
+  { time: '12:30:08', level: 'warn', title: '账号额度紧张', detail: '某上游账号接近额度上限，已切换到备用账号。' },
+  { time: '12:15:42', level: 'info', title: '配置已加载', detail: '网关脚本配置解析完成，开始受理请求。' },
+  { time: '12:00:01', level: 'info', title: '本地端点就绪', detail: '网关开始监听 127.0.0.1:8787。' },
+  { time: '12:00:00', level: 'info', title: '网关启动完成', detail: '由当前窗口创建并管理此实例。' },
+  { time: '11:59:59', level: 'info', title: '工作空间已准备', detail: '本地运行环境初始化完成。' },
+  { time: '11:58:30', level: 'info', title: '诊断读取器就绪', detail: '已开始增量读取诊断记录，提炼为活动事件。' },
 ]
 
 /** 读取网关状态：Tauri 内走真实 get_status，浏览器回退 mock。 */
@@ -163,13 +175,79 @@ export async function openLogsDir(): Promise<LogsDirResult> {
   catch (e) { return { kind: 'failed', detail: String(e) } }
 }
 
+// ── T6 活动事件查询（additive；绑定 T5 的两条命令，浏览器回退 mock） ──
+// 形状逐字对齐 integration-notes 的 T5 契约：ActivityEvent(camelCase，最新在前) / ActivityPage。
+
+/** 级别筛选 token（命令入参）：all + 三级（info|warn|error）。 */
+export type ActivityLevelFilter = 'all' | ActivityEvent['level']
+
+/** query_activity_events 入参（全可选；page 为 0 基，pageSize 取值 1..=500）。 */
+export interface ActivityQuery {
+  level?: ActivityLevelFilter
+  keyword?: string
+  page?: number
+  pageSize?: number
+}
+
+/** query_activity_events 返回：当前页事件（最新在前）+ 分页游标。 */
+export interface ActivityPage {
+  events: ActivityEvent[]
+  page: number
+  pageSize: number
+  hasMore: boolean
+}
+
+const DEFAULT_PAGE_SIZE = 50
+
 /**
- * 最近活动事件（供总览「最近活动」与诊断日志页）。
- * T1 为占位：尚无对应命令（取/查活动事件是 T5 新增命令），两端均返回 mock。
+ * 最近活动事件（供总览「最近活动」）：Tauri 内走真实 get_recent_activity（最新在前，最多 50 条），
+ * 浏览器回退 MOCK_EVENTS。命令虽为 Result（IO/路径错误返回 Ok([]) 即「暂无活动」），仍兜 promise
+ * 失败 → 空列表，绝不以 mock 混入真机。
+ */
+export async function getRecentActivity(): Promise<ActivityEvent[]> {
+  if (!isTauri()) return MOCK_EVENTS
+  try {
+    return await invoke<ActivityEvent[]>('get_recent_activity')
+  } catch {
+    return []
+  }
+}
+
+/**
+ * 分页查询活动事件（供诊断日志页）：Tauri 内走真实 query_activity_events（级别筛选 + 关键词 + 分页），
+ * 浏览器回退对 MOCK_EVENTS 做等价的过滤/分页。失败兜底空页（保留请求的 page/pageSize）。
+ */
+export async function queryActivityEvents(query: ActivityQuery = {}): Promise<ActivityPage> {
+  const page = query.page ?? 0
+  const pageSize = query.pageSize ?? DEFAULT_PAGE_SIZE
+  if (!isTauri()) return mockQueryActivityEvents(query, page, pageSize)
+  try {
+    return await invoke<ActivityPage>('query_activity_events', { query })
+  } catch {
+    return { events: [], page, pageSize, hasMore: false }
+  }
+}
+
+// 浏览器回退：对 MOCK_EVENTS 按级别 + 关键词过滤，再按 page/pageSize 切片（仅供开发渲染/截图）。
+function mockQueryActivityEvents(query: ActivityQuery, page: number, pageSize: number): ActivityPage {
+  const level = query.level ?? 'all'
+  const keyword = (query.keyword ?? '').trim().toLocaleLowerCase()
+  const filtered = MOCK_EVENTS.filter((event) => {
+    if (level !== 'all' && event.level !== level) return false
+    if (!keyword) return true
+    return `${event.time} ${event.title} ${event.detail}`.toLocaleLowerCase().includes(keyword)
+  })
+  const start = page * pageSize
+  const events = filtered.slice(start, start + pageSize)
+  return { events, page, pageSize, hasMore: start + events.length < filtered.length }
+}
+
+/**
+ * 最近活动事件（兼容既有 App.tsx 调用方；委托 getRecentActivity）。
+ * Tauri 内走真实 get_recent_activity，浏览器回退 MOCK_EVENTS。
  */
 export async function getRecentEvents(): Promise<ActivityEvent[]> {
-  // T5 落地后：Tauri 内改为 invoke 真实命令，浏览器仍回退 MOCK_EVENTS。
-  return MOCK_EVENTS
+  return getRecentActivity()
 }
 
 // ── T3 偏好设置接线（additive；getAppVersion 与 T2 共享，合并时去重） ──

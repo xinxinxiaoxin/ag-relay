@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { ChevronLeft, ChevronRight, FolderOpen, Search, X } from 'lucide-react'
 
 import { Badge } from '@/components/ui/badge'
@@ -28,50 +28,64 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { queryActivityEvents } from '@/lib/gateway'
+import type { ActivityLevelFilter, ActivityPage } from '@/lib/gateway'
 import type { ActivityEvent, PageProps } from '@/lib/types'
 
 const LEVEL_LABELS: Record<ActivityEvent['level'], string> = {
   info: '信息',
-  warning: '警告',
+  warn: '警告',
   error: '错误',
 }
 
-const LEVEL_FILTERS = [
+const LEVEL_FILTERS: { value: ActivityLevelFilter; label: string }[] = [
   { value: 'all', label: '全部' },
   { value: 'info', label: '信息' },
-  { value: 'warning', label: '警告' },
+  { value: 'warn', label: '警告' },
   { value: 'error', label: '错误' },
-] as const
+]
 
-type LevelFilter = (typeof LEVEL_FILTERS)[number]['value']
-
-const PAGE_SIZE = 6
+// 诊断日志页用服务端分页（T5 query_activity_events）：page 为 0 基，pageSize 1..=500。
+const PAGE_SIZE = 10
 
 export function LogsPage(props: PageProps) {
-  const [level, setLevel] = useState<LevelFilter>('all')
+  const [level, setLevel] = useState<ActivityLevelFilter>('all')
   const [query, setQuery] = useState('')
-  const [page, setPage] = useState(1)
-  const normalizedQuery = query.trim().toLocaleLowerCase()
+  const [page, setPage] = useState(0)
+  const [data, setData] = useState<ActivityPage | null>(null)
+  const [loading, setLoading] = useState(true)
+
+  const normalizedQuery = query.trim()
   const hasFilters = level !== 'all' || normalizedQuery.length > 0
 
-  const filteredEvents = props.events.filter((event) => {
-    if (level !== 'all' && event.level !== level) return false
+  // 级别 / 关键词 / 页码变化即查询（服务端筛选分页）。cleanup 的 ignore 丢弃过期响应，防乱序。
+  useEffect(() => {
+    let ignore = false
+    setLoading(true)
+    void queryActivityEvents({ level, keyword: normalizedQuery, page, pageSize: PAGE_SIZE }).then(
+      (result) => {
+        if (!ignore) {
+          setData(result)
+          setLoading(false)
+        }
+      },
+    )
+    return () => {
+      ignore = true
+    }
+  }, [level, normalizedQuery, page])
 
-    return [event.time, event.level, LEVEL_LABELS[event.level], event.title, event.detail]
-      .join(' ')
-      .toLocaleLowerCase()
-      .includes(normalizedQuery)
-  })
-
-  const pageCount = Math.max(1, Math.ceil(filteredEvents.length / PAGE_SIZE))
-  const currentPage = Math.min(page, pageCount)
-  const firstIndex = (currentPage - 1) * PAGE_SIZE
-  const visibleEvents = filteredEvents.slice(firstIndex, firstIndex + PAGE_SIZE)
+  const events = data?.events ?? []
+  const hasMore = data?.hasMore ?? false
+  const rangeStart = events.length > 0 ? page * PAGE_SIZE + 1 : 0
+  const rangeEnd = page * PAGE_SIZE + events.length
+  // 游标分页无总数：有上一页（page>0）或有下一页（hasMore）才显示分页条。
+  const showPagination = page > 0 || hasMore
 
   function resetFilters() {
     setLevel('all')
     setQuery('')
-    setPage(1)
+    setPage(0)
   }
 
   return (
@@ -102,8 +116,8 @@ export function LogsPage(props: PageProps) {
         <Tabs
           value={level}
           onValueChange={(value) => {
-            setLevel(value as LevelFilter)
-            setPage(1)
+            setLevel(value as ActivityLevelFilter)
+            setPage(0)
           }}
           className="min-w-0 gap-0"
         >
@@ -131,7 +145,7 @@ export function LogsPage(props: PageProps) {
                 value={query}
                 onChange={(event) => {
                   setQuery(event.target.value)
-                  setPage(1)
+                  setPage(0)
                 }}
                 className="pl-9 pr-10 text-sm"
               />
@@ -144,7 +158,7 @@ export function LogsPage(props: PageProps) {
                   className="absolute top-1/2 right-0.5 -translate-y-1/2 text-muted-foreground"
                   onClick={() => {
                     setQuery('')
-                    setPage(1)
+                    setPage(0)
                   }}
                 >
                   <X aria-hidden="true" className="size-3.5" />
@@ -154,7 +168,7 @@ export function LogsPage(props: PageProps) {
           </div>
 
           <TabsContent value={level} className="min-w-0">
-            {visibleEvents.length > 0 ? (
+            {events.length > 0 ? (
               <Table aria-label="连接和生命周期日志" className="min-w-[640px] table-fixed">
                 <TableHeader className="border-t border-border bg-[#fafafa]">
                   <TableRow className="border-border hover:bg-transparent">
@@ -173,14 +187,14 @@ export function LogsPage(props: PageProps) {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {visibleEvents.map((event) => (
-                    <TableRow key={event.id} className="border-border">
+                  {events.map((event, index) => (
+                    <TableRow key={`${event.time}-${index}`} className="border-border">
                       <TableCell className="py-4 pl-5 align-top text-xs leading-5 whitespace-normal text-muted-foreground tabular-nums">
                         {event.time}
                       </TableCell>
                       <TableCell className="py-4 align-top">
                         <Badge
-                          variant={event.level === 'error' ? 'destructive' : event.level === 'warning' ? 'outline' : 'secondary'}
+                          variant={event.level === 'error' ? 'destructive' : event.level === 'warn' ? 'outline' : 'secondary'}
                           className={event.level === 'info' ? 'text-xs text-muted-foreground' : 'text-xs'}
                         >
                           {LEVEL_LABELS[event.level]}
@@ -196,6 +210,10 @@ export function LogsPage(props: PageProps) {
                   ))}
                 </TableBody>
               </Table>
+            ) : loading ? (
+              <div className="flex min-h-72 items-center justify-center px-5 py-12 text-sm text-muted-foreground">
+                正在加载活动事件…
+              </div>
             ) : (
               <Empty className="min-h-72 px-5 py-12">
                 <EmptyHeader>
@@ -221,31 +239,27 @@ export function LogsPage(props: PageProps) {
         <Separator />
         <CardFooter className="min-w-0 flex-wrap justify-between gap-3 px-5 py-4">
           <p role="status" aria-live="polite" aria-atomic="true" className="text-xs leading-5 text-muted-foreground tabular-nums">
-            {filteredEvents.length === 0
-              ? '0 条记录'
-              : `显示 ${firstIndex + 1}–${firstIndex + visibleEvents.length} 条，共 ${filteredEvents.length} 条`}
+            {events.length === 0 ? '0 条记录' : `显示第 ${rangeStart}–${rangeEnd} 条`}
           </p>
-          {pageCount > 1 && (
+          {showPagination && (
             <nav aria-label="日志分页" className="flex flex-wrap items-center gap-2">
               <Button
                 type="button"
                 variant="outline"
                 size="sm"
-                disabled={currentPage === 1}
-                onClick={() => setPage(currentPage - 1)}
+                disabled={page === 0}
+                onClick={() => setPage((current) => Math.max(0, current - 1))}
               >
                 <ChevronLeft aria-hidden="true" className="size-4" />
                 上一页
               </Button>
-              <span className="text-xs text-muted-foreground tabular-nums">
-                {currentPage} / {pageCount}
-              </span>
+              <span className="text-xs text-muted-foreground tabular-nums">第 {page + 1} 页</span>
               <Button
                 type="button"
                 variant="outline"
                 size="sm"
-                disabled={currentPage === pageCount}
-                onClick={() => setPage(currentPage + 1)}
+                disabled={!hasMore}
+                onClick={() => setPage((current) => current + 1)}
               >
                 下一页
                 <ChevronRight aria-hidden="true" className="size-4" />
