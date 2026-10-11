@@ -33,6 +33,11 @@ impl GatewayState {
     fn store(&self, child: ManagedChild) {
         *self.running.lock().unwrap_or_else(|e| e.into_inner()) = Some(child);
     }
+
+    /// 是否持有受管子进程句柄（实例归属推导的「当前窗口」判据，供 get_status 读取）。
+    pub fn holds_managed(&self) -> bool {
+        self.running.lock().unwrap_or_else(|e| e.into_inner()).is_some()
+    }
 }
 
 /// 命令层结构化结果（前端按 kind 分支给中文提示；失败必带 reason 枚举，不用裸字符串）。

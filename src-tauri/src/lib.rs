@@ -5,6 +5,8 @@ pub mod autostart;
 pub mod autostart_commands;
 pub mod gateway_commands;
 pub mod gateway_control;
+pub mod gateway_diagnostics;
+pub mod gateway_diagnostics_reader;
 pub mod gateway_env;
 pub mod gateway_process;
 pub mod gateway_status;
@@ -16,6 +18,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(gateway_commands::GatewayState::default())
         .manage(autostart_commands::AutostartUiState::default())
+        .manage(gateway_diagnostics_reader::DiagnosticsState::default())
         .setup(|app| {
             // T6：应用启动即幂等编排开机自启（建立/改写自启项 + 清理确认属于本网关的旧快捷方式）
             autostart_commands::sync_on_launch(app.handle());
@@ -50,7 +53,10 @@ pub fn run() {
             gateway_commands::open_logs_dir,
             autostart_commands::get_autostart,
             autostart_commands::set_autostart_enabled,
-            app_exit::quit_app
+            app_exit::quit_app,
+            // T5：诊断读取（只读消费者）——取最近活动事件 + 分页查询（级别筛选 + 搜索）
+            gateway_diagnostics_reader::get_recent_activity,
+            gateway_diagnostics_reader::query_activity_events
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

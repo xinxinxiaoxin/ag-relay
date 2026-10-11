@@ -128,12 +128,52 @@ pub struct StatusSnapshot {
     pub active_requests: Option<u64>,
     /// 「x小时y分」/「y分钟」
     pub uptime_text: Option<String>,
+    /// 实例归属（壳侧推导；网关 status 接口本身无此字段，前端据此判定控制权）。
+    pub owner: InstanceOwner,
 }
 
 impl StatusSnapshot {
-    /// 离线快照：网关不可达时的四卡值。
+    /// 离线快照：网关不可达时的四卡值（归属默认「无」，命令层再按受管句柄覆盖）。
     pub fn offline() -> Self {
-        Self { available: false, version: None, active_requests: None, uptime_text: None }
+        Self {
+            available: false,
+            version: None,
+            active_requests: None,
+            uptime_text: None,
+            owner: InstanceOwner::None,
+        }
+    }
+}
+
+/// 实例归属（GLOSSARY「实例归属」：当前运行的网关归谁管）。壳侧推导，status 接口不提供。
+/// serde → `"window"` / `"external"` / `"none"`（前端 deriveSnapshot 依赖这三个小写串）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InstanceOwner {
+    /// 当前窗口：本壳持有受管子进程句柄（受管网关）
+    Window,
+    /// 外部进程：端口被占且经 supervisor 父链核实（外部网关）
+    External,
+    /// 无：没有可识别的网关在运行
+    None,
+}
+
+/// 纯函数：由三个壳侧信号推导实例归属（spec 实现决策 / GLOSSARY / ADR-0003）。
+/// 规则：
+///   1) 持有受管子进程句柄 ⇒ 当前窗口（优先，不依赖端口/核实）；
+///   2) 否则端口被占「且」经 supervisor 父链核实 ⇒ 外部进程；
+///   3) 否则 ⇒ 无（端口空闲，或端口被占但未核实为本网关——宁可标「无」不误判外部）。
+pub fn derive_owner(
+    has_managed_handle: bool,
+    port_occupied: bool,
+    verified_external: bool,
+) -> InstanceOwner {
+    if has_managed_handle {
+        InstanceOwner::Window
+    } else if port_occupied && verified_external {
+        InstanceOwner::External
+    } else {
+        InstanceOwner::None
     }
 }
 
@@ -163,7 +203,14 @@ pub fn parse_status_snapshot_with_now(body: &str, now_ms: i64) -> Option<StatusS
         .and_then(parse_iso8601_utc_ms)
         .and_then(|started| format_uptime(started, now_ms));
 
-    Some(StatusSnapshot { available: true, version, active_requests, uptime_text })
+    Some(StatusSnapshot {
+        available: true,
+        version,
+        active_requests,
+        uptime_text,
+        // 归属不在纯解析层推导（无句柄/父链信息）；由 snapshot_with_owner / get_status 覆盖。
+        owner: InstanceOwner::None,
+    })
 }
 
 /// 版本短哈希：前 8 位（不足 8 位原样）。
@@ -230,13 +277,50 @@ pub fn snapshot_via_http(host: &str, port: u16) -> StatusSnapshot {
     }
 }
 
-/// Tauri 命令：前端每 3 秒轮询，刷新四张状态卡。
+/// 读状态并推导实例归属：fetch 一次 body，解析四卡 + 壳侧推导归属（T2）。
+/// `has_managed_handle` 由命令层从 `GatewayState` 读入（本壳是否持有受管子进程句柄）。
+/// 外部父链核实（Toolhelp/PEB）仅在「非受管且端点有网关」时才做——受管直接归当前窗口，
+/// 常态轮询（3 秒）零额外开销。
+pub fn snapshot_with_owner(host: &str, port: u16, has_managed_handle: bool) -> StatusSnapshot {
+    match fetch_status_body(host, port) {
+        Ok(body) => {
+            let mut snap = parse_status_snapshot(&body).unwrap_or_else(StatusSnapshot::offline);
+            // 端点有响应 ⇒ 端口被占；仅非受管时核实外部 supervisor 父链（宁可不杀不可误杀同链）。
+            let verified_external = !has_managed_handle
+                && matches!(
+                    parse_status_pid(&body)
+                        .map(crate::gateway_process::resolve_external_stop_target),
+                    Some(crate::gateway_process::ExternalStopTarget::Supervisor { .. })
+                );
+            snap.owner = derive_owner(has_managed_handle, true, verified_external);
+            snap
+        }
+        Err(_) => {
+            // 端点不可达：端口可能被非网关进程占用；无 status pid 无法核实外部 ⇒ verified=false。
+            let port_occupied = crate::gateway_process::port_in_use(host, port);
+            let mut snap = StatusSnapshot::offline();
+            snap.owner = derive_owner(has_managed_handle, port_occupied, false);
+            snap
+        }
+    }
+}
+
+/// Tauri 命令：前端每 3 秒轮询，刷新四张状态卡 + 实例归属。
 /// 永不失败（返回值即完整快照）；8787 上已有网关（含面板外启动的实例）经此直接显示。
 /// 放 spawn_blocking：本地端点最坏 1+2 秒超时，不占异步运行时的工作线程。
+/// `app` 由框架注入（前端 invoke 仍无需传参）——仅用于读取受管句柄以推导归属。
 #[tauri::command]
-pub async fn get_status() -> StatusSnapshot {
-    tauri::async_runtime::spawn_blocking(|| {
-        snapshot_via_http(crate::gateway_process::GATEWAY_HOST, crate::gateway_process::GATEWAY_PORT)
+pub async fn get_status(app: tauri::AppHandle) -> StatusSnapshot {
+    use tauri::Manager;
+    let has_managed = app
+        .state::<crate::gateway_commands::GatewayState>()
+        .holds_managed();
+    tauri::async_runtime::spawn_blocking(move || {
+        snapshot_with_owner(
+            crate::gateway_process::GATEWAY_HOST,
+            crate::gateway_process::GATEWAY_PORT,
+            has_managed,
+        )
     })
     .await
     .unwrap_or_else(|_| StatusSnapshot::offline())
@@ -402,6 +486,69 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
+    // 实例归属推导（纯函数，各输入组合）——真值取自 spec 实现决策 / GLOSSARY / ADR-0003 规则，
+    // 独立于被测代码的内部结构（只据「句柄优先 / 端口+核实为外部 / 否则无」这条规则列真值）。
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn 归属推导_持有受管句柄则一律当前窗口() {
+        use InstanceOwner::*;
+        // 规则 1：句柄在即「当前窗口」，无视端口占用 / 外部核实的其余四种组合
+        assert_eq!(derive_owner(true, false, false), Window);
+        assert_eq!(derive_owner(true, true, false), Window);
+        assert_eq!(derive_owner(true, false, true), Window);
+        assert_eq!(derive_owner(true, true, true), Window);
+    }
+
+    #[test]
+    fn 归属推导_无句柄_端口被占且核实为外部进程() {
+        // 规则 2：唯一判「外部进程」的组合——无受管句柄 + 端口被占 + 父链核实
+        assert_eq!(derive_owner(false, true, true), InstanceOwner::External);
+    }
+
+    #[test]
+    fn 归属推导_无句柄_其余组合皆为无() {
+        use InstanceOwner::*;
+        // 端口空闲 ⇒ 无（核实位无意义，核实只在端口被占时成立）
+        assert_eq!(derive_owner(false, false, false), None);
+        assert_eq!(derive_owner(false, false, true), None);
+        // 端口被占但未核实为本网关 supervisor ⇒ 无（宁可标「无」不误判外部）
+        assert_eq!(derive_owner(false, true, false), None);
+    }
+
+    #[test]
+    fn 归属推导_序列化为前端约定的小写串() {
+        // 前端 deriveSnapshot 依赖 "window"/"external"/"none" 三值，锁死序列化契约
+        assert_eq!(serde_json::to_string(&InstanceOwner::Window).unwrap(), "\"window\"");
+        assert_eq!(serde_json::to_string(&InstanceOwner::External).unwrap(), "\"external\"");
+        assert_eq!(serde_json::to_string(&InstanceOwner::None).unwrap(), "\"none\"");
+    }
+
+    #[test]
+    fn 快照序列化_含owner字段且既有camelCase不回归() {
+        let snap = StatusSnapshot {
+            available: true,
+            version: Some("abcd1234".to_string()),
+            active_requests: Some(2),
+            uptime_text: Some("1小时2分".to_string()),
+            owner: InstanceOwner::Window,
+        };
+        let json = serde_json::to_string(&snap).expect("序列化");
+        // 前端连接信息/运行信息绑定 owner 字段（camelCase 原名即 "owner"）
+        assert!(json.contains(r#""owner":"window""#), "缺 owner 字段：{json}");
+        // 既有四卡 camelCase 字段不因新增字段而回归
+        assert!(json.contains(r#""activeRequests":2"#), "activeRequests 回归：{json}");
+        assert!(json.contains(r#""available":true"#), "available 回归：{json}");
+    }
+
+    #[test]
+    fn 解析层产出的快照归属占位为无_由上层覆盖() {
+        // parse_status_snapshot 不含句柄/父链信息，归属一律占位「无」，待 snapshot_with_owner 覆盖
+        let snap = parse_status_snapshot_with_now(r#"{"activeRequests":1}"#, 0).expect("可解析");
+        assert_eq!(snap.owner, InstanceOwner::None);
+    }
+
+    // ------------------------------------------------------------------
     // HTTP 接缝：mock 本地随机端口服务（只应答一次，返回捕获到的请求文本）
     // ------------------------------------------------------------------
 
@@ -497,5 +644,43 @@ mod tests {
         let (port, join) = spawn_mock("HTTP/1.1 403 Forbidden\r\n\r\n".to_string());
         assert_eq!(snapshot_via_http("127.0.0.1", port), StatusSnapshot::offline());
         let _ = join.join();
+    }
+
+    // ------------------------------------------------------------------
+    // snapshot_with_owner：fetch + 四卡 + 归属推导 的接线（归属纯逻辑已单独单测，
+    // 此处只验证「受管句柄 ⇒ 当前窗口」与「不可达/不可核实 ⇒ 无」两条接线端到端成立）
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn 接线_端点可达且受管_归属当前窗口_四卡照常() {
+        let (port, join) = spawn_mock(http200(&full_body()));
+        let snap = snapshot_with_owner("127.0.0.1", port, true);
+        let _ = join.join();
+        assert!(snap.available);
+        assert_eq!(snap.active_requests, Some(2), "四卡仍来自同一次解析");
+        assert_eq!(snap.owner, InstanceOwner::Window, "持受管句柄 ⇒ 当前窗口");
+    }
+
+    #[test]
+    fn 接线_端点可达但非受管且父链不可核实_归属无() {
+        // mock 的 pid=123 在本机几乎不可能核实为 relay-supervisor 子进程 ⇒ 不判外部，归「无」
+        let (port, join) = spawn_mock(http200(&full_body()));
+        let snap = snapshot_with_owner("127.0.0.1", port, false);
+        let _ = join.join();
+        assert!(snap.available, "端点可达");
+        assert_eq!(snap.owner, InstanceOwner::None, "可达但未核实为外部 ⇒ 无（不误判外部）");
+    }
+
+    #[test]
+    fn 接线_端点不可达_受管句柄仍判当前窗口_否则无() {
+        let port = find_refused_port();
+        // 受管句柄在（刚拉起、尚在引导）：仍归「当前窗口」
+        let managed = snapshot_with_owner("127.0.0.1", port, true);
+        assert!(!managed.available);
+        assert_eq!(managed.owner, InstanceOwner::Window);
+        // 无句柄且端点不可达：归「无」
+        let none = snapshot_with_owner("127.0.0.1", port, false);
+        assert!(!none.available);
+        assert_eq!(none.owner, InstanceOwner::None);
     }
 }

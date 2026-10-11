@@ -72,6 +72,10 @@ pub struct GatewayPaths {
     pub diagnostics_file: PathBuf,
 }
 
+/// 诊断文件名（上游网关固定落位的 live 诊断文件）。**单一真值**：诊断读取层
+/// `gateway_diagnostics_reader` 复用本常量，杜绝文件名在两处各写字面量而漂移。
+pub const DIAGNOSTICS_FILE_NAME: &str = "relay-diagnostics.jsonl";
+
 /// 由 exe 所在目录与应用数据目录解析网关路径。
 pub fn resolve_paths(exe_dir: &Path, app_data_dir: &Path) -> GatewayPaths {
     GatewayPaths {
@@ -79,7 +83,7 @@ pub fn resolve_paths(exe_dir: &Path, app_data_dir: &Path) -> GatewayPaths {
         gateway_dir: exe_dir.join("resources").join("gateway"),
         // 日志目录知识聚拢（F3）：与「打开日志文件夹」同一真值 gateway_control::logs_dir
         diagnostics_file: crate::gateway_control::logs_dir(app_data_dir)
-            .join("relay-diagnostics.jsonl"),
+            .join(DIAGNOSTICS_FILE_NAME),
     }
 }
 
