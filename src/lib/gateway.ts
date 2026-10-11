@@ -140,10 +140,10 @@ export function deriveSnapshot(status: StatusSnapshot): GatewaySnapshot {
 }
 
 // 应用版本（运行版本「主显」）：优先 Tauri app.getVersion()（取自 tauri.conf.json 的 version），
-// 浏览器（无 window.__TAURI__）或权限/运行时异常时回退常量 "0.1.0"。返回裸语义版本（无 v 前缀）。
+// 浏览器（无 window.__TAURI__）或权限/运行时异常时回退常量 "0.2.0"。返回裸语义版本（无 v 前缀）。
 // SHARED CONTRACT（T3/合并者）：若将来必须走 Rust 命令，统一命名 get_app_version → String。
 // settings-page 以此为初值，故导出。
-export const FALLBACK_APP_VERSION = '0.1.0'
+export const FALLBACK_APP_VERSION = '0.2.0'
 export async function getAppVersion(): Promise<string> {
   const getVersion = tauriGlobal()?.app?.getVersion
   if (typeof getVersion === 'function') {

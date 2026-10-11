@@ -62,13 +62,13 @@ $env:CARGO_TARGET_DIR='D:\zcode项目\ag-relay-build\target'; npm install; npm r
 
 | 项 | 值 |
 | --- | --- |
-| 打包日期 | 2026-10-12 03:06（UTC+8，React/shadcn UI 重构重打包，构建自 feature/ui-redesign tip `50703d4`，spec #9 T1–T8 + 审查修复） |
+| 打包日期 | 2026-10-12 07:22（UTC+8，**v0.2.0** 发布版重打包，构建自 `main`，React/shadcn UI 重构 spec #9 全量交付 + 审查修复） |
 | 上游仓库提交 | `28b764d`（xinxinxiaoxin/relay-retry-proxy，fix: Codex 跨资源错误最多尝试 5 次后直接报错） |
 | `relay-retry-proxy.mjs` sha256 | `e8395e0f90fe46bf1059bfcbac77e65d887d09d4ed5057490f85847e5cde85dc` |
 | `relay-supervisor.mjs` sha256 | `f2f030b46999f84afc77f7f92643075c1d1f1ddf7ad3c327fbd92f5593dff77c` |
 | `relay-start-check.mjs` sha256 | `bb54cc7255b4f570ba1bdcfda255f19f0ca0a70fa6d028d0ed4e44f8146037c4` |
 | `gateway-config.bat` sha256 | `102865c82e8785fcf1630260f25db32e2b9f4ba3a990c768bfc9fce3deaa1faa`（环境变量真值，无密钥） |
-| `ag-relay.exe` sha256 | `f7c7aac9216235c72ad4e1f3d7a15097ee608c6867fd734ec194c8136f82d209`（`target-t9\release\ag-relay.exe`，React/shadcn 三页工作空间 + ⌘K 命令面板 + 诊断汉化重打包；上游网关脚本零改动） |
+| `ag-relay.exe` sha256 | `fb6db99cbef94629cd135e42f51115c34b9d8c88f658e62beffc235e2d1092c8`（**v0.2.0**，`target-t1\release\ag-relay.exe`；GitHub Release 资产 `ag-relay-v0.2.0-win64.zip`；上游网关脚本零改动） |
 | 本票验收证据 | `E:\codex项目\网关\ag-relay-notes\evidence\`（`t9-completion-report.md` 四闸门记录 + `t1`…`t8`/`review-fixes` 每页/每态渲染截图） |
 
 ## 冒烟自检

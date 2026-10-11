@@ -1,6 +1,6 @@
 [package]
 name = "ag-relay"
-version = "0.1.0"
+version = "0.2.0"
 description = "AG Relay · 网关桌面壳"
 edition = "2021"
 
