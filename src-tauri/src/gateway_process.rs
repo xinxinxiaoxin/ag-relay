@@ -13,7 +13,7 @@ use std::fmt;
 use std::net::TcpListener;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -172,6 +172,13 @@ pub fn spawn_managed(
     for (k, v) in extra_env {
         cmd.env(k, v);
     }
+    // stdio 全置 null：网关是后台进程，诊断日志走 PROXY_DIAGNOSTICS_FILE，stdout 无消费方。
+    // ⚠ T7 实测：GUI 壳（windows_subsystem，无控制台）优雅停止后（AttachConsole→广播→
+    //   FreeConsole 往返），进程会遗留失效的 std 句柄；默认 stdio=inherit 把它们传给
+    //   CreateProcess 导致「停止后再启动」稳定报 SpawnFailed（os error 6 INVALID_HANDLE）。
+    //   启动期首拉不受影响（那时 std 句柄还是 NULL），故 T2–T6 均未暴露。置 null 与
+    //   首拉时的 NULL 句柄语义一致，spawn 不再依赖壳自身的控制台状态。
+    cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     // 只用 CREATE_NO_WINDOW；绝不用 CREATE_NEW_PROCESS_GROUP（隐式禁 Ctrl+C）
     cmd.creation_flags(CREATE_NO_WINDOW);
 
