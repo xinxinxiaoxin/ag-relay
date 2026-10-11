@@ -375,7 +375,7 @@ export function OverviewPage({ snapshot, events, onAction, onNavigate, appVersio
             <Separator />
             <div className="space-y-2">
               <h3 className="text-sm font-medium">安全退出</h3>
-              <p className="text-sm leading-6 text-muted-foreground">请求排空期间，控制操作暂不可用。外部实例不会由此页面停止。</p>
+              <p className="text-sm leading-6 text-muted-foreground">请求排空期间，控制操作暂不可用。停止或退出时，受管网关会优雅停止；外部实例仅在核实归属后才停止。</p>
             </div>
             <Button variant="outline" className="w-full justify-between text-sm" onClick={() => onNavigate('settings')}>
               管理启动设置<ArrowRight aria-hidden="true" />
