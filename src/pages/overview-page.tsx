@@ -1,4 +1,4 @@
-import { Fragment } from 'react'
+import { Fragment, useState, type ReactNode } from 'react'
 import {
   Activity,
   ArrowRight,
@@ -19,6 +19,16 @@ import {
   TriangleAlert,
 } from 'lucide-react'
 
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -48,7 +58,7 @@ const stateCopy: Record<GatewayState, { title: string; description: string }> = 
   draining: { title: '正在排空', description: '正在等待进行中的请求结束，请稍候。' },
 }
 
-export function OverviewPage({ snapshot, events, onAction, onNavigate }: PageProps) {
+export function OverviewPage({ snapshot, events, onAction, onNavigate, appVersion }: PageProps & { appVersion: string }) {
   const { state } = snapshot
   const copy = stateCopy[state]
   const metricsAvailable = state === 'running' || state === 'external' || state === 'draining'
@@ -57,14 +67,23 @@ export function OverviewPage({ snapshot, events, onAction, onNavigate }: PagePro
   const canControl = state === 'running' && snapshot.owner === 'window'
   const canStart = state === 'stopped'
   const primaryDisabled = !canControl && !canStart
+  // 安全重启二次确认（AlertDialog）就地管理于本页组件，避免外提到 App 外壳。
+  const [confirmRestartOpen, setConfirmRestartOpen] = useState(false)
   const inflight = metricsAvailable && snapshot.inflight !== null
     ? snapshot.inflight.toLocaleString('zh-CN')
     : '—'
   const uptime = metricsAvailable ? snapshot.uptime ?? '—' : '—'
-  const version = metricsAvailable ? snapshot.version ?? '—' : '—'
-  const owner = metricsAvailable && snapshot.owner
-    ? snapshot.owner === 'window' ? '当前窗口' : '外部进程'
-    : '—'
+  // 运行版本「次显」：网关脚本短哈希（loadedVersion 前 8 位）；主显为应用版本 appVersion。
+  const gatewayHash = metricsAvailable ? snapshot.version ?? '未知' : '—'
+  // 实例归属：始终显示派生值（当前窗口 / 外部进程 / 无）——无网关在跑即「无」（GLOSSARY）。
+  const ownerText = snapshot.owner === 'window' ? '当前窗口' : snapshot.owner === 'external' ? '外部进程' : '无'
+  // 运行版本双显（主：应用版本 vX.Y.Z；次：网关脚本短哈希）。alignEnd 适配右对齐的连接信息卡。
+  const versionCell = (alignEnd: boolean) => (
+    <span className={`flex flex-col gap-0.5 ${alignEnd ? 'items-end' : 'items-start'}`}>
+      <span>v{appVersion}</span>
+      <span className="text-xs font-normal text-muted-foreground">网关脚本 {gatewayHash}</span>
+    </span>
+  )
   const recentEvents = events.slice(0, 4)
   const primaryLabel = isPending
     ? state === 'starting' ? '正在启动' : '正在排空'
@@ -174,7 +193,7 @@ export function OverviewPage({ snapshot, events, onAction, onNavigate }: PagePro
                 {isPending ? <LoaderCircle className="animate-spin motion-reduce:animate-none" aria-hidden="true" /> : canControl || isExternal ? <Square aria-hidden="true" /> : <Play aria-hidden="true" />}
                 {primaryLabel}
               </Button>
-              <Button variant="outline" disabled={!canControl} aria-describedby="gateway-control-note" onClick={() => onAction('restart')} className="text-sm">
+              <Button variant="outline" disabled={!canControl} aria-describedby="gateway-control-note" onClick={() => setConfirmRestartOpen(true)} className="text-sm">
                 <RotateCw aria-hidden="true" />重启
               </Button>
               <Button variant="ghost" onClick={() => onAction('open-logs')} className="ml-auto text-sm">
@@ -212,13 +231,13 @@ export function OverviewPage({ snapshot, events, onAction, onNavigate }: PagePro
           </CardHeader>
           <CardContent className="space-y-5">
             <dl className="space-y-4 text-sm">
-              {[
+              {([
                 ['主机地址', endpoint.hostname],
                 [metricsAvailable ? '监听端口' : '配置端口', endpoint.port],
                 ['运行时长', uptime],
-                ['运行版本', version],
-                ['实例归属', owner],
-              ].map(([label, value]) => (
+                ['运行版本', versionCell(true)],
+                ['实例归属', ownerText],
+              ] as [string, ReactNode][]).map(([label, value]) => (
                 <div key={label} className="flex items-start justify-between gap-4">
                   <dt className="shrink-0 text-muted-foreground">{label}</dt>
                   <dd className="min-w-0 break-words text-right font-medium tabular-nums [overflow-wrap:anywhere]">{value}</dd>
@@ -289,14 +308,14 @@ export function OverviewPage({ snapshot, events, onAction, onNavigate }: PagePro
                   <p className="text-sm leading-6 text-muted-foreground">{metricsAvailable ? '当前已连接实例的运行详情。' : '实例尚未就绪，无法获取的指标显示为 —。'}</p>
                 </div>
                 <dl className="grid grid-cols-1 gap-x-8 gap-y-5 min-[480px]:grid-cols-2">
-                  {[
+                  {([
                     ['网关状态', copy.title],
-                    ['实例归属', owner],
+                    ['实例归属', ownerText],
                     ['进行中请求', inflight],
                     ['运行时长', uptime],
-                    ['运行版本', version],
+                    ['运行版本', versionCell(false)],
                     ['连接协议', endpoint.protocol.replace(':', '').toUpperCase()],
-                  ].map(([label, value]) => (
+                  ] as [string, ReactNode][]).map(([label, value]) => (
                     <div key={label} className="min-w-0 space-y-1.5">
                       <dt className="text-sm text-muted-foreground">{label}</dt>
                       <dd className="break-words text-base font-medium tabular-nums [overflow-wrap:anywhere]">{value}</dd>
@@ -333,6 +352,21 @@ export function OverviewPage({ snapshot, events, onAction, onNavigate }: PagePro
           </CardContent>
         </Card>
       </section>
+
+      <AlertDialog open={confirmRestartOpen} onOpenChange={setConfirmRestartOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>安全重启网关？</AlertDialogTitle>
+            <AlertDialogDescription>
+              将先优雅排空在途请求，再重启网关，最长等待 60 秒。网关受理重启不等于已恢复，恢复后面板状态会自动刷新。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction onClick={() => onAction('restart')}>确认重启</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 }

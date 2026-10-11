@@ -9,7 +9,8 @@ export interface GatewaySnapshot {
   inflight: number | null
   uptime: string | null
   version: string | null
-  owner: 'window' | 'external' | null
+  // 实例归属（GLOSSARY）：当前窗口 | 外部进程 | 无。壳侧推导，始终有值。
+  owner: 'window' | 'external' | 'none'
 }
 // 活动事件（GLOSSARY）：壳侧把英文诊断记录提炼成的分级中文事件。
 // T1 为占位结构；真实字段与来源在 T5/T6 落地。

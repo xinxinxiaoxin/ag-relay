@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   ActivityIcon, ArrowUpRightIcon, CheckIcon, CopyIcon, FileTextIcon, MonitorIcon,
   MoreHorizontalIcon, NetworkIcon, PlayIcon, RotateCwIcon, SearchIcon, Settings2Icon,
@@ -29,9 +29,19 @@ import { LogsPage } from '@/pages/logs-page'
 import { SettingsPage } from '@/pages/settings-page'
 import { ENDPOINT, APP_VERSION, stateNames } from '@/lib/types'
 import type { ActivityEvent, GatewayAction, GatewaySnapshot, PageId } from '@/lib/types'
-import { getStatus, deriveSnapshot, getRecentEvents, STATUS_POLL_MS } from '@/lib/gateway'
+import {
+  getStatus, deriveSnapshot, getRecentEvents, getAppVersion,
+  startGateway, stopGateway, restartGateway, openLogsDir, STATUS_POLL_MS,
+} from '@/lib/gateway'
 
 const pageNames: Record<PageId, string> = { overview: '网关总览', logs: '诊断日志', settings: '偏好设置' }
+// start_gateway 失败原因 → 中文吐司（port_already_in_use 需先探测，单独处理，见 runStart）。
+const START_FAILURE_TEXT: Record<string, string> = {
+  node_missing: '自带 Node 运行时缺失，无法启动网关。',
+  gateway_script_missing: '网关脚本缺失，无法启动网关。',
+  spawn_failed: '拉起网关进程失败。',
+  job_setup_failed: '进程树兜底建立失败，已回滚。',
+}
 const navigation = [
   { id: 'overview' as const, name: '网关总览', icon: ActivityIcon },
   { id: 'logs' as const, name: '诊断日志', icon: FileTextIcon },
@@ -103,12 +113,21 @@ function AppSidebar({ page, onNavigate, onSearch, onAction }: {
 
 export default function App() {
   const [page, setPage] = useState<PageId>('overview')
-  const [snapshot, setSnapshot] = useState<GatewaySnapshot>({ state: 'stopped', inflight: null, uptime: null, version: null, owner: null })
+  const [snapshot, setSnapshot] = useState<GatewaySnapshot>({ state: 'stopped', inflight: null, uptime: null, version: null, owner: 'none' })
   const [events, setEvents] = useState<ActivityEvent[]>([])
   const [autostart, setAutostart] = useState(false)
   const [commandOpen, setCommandOpen] = useState(false)
   const [copyFallbackOpen, setCopyFallbackOpen] = useState(false)
+  // 变更型命令进行中的瞬态（受管启停/重启期间覆盖状态为 starting/draining，禁用控制并显示进度）。
+  const [busy, setBusy] = useState<null | 'starting' | 'draining'>(null)
+  // 运行版本「主显」：应用版本（Tauri app.getVersion()，浏览器回退 0.1.0）。
+  const [appVersion, setAppVersion] = useState('0.1.0')
   const mainRef = useRef<HTMLElement>(null)
+
+  // 立即刷新一次状态（变更型动作完成后调用，不等下一轮 3 秒轮询）。
+  const refreshStatus = useCallback(async () => {
+    setSnapshot(deriveSnapshot(await getStatus()))
+  }, [])
 
   // 状态轮询：挂载即首刷，此后每 STATUS_POLL_MS 刷新（8787 上有网关即接管显示）。
   useEffect(() => {
@@ -120,6 +139,13 @@ export default function App() {
     void tick()
     const timer = setInterval(() => void tick(), STATUS_POLL_MS)
     return () => { active = false; clearInterval(timer) }
+  }, [])
+
+  // 应用版本（主显运行版本）：挂载时取一次。
+  useEffect(() => {
+    let active = true
+    void getAppVersion().then(v => { if (active) setAppVersion(v) })
+    return () => { active = false }
   }, [])
 
   // 最近活动事件（T1 占位：mock；真实命令在 T5）。
@@ -146,20 +172,84 @@ export default function App() {
     catch { setCopyFallbackOpen(true) }
   }
 
-  // T1：变更型动作暂为占位（toast）。真实接线：start/stop/restart/open-logs（T2）、exit（T3）、命令面板/吐司（T8）。
+  // 受管/外部网关 变更型动作（T2 接真）：启停/重启走真实命令，依结果给中文吐司（绝不伪造成功），
+  // 完成后立即刷新状态（不等下一轮轮询）。starting/draining 为命令期间的瞬态 UI。
+  const runStart = async () => {
+    setBusy('starting')
+    try {
+      const r = await startGateway()
+      if (r.kind === 'started') {
+        toast('网关已启动', { icon: <CheckIcon className="size-4" /> })
+      } else if (r.kind === 'failed') {
+        if (r.reason === 'port_already_in_use') {
+          // 端口被占：先探测——可达说明已有网关在跑（接管显示，非错误），不可达才是占用失败
+          const status = await getStatus()
+          if (status.available) toast('检测到已有网关在运行，已接管显示其状态。')
+          else toast.error('端口 8787 已被占用，网关启动失败。')
+        } else {
+          toast.error(START_FAILURE_TEXT[r.reason] ?? `启动失败：${r.reason}`)
+        }
+      }
+    } finally {
+      setBusy(null)
+      void refreshStatus()
+    }
+  }
+
+  const runStop = async () => {
+    setBusy('draining')
+    try {
+      const r = await stopGateway()
+      switch (r.kind) {
+        case 'stopped': toast(r.graceful ? '网关已优雅停止。' : '网关已停止（超时后强制结束）。'); break
+        case 'stopped_external': toast(r.graceful ? '已优雅停止外部网关实例。' : '已强制停止外部网关实例。'); break
+        case 'external_stop_abandoned': toast('检测到外部网关，但归属无法核实，未执行停止。'); break
+        case 'not_running': toast('当前没有正在运行的网关。'); break
+        case 'failed': toast.error(`停止失败：${r.reason}`); break
+      }
+    } finally {
+      setBusy(null)
+      void refreshStatus()
+    }
+  }
+
+  const runRestart = async () => {
+    setBusy('draining')
+    try {
+      const r = await restartGateway()
+      switch (r.kind) {
+        case 'restarted': toast('已受理安全重启，排空后将自动重新拉起。'); break
+        case 'not_running': toast('网关未运行，请先启动。'); break
+        case 'timeout': toast('重启等待超时，可能仍在排空在途请求。'); break
+        case 'failed': toast.error(`安全重启失败：${r.detail}`); break
+      }
+    } finally {
+      setBusy(null)
+      void refreshStatus()
+    }
+  }
+
+  const runOpenLogs = async () => {
+    const r = await openLogsDir()
+    if (r.kind === 'opened') toast('已打开日志文件夹。')
+    else toast.error(`打开日志文件夹失败：${r.detail}`)
+  }
+
   const act = (action: GatewayAction) => {
     setCommandOpen(false)
     switch (action) {
       case 'copy': void copyEndpoint(); break
-      case 'start': toast('占位：启动网关将在后续版本接入'); break
-      case 'stop': toast('占位：停止网关将在后续版本接入'); break
-      case 'restart': toast('占位：安全重启将在后续版本接入'); break
-      case 'open-logs': toast('占位：打开日志文件夹将在后续版本接入'); break
-      case 'exit': toast('占位：退出应用将在后续版本接入'); break
+      case 'start': void runStart(); break
+      case 'stop': void runStop(); break
+      case 'restart': void runRestart(); break
+      case 'open-logs': void runOpenLogs(); break
+      case 'exit': toast('退出功能将随偏好设置页一并接入。'); break
     }
   }
 
-  const common = { snapshot, events, onAction: act, onNavigate: navigate }
+  // 命令进行中用瞬态状态覆盖显示（禁用控制并显示进度），底层 snapshot 仍由轮询持续更新。
+  const view: GatewaySnapshot = busy ? { ...snapshot, state: busy } : snapshot
+  const common = { snapshot: view, events, onAction: act, onNavigate: navigate }
   return (
     <TooltipProvider delayDuration={200}>
       <SidebarProvider defaultOpen style={{ '--sidebar-width': '15rem', '--sidebar-width-icon': '4rem' } as React.CSSProperties}>
@@ -172,7 +262,7 @@ export default function App() {
           </header>
           <main ref={mainRef} className="app-main min-w-0 flex-1 px-5 pb-7 pt-7 sm:px-6 lg:px-8 lg:pt-8" id="main-content">
             <div className="mx-auto w-full max-w-[1280px]">
-              {page === 'overview' && <OverviewPage {...common} />}
+              {page === 'overview' && <OverviewPage {...common} appVersion={appVersion} />}
               {page === 'logs' && <LogsPage {...common} />}
               {page === 'settings' && <SettingsPage {...common} autostart={autostart} onAutostartChange={value => { setAutostart(value); toast(value ? '占位：登录后启动将在后续版本接入' : '占位：已关闭（登录后启动将在后续版本接入）') }} />}
             </div>
@@ -197,7 +287,7 @@ export default function App() {
       </CommandDialog>
       <Dialog open={copyFallbackOpen} onOpenChange={setCopyFallbackOpen}><DialogContent><DialogHeader><DialogTitle>复制连接地址</DialogTitle><DialogDescription>系统暂不允许自动复制，请选中下方地址手动复制。</DialogDescription></DialogHeader><Input aria-label="手动复制的连接地址" value={ENDPOINT} readOnly autoFocus onFocus={event => event.currentTarget.select()} className="font-mono" /></DialogContent></Dialog>
       <Toaster theme="light" position="bottom-right" closeButton />
-      <div className="sr-only" aria-live="polite" aria-atomic="true">{stateNames[snapshot.state]}。{snapshot.inflight === null ? '暂无运行数据' : `在途请求 ${snapshot.inflight} 个`}</div>
+      <div className="sr-only" aria-live="polite" aria-atomic="true">{stateNames[view.state]}。{view.inflight === null ? '暂无运行数据' : `在途请求 ${view.inflight} 个`}</div>
     </TooltipProvider>
   )
 }

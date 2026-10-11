@@ -11,22 +11,28 @@
 import type { ActivityEvent, GatewaySnapshot } from './types'
 
 // get_status 的真实返回形状（camelCase，见现有 gateway_status.rs / 原生 main.js）。
+// owner 为 T2 新增：实例归属，壳侧推导（status 接口本身无此字段）。
 export interface StatusSnapshot {
   available: boolean
   version: string | null
   activeRequests: number | null
   uptimeText: string | null
+  owner: 'window' | 'external' | 'none'
 }
 
 type InvokeFn = <T>(cmd: string, args?: Record<string, unknown>) => Promise<T>
 
 interface TauriGlobal {
   core?: { invoke?: InvokeFn }
+  app?: { getVersion?: () => Promise<string> }
+}
+
+function tauriGlobal(): TauriGlobal | null {
+  return (globalThis as { __TAURI__?: TauriGlobal }).__TAURI__ ?? null
 }
 
 function tauriInvoke(): InvokeFn | null {
-  const g = (globalThis as { __TAURI__?: TauriGlobal }).__TAURI__
-  return g?.core?.invoke ?? null
+  return tauriGlobal()?.core?.invoke ?? null
 }
 
 /** 是否运行在 Tauri 运行时内（供浏览器回退判断）。 */
@@ -45,12 +51,14 @@ export const STATUS_POLL_MS = 3000
 
 // 命令层异常时的兜底：整体按未运行显示（永不抛错、不闪退）。
 const OFFLINE_STATUS: StatusSnapshot = {
-  available: false, version: null, activeRequests: null, uptimeText: null,
+  available: false, version: null, activeRequests: null, uptimeText: null, owner: 'none',
 }
 
 // 浏览器回退 mock：复用定稿设计的「运行中」语义，仅用于开发渲染/截图。
+// version 用网关脚本短哈希样例（8 位十六进制），与应用版本 getAppVersion() 区分开，
+// 便于截图核对「运行版本」主/次两行语义不同。
 const MOCK_STATUS: StatusSnapshot = {
-  available: true, version: 'v0.1.0', activeRequests: 3, uptimeText: '2 小时 18 分',
+  available: true, version: 'e8395e0f', activeRequests: 3, uptimeText: '2 小时 18 分', owner: 'window',
 }
 
 const MOCK_EVENTS: ActivityEvent[] = [
@@ -70,20 +78,88 @@ export async function getStatus(): Promise<StatusSnapshot> {
   }
 }
 
-// 把命令层的 StatusSnapshot 派生成 UI 的 GatewaySnapshot。
-// T1 占位派生：available → 运行中（当前窗口）；否则 未启动。
-// 实例归属（external/无）、端口冲突态、版本主/次拆分留给 T2（见 frontend-map 警告），此处不实现。
+// 把命令层的 StatusSnapshot 派生成 UI 的 GatewaySnapshot（T2：接真归属 + 版本次显 + 外部接管）。
+//  - 可达 + 归属=外部进程 → 外部实例态（external，设计稿只读文案留给 T7 按 ADR-0003 改写）；
+//  - 可达 + 其余（当前窗口 / 无法核实）→ 运行中；
+//  - 不可达 → 未启动。
+// 端口冲突态（error）由命令结果驱动（start_gateway 返回 port_already_in_use 且随后仍不可达），
+// 不在轮询派生里臆测——留给 T7 的错误态 UI。
 export function deriveSnapshot(status: StatusSnapshot): GatewaySnapshot {
   if (status.available) {
     return {
-      state: 'running',
+      state: status.owner === 'external' ? 'external' : 'running',
       inflight: status.activeRequests,
       uptime: status.uptimeText,
       version: status.version,
-      owner: 'window',
+      owner: status.owner,
     }
   }
-  return { state: 'stopped', inflight: null, uptime: null, version: null, owner: null }
+  return { state: 'stopped', inflight: null, uptime: null, version: null, owner: status.owner }
+}
+
+// 应用版本（运行版本「主显」）：优先 Tauri app.getVersion()（取自 tauri.conf.json 的 version），
+// 浏览器（无 window.__TAURI__）或权限/运行时异常时回退常量 "0.1.0"。返回裸语义版本（无 v 前缀）。
+// SHARED CONTRACT（T3/合并者）：若将来必须走 Rust 命令，统一命名 get_app_version → String。
+const FALLBACK_APP_VERSION = '0.1.0'
+export async function getAppVersion(): Promise<string> {
+  const getVersion = tauriGlobal()?.app?.getVersion
+  if (typeof getVersion === 'function') {
+    try {
+      const v = await getVersion()
+      if (typeof v === 'string' && v.trim()) return v.trim()
+    } catch {
+      // 权限缺失 / 运行时异常 → 回退常量
+    }
+  }
+  return FALLBACK_APP_VERSION
+}
+
+// 受管/外部网关 变更型动作（T2 接真；浏览器回退占位结果，使 vite 预览可点按截图）。
+// 返回形状逐字对齐 Rust 命令枚举（serde tag="kind", snake_case），前端按 kind 分支给中文吐司。
+export type GatewayActionResult =
+  | { kind: 'started'; supervisor_pid: number }
+  | { kind: 'stopped'; graceful: boolean; exit_code: number | null }
+  | { kind: 'stopped_external'; graceful: boolean }
+  | { kind: 'external_stop_abandoned' }
+  | { kind: 'not_running' }
+  | { kind: 'failed'; reason: string }
+
+export type RestartResult =
+  | { kind: 'restarted' }
+  | { kind: 'not_running' }
+  | { kind: 'timeout' }
+  | { kind: 'failed'; detail: string }
+
+export type LogsDirResult =
+  | { kind: 'opened'; path: string }
+  | { kind: 'failed'; detail: string }
+
+/** 启动受管网关（start_gateway）。浏览器回退：占位「已启动」。 */
+export async function startGateway(): Promise<GatewayActionResult> {
+  if (!isTauri()) return { kind: 'started', supervisor_pid: 0 }
+  try { return await invoke<GatewayActionResult>('start_gateway') }
+  catch (e) { return { kind: 'failed', reason: `invoke_error: ${String(e)}` } }
+}
+
+/** 停止网关（stop_gateway；受管 + 外部 F1）。浏览器回退：占位「已优雅停止」。 */
+export async function stopGateway(): Promise<GatewayActionResult> {
+  if (!isTauri()) return { kind: 'stopped', graceful: true, exit_code: 0 }
+  try { return await invoke<GatewayActionResult>('stop_gateway') }
+  catch (e) { return { kind: 'failed', reason: `invoke_error: ${String(e)}` } }
+}
+
+/** 安全重启（restart_gateway，60 秒上限）。浏览器回退：占位「已受理」。 */
+export async function restartGateway(): Promise<RestartResult> {
+  if (!isTauri()) return { kind: 'restarted' }
+  try { return await invoke<RestartResult>('restart_gateway') }
+  catch (e) { return { kind: 'failed', detail: String(e) } }
+}
+
+/** 打开日志文件夹（open_logs_dir）。浏览器回退：占位「已打开」。 */
+export async function openLogsDir(): Promise<LogsDirResult> {
+  if (!isTauri()) return { kind: 'opened', path: '（浏览器预览）日志文件夹' }
+  try { return await invoke<LogsDirResult>('open_logs_dir') }
+  catch (e) { return { kind: 'failed', detail: String(e) } }
 }
 
 /**
