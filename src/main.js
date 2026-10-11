@@ -1,4 +1,5 @@
 // T2：启动/停止网关按钮 → Rust 命令层（start_gateway / stop_gateway）。
+// T6：开机自启开关 → get_autostart / set_autostart_enabled。
 // 其余按钮（安全重启/打开日志/退出）T3/T4/T5 接入。
 
 const { invoke } = window.__TAURI__.core;
@@ -121,3 +122,51 @@ btnStop.addEventListener('click', async () => {
     setBusy(false);
   }
 });
+
+// ---- T6：开机自启开关（读写注册表 Run 键，即时生效） ----
+
+const autostartToggle = document.getElementById('autostart-toggle');
+const autostartNote = document.getElementById('autostart-note');
+
+function setAutostartNote(text, isError) {
+  autostartNote.textContent = text;
+  autostartNote.classList.toggle('error', Boolean(isError));
+}
+
+async function loadAutostart() {
+  try {
+    const status = await invoke('get_autostart');
+    autostartToggle.checked = status.enabled;
+    if (Array.isArray(status.notes) && status.notes.length > 0) {
+      setAutostartNote(status.notes.join('；'));
+    }
+  } catch (err) {
+    setAutostartNote(`开机自启状态获取失败：${err}`, true);
+  }
+}
+
+autostartToggle.addEventListener('change', async () => {
+  const want = autostartToggle.checked;
+  autostartToggle.disabled = true;
+  try {
+    const res = await invoke('set_autostart_enabled', { enabled: want });
+    if (res.kind === 'ok') {
+      autostartToggle.checked = res.status.enabled;
+      setAutostartNote(
+        res.status.enabled
+          ? '开机自启：已开启（指向当前程序，登录后自动启动）'
+          : '开机自启：已关闭（重启电脑后不再自动启动）'
+      );
+    } else {
+      autostartToggle.checked = !want; // 失败回弹到设置前的状态
+      setAutostartNote(`开机自启设置失败：${res.reason}`, true);
+    }
+  } catch (err) {
+    autostartToggle.checked = !want;
+    setAutostartNote(`开机自启设置失败：调用命令层出错 ${err}`, true);
+  } finally {
+    autostartToggle.disabled = false;
+  }
+});
+
+loadAutostart();
