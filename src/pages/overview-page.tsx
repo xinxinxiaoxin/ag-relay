@@ -6,6 +6,7 @@ import {
   Clock3,
   Copy,
   Ellipsis,
+  ExternalLink,
   FileText,
   LoaderCircle,
   LockKeyhole,
@@ -15,8 +16,10 @@ import {
   Server,
   Settings2,
   Shield,
+  ShieldAlert,
   Square,
   TriangleAlert,
+  X,
 } from 'lucide-react'
 
 import {
@@ -27,9 +30,10 @@ import {
   AlertDialogDescription,
   AlertDialogFooter,
   AlertDialogHeader,
+  AlertDialogMedia,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
+import { Alert, AlertAction, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -45,30 +49,34 @@ import { Input } from '@/components/ui/input'
 import { Item, ItemContent, ItemDescription, ItemGroup, ItemMedia, ItemTitle } from '@/components/ui/item'
 import { Separator } from '@/components/ui/separator'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import { ENDPOINT, type GatewayState, type PageProps } from '@/lib/types'
+import { ENDPOINT, type GatewayErrorInfo, type GatewayState, type PageProps } from '@/lib/types'
 
 const endpoint = new URL(ENDPOINT)
 
 const stateCopy: Record<GatewayState, { title: string; description: string }> = {
   running: { title: '运行中', description: '网关已就绪，可以连接本地客户端。' },
   stopped: { title: '未启动', description: '启动网关后，即可使用下方地址连接。' },
-  external: { title: '已有实例', description: '已连接外部实例，当前窗口仅提供只读查看。' },
+  external: { title: '运行中', description: '端口上有外部实例在运行，已接管显示其状态；停止或重启会先二次确认。' },
   error: { title: '端口冲突', description: '网关未能启动，请先检查端口占用情况。' },
   starting: { title: '正在启动', description: '正在准备网关，请稍候。' },
   draining: { title: '正在排空', description: '正在等待进行中的请求结束，请稍候。' },
 }
 
-export function OverviewPage({ snapshot, events, onAction, onNavigate, appVersion }: PageProps & { appVersion: string }) {
+export function OverviewPage({ snapshot, events, onAction, onNavigate, appVersion, gatewayError, onDismissError }: PageProps & { appVersion: string; gatewayError: GatewayErrorInfo | null; onDismissError: () => void }) {
   const { state } = snapshot
   const copy = stateCopy[state]
   const metricsAvailable = state === 'running' || state === 'external' || state === 'draining'
   const isPending = state === 'starting' || state === 'draining'
   const isExternal = state === 'external'
-  const canControl = state === 'running' && snapshot.owner === 'window'
+  // 受管运行中：当前窗口拉起且在运行 → 可直接停止/重启（无需外部二次确认）。
+  const isManaged = state === 'running' && snapshot.owner === 'window'
   const canStart = state === 'stopped'
-  const primaryDisabled = !canControl && !canStart
-  // 安全重启二次确认（AlertDialog）就地管理于本页组件，避免外提到 App 外壳。
+  // 停止/重启能力：受管运行中 或 外部实例 均保留（ADR-0003：外部非只读，但破坏性操作加二次确认）。
+  const canStopOrRestart = isManaged || isExternal
+  const primaryDisabled = !canStopOrRestart && !canStart
+  // 二次确认（AlertDialog）就地管理于本页：受管「安全重启」+ 外部实例「停止 / 重启」。
   const [confirmRestartOpen, setConfirmRestartOpen] = useState(false)
+  const [externalConfirm, setExternalConfirm] = useState<null | 'stop' | 'restart'>(null)
   const inflight = metricsAvailable && snapshot.inflight !== null
     ? snapshot.inflight.toLocaleString('zh-CN')
     : '—'
@@ -87,11 +95,22 @@ export function OverviewPage({ snapshot, events, onAction, onNavigate, appVersio
   const recentEvents = events.slice(0, 4)
   const primaryLabel = isPending
     ? state === 'starting' ? '正在启动' : '正在排空'
-    : state === 'running' || isExternal ? '停止网关' : '启动网关'
+    : canStopOrRestart ? '停止网关' : '启动网关'
+  // 主控制按钮：未启动→启动；外部实例→停止前二次确认；受管运行中→直接停止。
+  const handlePrimary = () => {
+    if (canStart) { onAction('start'); return }
+    if (isExternal) { setExternalConfirm('stop'); return }
+    onAction('stop')
+  }
+  // 重启：外部实例→二次确认；受管→安全重启确认（排空 + 60 秒上限）。
+  const handleRestart = () => {
+    if (isExternal) setExternalConfirm('restart')
+    else setConfirmRestartOpen(true)
+  }
   const controlNote = isExternal
-    ? '保守设计：外部实例只读，停止与重启不可用。请在原启动位置管理。'
-    : state === 'running' && !canControl
-      ? '尚未确认当前窗口的控制权，停止与重启暂不可用。'
+    ? '该网关并非本窗口拉起（外部实例）。可停止或重启，但会先二次确认，并仅在经 supervisor 父链核实归属后执行——宁可不杀，不可误杀。'
+    : state === 'running' && !isManaged
+      ? '端口上有网关在运行，但尚未核实归属，停止与重启暂不可用（宁可不杀，不可误杀）。'
       : isPending
         ? '状态切换期间，控制操作暂不可用。'
         : state === 'error'
@@ -141,14 +160,14 @@ export function OverviewPage({ snapshot, events, onAction, onNavigate, appVersio
                 网关控制
               </CardTitle>
               <Badge variant="secondary" className="text-xs font-normal">
-                {isExternal ? '外部实例 · 只读' : canControl ? '当前窗口管理' : '本地网关'}
+                {isExternal ? '接管显示' : isManaged ? '当前窗口管理' : '本地网关'}
               </Badge>
             </div>
           </CardHeader>
           <CardContent className="space-y-5">
             <div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-4">
               <div className="min-w-0 space-y-2" role="status" aria-live="polite" aria-atomic="true">
-                <div className={`flex items-center gap-3 ${state === 'error' ? 'text-destructive' : ''}`}>
+                <div className={`flex flex-wrap items-center gap-3 ${state === 'error' ? 'text-destructive' : ''}`}>
                   {isPending ? (
                     <LoaderCircle className="size-5 shrink-0 animate-spin motion-reduce:animate-none" aria-hidden="true" />
                   ) : state === 'error' ? (
@@ -157,6 +176,11 @@ export function OverviewPage({ snapshot, events, onAction, onNavigate, appVersio
                     <span aria-hidden="true" className={`size-2.5 shrink-0 rounded-full ${metricsAvailable ? 'bg-foreground' : 'border-2 border-muted-foreground'}`} />
                   )}
                   <h2 className="text-4xl font-semibold leading-tight tracking-[-0.04em] max-[380px]:text-3xl">{copy.title}</h2>
+                  {isExternal && (
+                    <Badge className="h-6 gap-1 px-2.5 text-xs font-medium" aria-label="外部实例：非本窗口拉起">
+                      <ExternalLink aria-hidden="true" />外部实例
+                    </Badge>
+                  )}
                 </div>
                 <p className="max-w-sm text-sm leading-6 text-muted-foreground">{copy.description}</p>
               </div>
@@ -187,13 +211,13 @@ export function OverviewPage({ snapshot, events, onAction, onNavigate, appVersio
               <Button
                 disabled={primaryDisabled}
                 aria-describedby="gateway-control-note"
-                onClick={() => onAction(canControl || isExternal ? 'stop' : 'start')}
+                onClick={handlePrimary}
                 className="min-w-28 text-sm"
               >
-                {isPending ? <LoaderCircle className="animate-spin motion-reduce:animate-none" aria-hidden="true" /> : canControl || isExternal ? <Square aria-hidden="true" /> : <Play aria-hidden="true" />}
+                {isPending ? <LoaderCircle className="animate-spin motion-reduce:animate-none" aria-hidden="true" /> : canStopOrRestart ? <Square aria-hidden="true" /> : <Play aria-hidden="true" />}
                 {primaryLabel}
               </Button>
-              <Button variant="outline" disabled={!canControl} aria-describedby="gateway-control-note" onClick={() => setConfirmRestartOpen(true)} className="text-sm">
+              <Button variant="outline" disabled={!canStopOrRestart} aria-describedby="gateway-control-note" onClick={handleRestart} className="text-sm">
                 <RotateCw aria-hidden="true" />重启
               </Button>
               <Button variant="ghost" onClick={() => onAction('open-logs')} className="ml-auto text-sm">
@@ -201,16 +225,23 @@ export function OverviewPage({ snapshot, events, onAction, onNavigate, appVersio
               </Button>
             </div>
 
-            {state === 'error' && (
+            {gatewayError && (
               <Alert variant="destructive" className="border-destructive/25 bg-destructive/5">
                 <TriangleAlert aria-hidden="true" />
-                <AlertTitle>端口 {endpoint.port} 已被占用</AlertTitle>
+                <AlertTitle>{gatewayError.title}</AlertTitle>
                 <AlertDescription className="text-sm leading-6">
-                  <p>请确认占用端口的程序，再手动释放端口或检查连接设置。本页面不会关闭占用进程。</p>
-                  <Button variant="outline" size="sm" className="mt-1 text-sm text-foreground" onClick={() => onNavigate('settings')}>
-                    检查设置<ArrowRight aria-hidden="true" />
-                  </Button>
+                  <p>{gatewayError.detail}</p>
+                  {gatewayError.portConflict && (
+                    <Button variant="outline" size="sm" className="mt-1 text-sm text-foreground" onClick={() => onNavigate('settings')}>
+                      检查设置<ArrowRight aria-hidden="true" />
+                    </Button>
+                  )}
                 </AlertDescription>
+                <AlertAction>
+                  <Button variant="ghost" size="icon" className="size-7 text-destructive hover:text-destructive" aria-label="忽略错误提示" onClick={onDismissError}>
+                    <X aria-hidden="true" />
+                  </Button>
+                </AlertAction>
               </Alert>
             )}
 
@@ -364,6 +395,36 @@ export function OverviewPage({ snapshot, events, onAction, onNavigate, appVersio
           <AlertDialogFooter>
             <AlertDialogCancel>取消</AlertDialogCancel>
             <AlertDialogAction onClick={() => onAction('restart')}>确认重启</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* 外部实例破坏性操作二次确认（ADR-0003）：外部网关非只读，停止/重启前须确认。 */}
+      <AlertDialog open={externalConfirm !== null} onOpenChange={(open) => { if (!open) setExternalConfirm(null) }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogMedia>
+              <ShieldAlert aria-hidden="true" />
+            </AlertDialogMedia>
+            <AlertDialogTitle>{externalConfirm === 'restart' ? '重启外部实例？' : '停止外部实例？'}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {externalConfirm === 'restart'
+                ? '将优雅排空在途请求后，重启监听端口上的外部网关，最长等待 60 秒。'
+                : '将优雅停止监听端口上的外部网关（先排空在途请求）。'}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <div className="space-y-2 text-xs leading-5 text-muted-foreground">
+            <p>该网关<span className="font-medium text-foreground">并非本窗口拉起</span>（外部实例）。</p>
+            <p>仅在经 supervisor 父链核实其父进程后才会真正执行；无法核实则保持不动——宁可不杀，不可误杀。</p>
+          </div>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              onClick={() => { const action = externalConfirm; setExternalConfirm(null); if (action) onAction(action) }}
+            >
+              {externalConfirm === 'restart' ? '确认重启' : '确认停止'}
+            </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>

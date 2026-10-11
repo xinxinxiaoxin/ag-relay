@@ -68,9 +68,39 @@ const MOCK_EVENTS: ActivityEvent[] = [
   { id: 'mock-4', time: '11:59:59', level: 'info', title: '工作空间已准备', detail: '本地运行环境初始化完成。' },
 ]
 
-/** 读取网关状态：Tauri 内走真实 get_status，浏览器回退 mock。 */
+// ── 开发态 mock 场景（T7；仅浏览器预览/截图，绝不进真机逻辑）────────────────
+// 通过 URL 查询参数 ?mock=<scenario> 切换浏览器回退数据，便于对「外部实例」态与
+// 「错误态」截图留档。isTauri() 为真时恒返回 ''，真机路径（走真实命令）完全不受影响。
+// 取值：running(默认) | external | stopped | port_conflict | start_fail | stop_fail | restart_fail。
+export type MockScenario =
+  | '' | 'running' | 'external' | 'stopped'
+  | 'port_conflict' | 'start_fail' | 'stop_fail' | 'restart_fail'
+function mockScenario(): MockScenario {
+  if (isTauri()) return ''
+  try {
+    const search = typeof window !== 'undefined' ? window.location.search : ''
+    return (new URLSearchParams(search).get('mock') ?? '') as MockScenario
+  } catch {
+    return ''
+  }
+}
+// 外部实例态：可达但归属为「外部进程」（接管显示真实指标）。
+const MOCK_EXTERNAL_STATUS: StatusSnapshot = {
+  available: true, version: 'a1b2c3d4', activeRequests: 2, uptimeText: '1 小时 02 分', owner: 'external',
+}
+function mockStatusFor(scenario: MockScenario): StatusSnapshot {
+  switch (scenario) {
+    case 'external': return MOCK_EXTERNAL_STATUS
+    case 'port_conflict': // 端口被占且探测不可达 → 未启动，错误态由 start 结果驱动
+    case 'start_fail':
+    case 'stopped': return OFFLINE_STATUS
+    default: return MOCK_STATUS // running / stop_fail / restart_fail → 受管运行中
+  }
+}
+
+/** 读取网关状态：Tauri 内走真实 get_status，浏览器回退 mock（可经 ?mock= 切场景）。 */
 export async function getStatus(): Promise<StatusSnapshot> {
-  if (!isTauri()) return MOCK_STATUS
+  if (!isTauri()) return mockStatusFor(mockScenario())
   try {
     return await invoke<StatusSnapshot>('get_status')
   } catch {
@@ -135,23 +165,36 @@ export type LogsDirResult =
   | { kind: 'opened'; path: string }
   | { kind: 'failed'; detail: string }
 
-/** 启动受管网关（start_gateway）。浏览器回退：占位「已启动」。 */
+/** 启动受管网关（start_gateway）。浏览器回退：默认「已启动」，?mock=port_conflict|start_fail 时回退失败结果。 */
 export async function startGateway(): Promise<GatewayActionResult> {
-  if (!isTauri()) return { kind: 'started', supervisor_pid: 0 }
+  if (!isTauri()) {
+    const s = mockScenario()
+    if (s === 'port_conflict') return { kind: 'failed', reason: 'port_already_in_use' }
+    if (s === 'start_fail') return { kind: 'failed', reason: 'node_missing' }
+    return { kind: 'started', supervisor_pid: 0 }
+  }
   try { return await invoke<GatewayActionResult>('start_gateway') }
   catch (e) { return { kind: 'failed', reason: `invoke_error: ${String(e)}` } }
 }
 
-/** 停止网关（stop_gateway；受管 + 外部 F1）。浏览器回退：占位「已优雅停止」。 */
+/** 停止网关（stop_gateway；受管 + 外部 F1）。浏览器回退：默认「已优雅停止」，?mock=external|stop_fail 另有结果。 */
 export async function stopGateway(): Promise<GatewayActionResult> {
-  if (!isTauri()) return { kind: 'stopped', graceful: true, exit_code: 0 }
+  if (!isTauri()) {
+    const s = mockScenario()
+    if (s === 'stop_fail') return { kind: 'failed', reason: 'external_stop_failed' }
+    if (s === 'external') return { kind: 'stopped_external', graceful: true }
+    return { kind: 'stopped', graceful: true, exit_code: 0 }
+  }
   try { return await invoke<GatewayActionResult>('stop_gateway') }
   catch (e) { return { kind: 'failed', reason: `invoke_error: ${String(e)}` } }
 }
 
-/** 安全重启（restart_gateway，60 秒上限）。浏览器回退：占位「已受理」。 */
+/** 安全重启（restart_gateway，60 秒上限）。浏览器回退：默认「已受理」，?mock=restart_fail 时回退失败。 */
 export async function restartGateway(): Promise<RestartResult> {
-  if (!isTauri()) return { kind: 'restarted' }
+  if (!isTauri()) {
+    if (mockScenario() === 'restart_fail') return { kind: 'failed', detail: '排空超时后无法重新拉起（模拟）' }
+    return { kind: 'restarted' }
+  }
   try { return await invoke<RestartResult>('restart_gateway') }
   catch (e) { return { kind: 'failed', detail: String(e) } }
 }

@@ -27,6 +27,14 @@ export interface PageProps {
   onAction: (action: GatewayAction) => void
   onNavigate: (page: PageId) => void
 }
+// 网关生命周期错误态（T7，ADR-0003 错误态）：由变更型命令的真实失败结果驱动，
+// 在总览上作持久化、可操作的中文错误条呈现（非一次性吐司）。
+// portConflict=true 另驱动大状态为「端口冲突」(error)；其余保持派生状态仅加错误条。
+export interface GatewayErrorInfo {
+  portConflict: boolean
+  title: string
+  detail: string
+}
 export interface SettingsPageProps extends PageProps {
   autostart: boolean
   onAutostartChange: (value: boolean) => void
@@ -35,6 +43,6 @@ export const ENDPOINT = 'http://127.0.0.1:8787'
 export const DISPLAY_ENDPOINT = '127.0.0.1:8787'
 export const APP_VERSION = 'v0.1.0'
 export const stateNames: Record<GatewayState, string> = {
-  running: '运行中', stopped: '未启动', external: '已有实例 · 只读',
+  running: '运行中', stopped: '未启动', external: '外部实例',
   error: '端口冲突', starting: '正在启动', draining: '正在排空',
 }

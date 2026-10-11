@@ -28,7 +28,7 @@ import { OverviewPage } from '@/pages/overview-page'
 import { LogsPage } from '@/pages/logs-page'
 import { SettingsPage } from '@/pages/settings-page'
 import { ENDPOINT, APP_VERSION, stateNames } from '@/lib/types'
-import type { ActivityEvent, GatewayAction, GatewaySnapshot, PageId } from '@/lib/types'
+import type { ActivityEvent, GatewayAction, GatewayErrorInfo, GatewaySnapshot, PageId } from '@/lib/types'
 import {
   getStatus, deriveSnapshot, getRecentEvents, getAppVersion,
   startGateway, stopGateway, restartGateway, openLogsDir, STATUS_POLL_MS,
@@ -42,6 +42,8 @@ const START_FAILURE_TEXT: Record<string, string> = {
   spawn_failed: '拉起网关进程失败。',
   job_setup_failed: '进程树兜底建立失败，已回滚。',
 }
+// 端口冲突错误态详情（T7 错误态；端口被占且探测不可达时持久呈现于总览）。
+const PORT_CONFLICT_DETAIL = '另一个程序正在占用 8787 端口，且未响应网关探测。请关闭占用该端口的程序后重试；本页面不会强制结束占用进程。'
 const navigation = [
   { id: 'overview' as const, name: '网关总览', icon: ActivityIcon },
   { id: 'logs' as const, name: '诊断日志', icon: FileTextIcon },
@@ -120,6 +122,8 @@ export default function App() {
   const [copyFallbackOpen, setCopyFallbackOpen] = useState(false)
   // 变更型命令进行中的瞬态（受管启停/重启期间覆盖状态为 starting/draining，禁用控制并显示进度）。
   const [busy, setBusy] = useState<null | 'starting' | 'draining'>(null)
+  // 网关生命周期错误态（T7，ADR-0003）：由变更型命令的真实失败结果驱动，在总览上持久、可操作地呈现。
+  const [gatewayError, setGatewayError] = useState<GatewayErrorInfo | null>(null)
   // 运行版本「主显」：应用版本（Tauri app.getVersion()，浏览器回退 0.1.0）。
   const [appVersion, setAppVersion] = useState('0.1.0')
   const mainRef = useRef<HTMLElement>(null)
@@ -134,7 +138,10 @@ export default function App() {
     let active = true
     const tick = async () => {
       const status = await getStatus()
-      if (active) setSnapshot(deriveSnapshot(status))
+      if (!active) return
+      setSnapshot(deriveSnapshot(status))
+      // 端口冲突态在网关恢复可达后自动消解（其余错误条保留到用户重试或忽略）。
+      if (status.available) setGatewayError(prev => (prev?.portConflict ? null : prev))
     }
     void tick()
     const timer = setInterval(() => void tick(), STATUS_POLL_MS)
@@ -175,6 +182,7 @@ export default function App() {
   // 受管/外部网关 变更型动作（T2 接真）：启停/重启走真实命令，依结果给中文吐司（绝不伪造成功），
   // 完成后立即刷新状态（不等下一轮轮询）。starting/draining 为命令期间的瞬态 UI。
   const runStart = async () => {
+    setGatewayError(null)
     setBusy('starting')
     try {
       const r = await startGateway()
@@ -184,10 +192,16 @@ export default function App() {
         if (r.reason === 'port_already_in_use') {
           // 端口被占：先探测——可达说明已有网关在跑（接管显示，非错误），不可达才是占用失败
           const status = await getStatus()
-          if (status.available) toast('检测到已有网关在运行，已接管显示其状态。')
-          else toast.error('端口 8787 已被占用，网关启动失败。')
+          if (status.available) {
+            toast('检测到已有网关在运行，已接管显示其状态。')
+          } else {
+            toast.error('端口 8787 已被占用，网关启动失败。')
+            setGatewayError({ portConflict: true, title: '端口 8787 已被占用', detail: PORT_CONFLICT_DETAIL })
+          }
         } else {
-          toast.error(START_FAILURE_TEXT[r.reason] ?? `启动失败：${r.reason}`)
+          const text = START_FAILURE_TEXT[r.reason] ?? `启动失败：${r.reason}`
+          toast.error(text)
+          setGatewayError({ portConflict: false, title: '网关启动失败', detail: text })
         }
       }
     } finally {
@@ -197,6 +211,7 @@ export default function App() {
   }
 
   const runStop = async () => {
+    setGatewayError(null)
     setBusy('draining')
     try {
       const r = await stopGateway()
@@ -205,7 +220,10 @@ export default function App() {
         case 'stopped_external': toast(r.graceful ? '已优雅停止外部网关实例。' : '已强制停止外部网关实例。'); break
         case 'external_stop_abandoned': toast('检测到外部网关，但归属无法核实，未执行停止。'); break
         case 'not_running': toast('当前没有正在运行的网关。'); break
-        case 'failed': toast.error(`停止失败：${r.reason}`); break
+        case 'failed':
+          toast.error(`停止失败：${r.reason}`)
+          setGatewayError({ portConflict: false, title: '停止网关失败', detail: `停止网关时出错：${r.reason}。请稍后重试，或打开日志文件夹查看详情。` })
+          break
       }
     } finally {
       setBusy(null)
@@ -214,6 +232,7 @@ export default function App() {
   }
 
   const runRestart = async () => {
+    setGatewayError(null)
     setBusy('draining')
     try {
       const r = await restartGateway()
@@ -221,7 +240,10 @@ export default function App() {
         case 'restarted': toast('已受理安全重启，排空后将自动重新拉起。'); break
         case 'not_running': toast('网关未运行，请先启动。'); break
         case 'timeout': toast('重启等待超时，可能仍在排空在途请求。'); break
-        case 'failed': toast.error(`安全重启失败：${r.detail}`); break
+        case 'failed':
+          toast.error(`安全重启失败：${r.detail}`)
+          setGatewayError({ portConflict: false, title: '安全重启失败', detail: `重启网关时出错：${r.detail}。请稍后重试，或打开日志文件夹查看详情。` })
+          break
       }
     } finally {
       setBusy(null)
@@ -248,7 +270,11 @@ export default function App() {
   }
 
   // 命令进行中用瞬态状态覆盖显示（禁用控制并显示进度），底层 snapshot 仍由轮询持续更新。
-  const view: GatewaySnapshot = busy ? { ...snapshot, state: busy } : snapshot
+  const base: GatewaySnapshot = busy ? { ...snapshot, state: busy } : snapshot
+  // 端口冲突：无瞬态且底层未启动时，把大状态提升为「端口冲突」(error)，驱动总览错误态 UI（T7）。
+  const view: GatewaySnapshot = !busy && gatewayError?.portConflict && base.state === 'stopped'
+    ? { ...base, state: 'error' }
+    : base
   const common = { snapshot: view, events, onAction: act, onNavigate: navigate }
   return (
     <TooltipProvider delayDuration={200}>
@@ -262,7 +288,7 @@ export default function App() {
           </header>
           <main ref={mainRef} className="app-main min-w-0 flex-1 px-5 pb-7 pt-7 sm:px-6 lg:px-8 lg:pt-8" id="main-content">
             <div className="mx-auto w-full max-w-[1280px]">
-              {page === 'overview' && <OverviewPage {...common} appVersion={appVersion} />}
+              {page === 'overview' && <OverviewPage {...common} appVersion={appVersion} gatewayError={gatewayError} onDismissError={() => setGatewayError(null)} />}
               {page === 'logs' && <LogsPage {...common} />}
               {page === 'settings' && <SettingsPage {...common} autostart={autostart} onAutostartChange={value => { setAutostart(value); toast(value ? '占位：登录后启动将在后续版本接入' : '占位：已关闭（登录后启动将在后续版本接入）') }} />}
             </div>

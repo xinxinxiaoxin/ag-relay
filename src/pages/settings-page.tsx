@@ -184,7 +184,7 @@ export function SettingsPage(props: SettingsPageProps) {
               <div className="space-y-1.5">
                 <h3 className="text-sm font-medium leading-5">外部实例</h3>
                 <p className="text-xs leading-5 text-muted-foreground">
-                  只读查看，不接管、不停止、不重启。
+                  端口上的外部网关会被接管显示状态，并保留停止与重启能力；破坏性操作前会二次确认，且仅在经 supervisor 父链核实归属后执行（宁可不杀，不可误杀）。
                 </p>
               </div>
             </div>
