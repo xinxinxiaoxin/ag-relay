@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "主窗口核心权限；后续工单接入网关控制时按需扩充",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}
