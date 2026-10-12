@@ -654,9 +654,10 @@ mod tests {
         fs::rename(&live, &rotated).unwrap();
         write_file(&live, &format!("{L_FIN_503}\n"));
         assert_eq!(reader.poll().unwrap(), 3, "旧句柄尾部 + 中间.1 + 当前文件");
-        assert_eq!(reader.poll().unwrap(), 0);
+        assert_eq!(reader.poll().unwrap(), 0, "重复通知不能重放旧档");
+        // 中间旧档已被删除/覆盖，磁盘上只剩仍存在的两个世代各一条；轮转补读不重复由上面的 poll 计数保证。
         let page = query_activity_in(&live, &rotated, &query(LevelFilter::All, "", 0, 10)).unwrap();
-        assert_eq!(page.events.len(), 4, "两处文件共 4 条完整记录");
+        assert_eq!(page.events.len(), 2, "只剩两个仍存在的文件世代");
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -905,7 +906,9 @@ mod tests {
         write_file(&rotated, &format!("{L_STARTED}\n"));
         write_file(&live, &format!("{L_RECEIVED}\n{L_FIN_200}"));
         let mut reader = TailReader::new(live.clone());
-        let recent = reader.snapshot().unwrap();
+        // 快照按文件先后（旧档→live）逐行返回，倒序后即全局最新在前，与查询一致。
+        let mut recent = reader.snapshot().unwrap();
+        recent.reverse();
         let page = query_activity_in(&live, &rotated, &query(LevelFilter::All, "", 0, 50)).unwrap();
         assert_eq!(
             page.events, recent,
