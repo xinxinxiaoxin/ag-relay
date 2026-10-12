@@ -16,12 +16,12 @@
     },
     {
       "path": "src-tauri/Cargo.lock",
-      "sha256": "63a2b4c0c31ae1711e6ecf19cdbf4b1cace672503e22ca092aaa1f6404dbc23a",
+      "sha256": "c37bdd2f70cd4f7d3dc22fb95bfae0cb80abdb879d5f4f87645e08c781a7730f",
       "normalizeLf": true
     },
     {
       "path": "src-tauri/Cargo.toml",
-      "sha256": "a27f7527f53e67ed656ab4d04213b3260e9a9546a393d05620fd1678a2ccf0b7",
+      "sha256": "79a5f0b1e15e5724a15d4c22218043ee168abf7456aab661c64be62d08bb6ccb",
       "normalizeLf": true
     },
     {
@@ -11961,6 +11961,57 @@
     },
     {
       "ecosystem": "cargo",
+      "name": "notify-types",
+      "version": "2.1.0",
+      "license": "MIT OR Apache-2.0",
+      "scope": "Rust 普通依赖树（Windows x64）",
+      "source": "https://crates.io/api/v1/crates/notify-types/2.1.0/download",
+      "repository": "https://github.com/notify-rs/notify.git",
+      "vcs": {
+        "git": {
+          "sha1": "c38f28ae50d2a034ba5dde9bf4e6039d9a1c9642"
+        },
+        "path_in_vcs": "notify-types"
+      },
+      "checksum": "42b8cfee0e339a0337359f3c88165702ac6e600dc01c0cc9579a92d62b08477a",
+      "materials": [
+        {
+          "path": "licenses/texts/b5b413d7421d728c14f33d78198d6e255a0018beef717d78c4c3f6188be3dfb4.txt",
+          "sha256": "b5b413d7421d728c14f33d78198d6e255a0018beef717d78c4c3f6188be3dfb4",
+          "source": "https://crates.io/api/v1/crates/notify-types/2.1.0/download#LICENSE-APACHE"
+        },
+        {
+          "path": "licenses/texts/b63e167d61ced1d872a588c5ac764b0dda477d62209dc4f6b6bfea5517d0a24c.txt",
+          "sha256": "b63e167d61ced1d872a588c5ac764b0dda477d62209dc4f6b6bfea5517d0a24c",
+          "source": "https://crates.io/api/v1/crates/notify-types/2.1.0/download#LICENSE-MIT"
+        }
+      ]
+    },
+    {
+      "ecosystem": "cargo",
+      "name": "notify",
+      "version": "8.2.0",
+      "license": "CC0-1.0",
+      "scope": "Rust 普通依赖树（Windows x64）",
+      "source": "https://crates.io/api/v1/crates/notify/8.2.0/download",
+      "repository": "https://github.com/notify-rs/notify.git",
+      "vcs": {
+        "git": {
+          "sha1": "a1d7c2d8f80786679d58ec6d5986a1d4278bc8cf"
+        },
+        "path_in_vcs": "notify"
+      },
+      "checksum": "4d3d07927151ff8575b7087f245456e549fea62edf0ec4e565a5ee50c8402bc3",
+      "materials": [
+        {
+          "path": "licenses/texts/e0456cbab4f7b5e7203e678faff37eadbdfef02e822db3b7a52a1dd9d3dc514a.txt",
+          "sha256": "e0456cbab4f7b5e7203e678faff37eadbdfef02e822db3b7a52a1dd9d3dc514a",
+          "source": "https://crates.io/api/v1/crates/notify/8.2.0/download#LICENSE-CC0"
+        }
+      ]
+    },
+    {
+      "ecosystem": "cargo",
       "name": "num-conv",
       "version": "0.2.2",
       "license": "MIT OR Apache-2.0",
@@ -15820,6 +15871,34 @@
     {
       "ecosystem": "cargo",
       "name": "windows-sys",
+      "version": "0.60.2",
+      "license": "MIT OR Apache-2.0",
+      "scope": "Rust 普通依赖树（Windows x64）",
+      "source": "https://crates.io/api/v1/crates/windows-sys/0.60.2/download",
+      "repository": "https://github.com/microsoft/windows-rs",
+      "vcs": {
+        "git": {
+          "sha1": "4b8893b307719ec23cce698269ca572ef301dc5c"
+        },
+        "path_in_vcs": "crates/libs/sys"
+      },
+      "checksum": "f2f500e4d28234f72040990ec9d39e3a6b950f9f22d3dba18416c35882612bcb",
+      "materials": [
+        {
+          "path": "licenses/texts/c16f8dcf1a368b83be78d826ea23de4079fe1b4469a0ab9ee20563f37ff3d44b.txt",
+          "sha256": "c16f8dcf1a368b83be78d826ea23de4079fe1b4469a0ab9ee20563f37ff3d44b",
+          "source": "https://crates.io/api/v1/crates/windows-sys/0.60.2/download#license-apache-2.0"
+        },
+        {
+          "path": "licenses/texts/c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383.txt",
+          "sha256": "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383",
+          "source": "https://crates.io/api/v1/crates/windows-sys/0.60.2/download#license-mit"
+        }
+      ]
+    },
+    {
+      "ecosystem": "cargo",
+      "name": "windows-sys",
       "version": "0.61.2",
       "license": "MIT OR Apache-2.0",
       "scope": "Rust 普通依赖树（Windows x64）",
@@ -15870,6 +15949,34 @@
           "path": "licenses/texts/c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383.txt",
           "sha256": "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383",
           "source": "https://crates.io/api/v1/crates/windows-targets/0.52.6/download#license-mit"
+        }
+      ]
+    },
+    {
+      "ecosystem": "cargo",
+      "name": "windows-targets",
+      "version": "0.53.5",
+      "license": "MIT OR Apache-2.0",
+      "scope": "Rust 普通依赖树（Windows x64）",
+      "source": "https://crates.io/api/v1/crates/windows-targets/0.53.5/download",
+      "repository": "https://github.com/microsoft/windows-rs",
+      "vcs": {
+        "git": {
+          "sha1": "32c3144490c016fe496a0aed769bce60987a2e9d"
+        },
+        "path_in_vcs": "crates/libs/targets"
+      },
+      "checksum": "4945f9f551b88e0d65f3db0bc25c33b8acea4d9e41163edf90dcd0b19f9069f3",
+      "materials": [
+        {
+          "path": "licenses/texts/c16f8dcf1a368b83be78d826ea23de4079fe1b4469a0ab9ee20563f37ff3d44b.txt",
+          "sha256": "c16f8dcf1a368b83be78d826ea23de4079fe1b4469a0ab9ee20563f37ff3d44b",
+          "source": "https://crates.io/api/v1/crates/windows-targets/0.53.5/download#license-apache-2.0"
+        },
+        {
+          "path": "licenses/texts/c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383.txt",
+          "sha256": "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383",
+          "source": "https://crates.io/api/v1/crates/windows-targets/0.53.5/download#license-mit"
         }
       ]
     },
@@ -15982,6 +16089,34 @@
           "path": "licenses/texts/c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383.txt",
           "sha256": "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383",
           "source": "https://crates.io/api/v1/crates/windows_x86_64_msvc/0.52.6/download#license-mit"
+        }
+      ]
+    },
+    {
+      "ecosystem": "cargo",
+      "name": "windows_x86_64_msvc",
+      "version": "0.53.1",
+      "license": "MIT OR Apache-2.0",
+      "scope": "Rust 普通依赖树（Windows x64）",
+      "source": "https://crates.io/api/v1/crates/windows_x86_64_msvc/0.53.1/download",
+      "repository": "https://github.com/microsoft/windows-rs",
+      "vcs": {
+        "git": {
+          "sha1": "d468916ac27a36fb8a12bafc1bf5c0ec2fe92238"
+        },
+        "path_in_vcs": "crates/targets/x86_64_msvc"
+      },
+      "checksum": "d6bbff5f0aada427a1e5a6da5f1f98158182f26556f345ac9e04d36d0ebed650",
+      "materials": [
+        {
+          "path": "licenses/texts/c16f8dcf1a368b83be78d826ea23de4079fe1b4469a0ab9ee20563f37ff3d44b.txt",
+          "sha256": "c16f8dcf1a368b83be78d826ea23de4079fe1b4469a0ab9ee20563f37ff3d44b",
+          "source": "https://crates.io/api/v1/crates/windows_x86_64_msvc/0.53.1/download#license-apache-2.0"
+        },
+        {
+          "path": "licenses/texts/c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383.txt",
+          "sha256": "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383",
+          "source": "https://crates.io/api/v1/crates/windows_x86_64_msvc/0.53.1/download#license-mit"
         }
       ]
     },

@@ -37,6 +37,7 @@ AG Relay 自有代码采用根目录 `LICENSE` 中的 MIT 许可证。依据 ADR
 | Geist / Geist Mono | Fontsource 变量字体包元数据为 OFL-1.1，附 The Geist Project Authors 的原版权及完整 SIL OFL 1.1。字体不因随产品分发变成 MIT；禁止单独出售字体，修改字体须遵守 OFL 的名称及再分发条件。 |
 | Node.js | Node 自身 MIT，内含的 V8、OpenSSL、libuv、ICU、zlib 等按 `node/LICENSE` 的逐项条款分发。`src-tauri/binaries/node-x86_64-pc-windows-msvc.exe` 的 SHA-256 为 `ac51903c4c111815d52280b1fdcc8da067cbb37e2fe1a765097b85c3292c8582`，与官方 v24.18.1 `win-x64/node.exe` 摘要一致。 |
 | Tauri、updater 与其他 Rust crates | 逐包核实 Cargo 元数据及原文，包含 MIT / Apache-2.0 的双许可，以及 BSD、ISC、Unicode-3.0、MPL-2.0 等；不能概括为全部 MIT。`AND` 条款同时适用；`OR` 是相应组件提供的许可选择，原文全部保留。 |
+| notify / same-file | 当前 Windows 解析树实测 `notify 8.2.0` 的元数据是 **CC0-1.0**，`same-file 1.0.6` 是 **Unlicense/MIT**；notify-types 及新增 Windows 绑定另按各自 MIT OR Apache-2.0 原文保留，未将整个通知依赖链写成 MIT。 |
 | Rust 标准库 | 实际构建工具链快照为 1.99.0；保留官方标准库专用复合版权文件，包括 compiler-builtins 等内部组件。更换构建工具链后须重新核验这部分材料。 |
 | WebView2 Rust wrapper / SDK loader | wrapper 的 MIT **不覆盖**微软的 loader。NuGet 1.0.3800.47 的 `.nuspec` 明确指向 `LICENSE.txt`，原文为微软 BSD-3-Clause 条款，另附完整 NOTICE；其 x64 `WebView2LoaderStatic.lib` 与锁定 crate 携带文件逐字节匹配。这里不是把整个 WebView2 Runtime 宣称为 BSD 或 MIT。 |
 | 其他 npm 工具和数据 | 完整树还包括 ISC、Apache-2.0、BSD、0BSD、BlueOak、CC-BY-4.0（caniuse-lite）、MPL-2.0（Lightning CSS）等，原文及归属见清单。仅作为构建工具使用不代表把其整个包分发到运行时。 |
