@@ -74,6 +74,20 @@ pub fn with_connection<T>(
     result
 }
 
+fn with_user_connection<T>(
+    app: &AppHandle,
+    action: impl FnOnce(&mut GatewayConnection) -> Result<T, ConnectionError>,
+) -> Result<T, ConnectionError> {
+    with_connection(app, |gateway| {
+        if crate::update_commands::controls_blocked(app) {
+            return Err(ConnectionError::Failed(
+                "更新或退出正在进行，请等待当前操作完成".into(),
+            ));
+        }
+        action(gateway)
+    })
+}
+
 #[tauri::command]
 pub fn get_connection_settings(app: AppHandle) -> Result<ConnectionSettingsView, String> {
     with_connection(&app, |gw| gw.settings()).map_err(|e| e.to_string())
@@ -84,7 +98,7 @@ pub fn save_connection_settings(
     upstream: String,
     port: u32,
 ) -> Result<ConnectionSettingsView, String> {
-    with_connection(&app, |gw| gw.save(&upstream, port)).map_err(|e| e.to_string())
+    with_user_connection(&app, |gw| gw.save(&upstream, port)).map_err(|e| e.to_string())
 }
 
 #[derive(Debug, Serialize)]
@@ -108,7 +122,13 @@ pub enum GatewayActionResult {
 
 #[tauri::command]
 pub async fn start_gateway(app: AppHandle) -> GatewayActionResult {
-    match tauri::async_runtime::spawn_blocking(move || with_connection(&app, |gw| gw.start())).await
+    match tauri::async_runtime::spawn_blocking(move || {
+        with_user_connection(&app, |gw| {
+            crate::update_commands::acknowledge_manual_start(&app)?;
+            gw.start()
+        })
+    })
+    .await
     {
         Ok(Ok(supervisor_pid)) => GatewayActionResult::Started { supervisor_pid },
         Ok(Err(e)) => GatewayActionResult::Failed {
@@ -124,7 +144,7 @@ pub async fn start_gateway(app: AppHandle) -> GatewayActionResult {
 #[tauri::command]
 pub async fn stop_gateway(app: AppHandle) -> GatewayActionResult {
     let result = tauri::async_runtime::spawn_blocking(move || {
-        with_connection(&app, |gw| {
+        with_user_connection(&app, |gw| {
             let managed = gw.holds_managed();
             Ok((gw.safe_shutdown(STOP_TIMEOUT)?, managed))
         })
@@ -159,7 +179,7 @@ pub enum RestartResult {
 #[tauri::command]
 pub async fn restart_gateway(app: AppHandle) -> RestartResult {
     match tauri::async_runtime::spawn_blocking(move || {
-        with_connection(&app, |gw| gw.restart(STOP_TIMEOUT))
+        with_user_connection(&app, |gw| gw.restart(STOP_TIMEOUT))
     })
     .await
     {
@@ -212,14 +232,6 @@ pub async fn open_logs_dir(app: AppHandle) -> LogsDirResult {
             detail: format!("打开资源管理器失败：{e}"),
         },
     }
-}
-
-/// 旧退出链兼容（#25 将以可拒绝退出的 gate 替换），更新绝不可调用本方法。
-pub fn shutdown_blocking_on_exit(app: &AppHandle) {
-    let _ = with_connection(app, |gw| {
-        gw.shutdown_on_exit();
-        Ok(())
-    });
 }
 
 pub fn auto_start_on_launch(app: &AppHandle) {

@@ -31,6 +31,10 @@ windows-sys = { version = "0.61", features = [
     "Wdk_System_Threading",
 ] }
 
+[features]
+# 真实插件下载接缝仍只用随机端口与非安装器文本，不启动产品。
+updater-download-tests = ["tauri/test"]
+
 [dev-dependencies]
 base64 = "0.22"
 minisign-verify = "0.3"
