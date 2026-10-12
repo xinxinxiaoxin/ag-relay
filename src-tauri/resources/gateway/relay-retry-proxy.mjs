@@ -83,6 +83,8 @@ let draining = false;
 let drainExitCode = 0;
 let closing = false;
 let restartError = null;
+// 一次有界、安全停机尝试。超时或调用者断连时撤销，不保留延迟退出任务。
+let safeShutdown = null;
 
 function requestSnapshot(state) {
   const now = Date.now();
@@ -1334,6 +1336,7 @@ function localControl(req, res, pathname) {
   if (pathname === '/_relay/status' && req.method === 'GET') {
     controlResponse(res, 200, {
       loadedVersion, startedAt, pid: process.pid, supervisorEnabled, restarting, draining, restartError,
+      safeShutdownVersion: 1,
       activeRequests: activeRequests.size,
       config: { statusIntervalMs: cfg.statusIntervalMs, streamIdleMs: cfg.streamIdleMs,
         streamProgressMs: cfg.streamProgressMs, peekTotalMs: cfg.peekTotalMs,
@@ -1342,6 +1345,31 @@ function localControl(req, res, pathname) {
       requests: [...activeRequests.values()].slice(0, 100).map(requestSnapshot),
       requestsTruncated: activeRequests.size > 100,
     });
+    return;
+  }
+  if (pathname === '/_relay/shutdown' && req.method === 'POST') {
+    if (req.headers['x-relay-control'] !== '1') return controlResponse(res, 403, { error: 'control_header_required' });
+    if (!supervisorEnabled || !process.connected) return controlResponse(res, 409, { error: 'supervisor_required' });
+    if (Number(req.headers['x-relay-pid']) !== process.pid) return controlResponse(res, 409, { error: 'instance_changed' });
+    const budget = Number(req.headers['x-relay-timeout-ms']);
+    if (!Number.isInteger(budget) || budget < 1 || budget > 60000) return controlResponse(res, 400, { error: 'invalid_timeout' });
+    if (draining || restarting) return controlResponse(res, 409, { error: 'control_busy' });
+    const attempt = { res, timer: null, committing: false };
+    const cancel = () => {
+      if (safeShutdown !== attempt) return;
+      clearTimeout(attempt.timer);
+      safeShutdown = null;
+      draining = false;
+    };
+    safeShutdown = attempt;
+    draining = true;
+    attempt.timer = setTimeout(() => {
+      if (safeShutdown !== attempt) return;
+      cancel();
+      controlResponse(res, 408, { error: 'drain_timeout' });
+    }, budget);
+    res.once('close', cancel);
+    finishDrain();
     return;
   }
   if (pathname === '/_relay/restart' && req.method === 'POST') {
@@ -1362,6 +1390,20 @@ function localControl(req, res, pathname) {
 
 function finishDrain() {
   if (!draining || closing || activeRequests.size) return;
+  if (safeShutdown) {
+    const attempt = safeShutdown;
+    if (attempt.committing) return;
+    attempt.committing = true;
+    // 送出完整确认之前仍允许断连/超时撤销，避免响应写失败后永远卡在排空态。
+    attempt.res.once('finish', () => {
+      if (safeShutdown !== attempt) return;
+      safeShutdown = null;
+      clearTimeout(attempt.timer);
+      beginDrain(0);
+    });
+    controlResponse(attempt.res, 200, { drained: true, pid: process.pid });
+    return;
+  }
   closing = true;
   server.close(() => process.exit(drainExitCode));
   server.closeIdleConnections();

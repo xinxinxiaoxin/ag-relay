@@ -312,13 +312,13 @@ pub fn snapshot_with_owner(host: &str, port: u16, has_managed_handle: bool) -> S
 #[tauri::command]
 pub async fn get_status(app: tauri::AppHandle) -> StatusSnapshot {
     use tauri::Manager;
-    let has_managed = app
-        .state::<crate::gateway_commands::GatewayState>()
-        .holds_managed();
+    let state = app.state::<crate::gateway_commands::GatewayState>();
+    let has_managed = state.holds_managed();
+    let port = state.current_port();
     tauri::async_runtime::spawn_blocking(move || {
         snapshot_with_owner(
             crate::gateway_process::GATEWAY_HOST,
-            crate::gateway_process::GATEWAY_PORT,
+            port,
             has_managed,
         )
     })
