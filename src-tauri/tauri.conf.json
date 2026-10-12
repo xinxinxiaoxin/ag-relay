@@ -30,6 +30,7 @@
     "targets": ["nsis", "msi"],
     "createUpdaterArtifacts": true,
     "windows": {
+      "webviewInstallMode": { "type": "downloadBootstrapper" },
       "nsis": {
         "installMode": "currentUser",
         "languages": ["SimpChinese", "English"]
@@ -47,7 +48,12 @@
       "icons/icon.ico"
     ],
     "externalBin": ["binaries/node"],
-    "resources": ["resources/gateway/"]
+    "resources": {
+      "resources/gateway/": "resources/gateway/",
+      "../LICENSE": "licenses/LICENSE",
+      "../THIRD_PARTY_NOTICES.md": "licenses/THIRD_PARTY_NOTICES.md",
+      "../licenses/": "licenses/third-party/"
+    }
   },
   "plugins": {
     "updater": {
