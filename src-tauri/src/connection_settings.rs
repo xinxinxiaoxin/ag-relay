@@ -2,6 +2,10 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+// 本机监听地址的单一真值来自 gateway_process：它必须与网关核心默认监听地址一致。
+// 此处复用同一常量，避免 host()/endpoint() 各写字面量而与生命周期层漂移。
+use crate::gateway_process::GATEWAY_HOST;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ConnectionSettings {
     upstream: String,
@@ -52,10 +56,10 @@ impl ConnectionSettings {
         self.port
     }
     pub fn host(&self) -> &'static str {
-        "127.0.0.1"
+        GATEWAY_HOST
     }
     pub fn endpoint(&self) -> String {
-        format!("http://127.0.0.1:{}", self.port)
+        format!("http://{GATEWAY_HOST}:{}", self.port)
     }
 }
 
