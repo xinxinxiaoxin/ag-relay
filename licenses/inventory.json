@@ -16,12 +16,12 @@
     },
     {
       "path": "src-tauri/Cargo.lock",
-      "sha256": "63a2b4c0c31ae1711e6ecf19cdbf4b1cace672503e22ca092aaa1f6404dbc23a",
+      "sha256": "c37bdd2f70cd4f7d3dc22fb95bfae0cb80abdb879d5f4f87645e08c781a7730f",
       "normalizeLf": true
     },
     {
       "path": "src-tauri/Cargo.toml",
-      "sha256": "a27f7527f53e67ed656ab4d04213b3260e9a9546a393d05620fd1678a2ccf0b7",
+      "sha256": "79a5f0b1e15e5724a15d4c22218043ee168abf7456aab661c64be62d08bb6ccb",
       "normalizeLf": true
     },
     {
@@ -11961,6 +11961,57 @@
     },
     {
       "ecosystem": "cargo",
+      "name": "notify-types",
+      "version": "2.1.0",
+      "license": "MIT OR Apache-2.0",
+      "scope": "Rust 普通依赖树（Windows x64）",
+      "source": "https://crates.io/api/v1/crates/notify-types/2.1.0/download",
+      "repository": "https://github.com/notify-rs/notify.git",
+      "vcs": {
+        "git": {
+          "sha1": "c38f28ae50d2a034ba5dde9bf4e6039d9a1c9642"
+        },
+        "path_in_vcs": "notify-types"
+      },
+      "checksum": "42b8cfee0e339a0337359f3c88165702ac6e600dc01c0cc9579a92d62b08477a",
+      "materials": [
+        {
+          "path": "licenses/texts/b5b413d7421d728c14f33d78198d6e255a0018beef717d78c4c3f6188be3dfb4.txt",
+          "sha256": "b5b413d7421d728c14f33d78198d6e255a0018beef717d78c4c3f6188be3dfb4",
+          "source": "https://crates.io/api/v1/crates/notify-types/2.1.0/download#LICENSE-APACHE"
+        },
+        {
+          "path": "licenses/texts/b63e167d61ced1d872a588c5ac764b0dda477d62209dc4f6b6bfea5517d0a24c.txt",
+          "sha256": "b63e167d61ced1d872a588c5ac764b0dda477d62209dc4f6b6bfea5517d0a24c",
+          "source": "https://crates.io/api/v1/crates/notify-types/2.1.0/download#LICENSE-MIT"
+        }
+      ]
+    },
+    {
+      "ecosystem": "cargo",
+      "name": "notify",
+      "version": "8.2.0",
+      "license": "CC0-1.0",
+      "scope": "Rust 普通依赖树（Windows x64）",
+      "source": "https://crates.io/api/v1/crates/notify/8.2.0/download",
+      "repository": "https://github.com/notify-rs/notify.git",
+      "vcs": {
+        "git": {
+          "sha1": "a1d7c2d8f80786679d58ec6d5986a1d4278bc8cf"
+        },
+        "path_in_vcs": "notify"
+      },
+      "checksum": "4d3d07927151ff8575b7087f245456e549fea62edf0ec4e565a5ee50c8402bc3",
+      "materials": [
+        {
+          "path": "licenses/texts/e0456cbab4f7b5e7203e678faff37eadbdfef02e822db3b7a52a1dd9d3dc514a.txt",
+          "sha256": "e0456cbab4f7b5e7203e678faff37eadbdfef02e822db3b7a52a1dd9d3dc514a",
+          "source": "https://crates.io/api/v1/crates/notify/8.2.0/download#LICENSE-CC0"
+        }
+      ]
+    },
+    {
+      "ecosystem": "cargo",
       "name": "num-conv",
       "version": "0.2.2",
       "license": "MIT OR Apache-2.0",
@@ -15820,6 +15871,34 @@
     {
       "ecosystem": "cargo",
       "name": "windows-sys",
+      "version": "0.60.2",
+      "license": "MIT OR Apache-2.0",
+      "scope": "Rust 普通依赖树（Windows x64）",
+      "source": "https://crates.io/api/v1/crates/windows-sys/0.60.2/download",
+      "repository": "https://github.com/microsoft/windows-rs",
+      "vcs": {
+        "git": {
+          "sha1": "4b8893b307719ec23cce698269ca572ef301dc5c"
+        },
+        "path_in_vcs": "crates/libs/sys"
+      },
+      "checksum": "f2f500e4d28234f72040990ec9d39e3a6b950f9f22d3dba18416c35882612bcb",
+      "materials": [
+        {
+          "path": "licenses/texts/c16f8dcf1a368b83be78d826ea23de4079fe1b4469a0ab9ee20563f37ff3d44b.txt",
+          "sha256": "c16f8dcf1a368b83be78d826ea23de4079fe1b4469a0ab9ee20563f37ff3d44b",
+          "source": "https://crates.io/api/v1/crates/windows-sys/0.60.2/download#license-apache-2.0"
+        },
+        {
+          "path": "licenses/texts/c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383.txt",
+          "sha256": "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383",
+          "source": "https://crates.io/api/v1/crates/windows-sys/0.60.2/download#license-mit"
+        }
+      ]
+    },
+    {
+      "ecosystem": "cargo",
+      "name": "windows-sys",
       "version": "0.61.2",
       "license": "MIT OR Apache-2.0",
       "scope": "Rust 普通依赖树（Windows x64）",
@@ -15870,6 +15949,34 @@
           "path": "licenses/texts/c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383.txt",
           "sha256": "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383",
           "source": "https://crates.io/api/v1/crates/windows-targets/0.52.6/download#license-mit"
+        }
+      ]
+    },
+    {
+      "ecosystem": "cargo",
+      "name": "windows-targets",
+      "version": "0.53.5",
+      "license": "MIT OR Apache-2.0",
+      "scope": "Rust 普通依赖树（Windows x64）",
+      "source": "https://crates.io/api/v1/crates/windows-targets/0.53.5/download",
+      "repository": "https://github.com/microsoft/windows-rs",
+      "vcs": {
+        "git": {
+          "sha1": "32c3144490c016fe496a0aed769bce60987a2e9d"
+        },
+        "path_in_vcs": "crates/libs/targets"
+      },
+      "checksum": "4945f9f551b88e0d65f3db0bc25c33b8acea4d9e41163edf90dcd0b19f9069f3",
+      "materials": [
+        {
+          "path": "licenses/texts/c16f8dcf1a368b83be78d826ea23de4079fe1b4469a0ab9ee20563f37ff3d44b.txt",
+          "sha256": "c16f8dcf1a368b83be78d826ea23de4079fe1b4469a0ab9ee20563f37ff3d44b",
+          "source": "https://crates.io/api/v1/crates/windows-targets/0.53.5/download#license-apache-2.0"
+        },
+        {
+          "path": "licenses/texts/c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383.txt",
+          "sha256": "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383",
+          "source": "https://crates.io/api/v1/crates/windows-targets/0.53.5/download#license-mit"
         }
       ]
     },
@@ -15982,6 +16089,34 @@
           "path": "licenses/texts/c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383.txt",
           "sha256": "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383",
           "source": "https://crates.io/api/v1/crates/windows_x86_64_msvc/0.52.6/download#license-mit"
+        }
+      ]
+    },
+    {
+      "ecosystem": "cargo",
+      "name": "windows_x86_64_msvc",
+      "version": "0.53.1",
+      "license": "MIT OR Apache-2.0",
+      "scope": "Rust 普通依赖树（Windows x64）",
+      "source": "https://crates.io/api/v1/crates/windows_x86_64_msvc/0.53.1/download",
+      "repository": "https://github.com/microsoft/windows-rs",
+      "vcs": {
+        "git": {
+          "sha1": "d468916ac27a36fb8a12bafc1bf5c0ec2fe92238"
+        },
+        "path_in_vcs": "crates/targets/x86_64_msvc"
+      },
+      "checksum": "d6bbff5f0aada427a1e5a6da5f1f98158182f26556f345ac9e04d36d0ebed650",
+      "materials": [
+        {
+          "path": "licenses/texts/c16f8dcf1a368b83be78d826ea23de4079fe1b4469a0ab9ee20563f37ff3d44b.txt",
+          "sha256": "c16f8dcf1a368b83be78d826ea23de4079fe1b4469a0ab9ee20563f37ff3d44b",
+          "source": "https://crates.io/api/v1/crates/windows_x86_64_msvc/0.53.1/download#license-apache-2.0"
+        },
+        {
+          "path": "licenses/texts/c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383.txt",
+          "sha256": "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383",
+          "source": "https://crates.io/api/v1/crates/windows_x86_64_msvc/0.53.1/download#license-mit"
         }
       ]
     },
@@ -16443,6 +16578,281 @@
           "source": "rustup toolchain 1.99.0: share/doc/rust/COPYRIGHT-library.html"
         }
       ]
+    },
+    {
+      "ecosystem": "installer-runtime",
+      "name": "NSIS installer runtime",
+      "version": "3.11",
+      "license": "zlib/libpng, bzip2, CPL-1.0 with NSIS LZMA linking exception (see full COPYING)",
+      "scope": "NSIS安装/卸载运行部分、MUI2、内置插件；实际生成脚本使用LZMA。nsis_tauri_utils另列。",
+      "source": "https://github.com/kichik/nsis/tree/7359413009afd4f0fff472d841fc2f2cc0e0a5f8",
+      "verifiedToolVersion": "makensis v3.11",
+      "toolSha256": "f497e92deb9f179f7b8f7553fcb3bd04f511bb2949e5e4a2aee80a10f7b20431",
+      "sourceCommit": "7359413009afd4f0fff472d841fc2f2cc0e0a5f8",
+      "embeddedArtifacts": [
+        {
+          "name": "System.dll",
+          "sha256": "8b4c47c4cf5e76ec57dd5a050d5acd832a0d532ee875d7b44f6cdaf68f90d37c",
+          "size": 12288,
+          "evidence": "#27 静态提取 TEST-ONLY NSIS 后与工具缓存逐字节一致；未执行DLL。"
+        },
+        {
+          "name": "nsDialogs.dll",
+          "sha256": "b1350f487692057c8ffde75dcc55287a52a3272240d4d4912f24464b27551fc0",
+          "size": 9728,
+          "evidence": "#27 静态提取 TEST-ONLY NSIS 后与工具缓存逐字节一致；未执行DLL。"
+        },
+        {
+          "name": "StartMenu.dll",
+          "sha256": "fe330320459637d8dd2b5d84d07925c38ec264152ffd3b1760a4d44d76536caa",
+          "size": 7680,
+          "evidence": "#27 静态提取 TEST-ONLY NSIS 后与工具缓存逐字节一致；未执行DLL。"
+        },
+        {
+          "name": "LangDLL.dll",
+          "sha256": "4cf25411f28f639f72156c24b0f66ea42f5aee5973f6c137d901da6ae42d5b7e",
+          "size": 5632,
+          "evidence": "#27 静态提取 TEST-ONLY NSIS 后与工具缓存逐字节一致；未执行DLL。"
+        },
+        {
+          "name": "NSISdl.dll",
+          "sha256": "ddf40229dd9d6b268902d8dea88c8a04aacf1af218dd29f6dcd35babc54ac08d",
+          "size": 15360,
+          "evidence": "#27 静态提取 TEST-ONLY NSIS 后与工具缓存逐字节一致；未执行DLL。"
+        },
+        {
+          "name": "nsis_tauri_utils.dll",
+          "version": "0.5.3",
+          "size": 34304,
+          "sha256": "5ba143b5db4a87d32d6e7802e033330aae56cbceabe0d1e3ba41948385ad4709",
+          "evidence": "官方发布资产、工具缓存、#27静态提取候选DLL三者一致；编译依赖/工具链并未因此得到证明。"
+        }
+      ],
+      "materials": [
+        {
+          "path": "licenses/installer/nsis/COPYING",
+          "sha256": "e7dd514003ab96cb3ddccbc028fe5c795fccf57dc41f21cfb9d4dd16ead23bf5",
+          "source": "https://raw.githubusercontent.com/kichik/nsis/7359413009afd4f0fff472d841fc2f2cc0e0a5f8/COPYING"
+        },
+        {
+          "path": "licenses/installer/nsis/NSISdl-License.txt",
+          "sha256": "326e587f36ca58e14bd09cca153f9e69f1c5ed701189aa47d2d0627af7e16280",
+          "source": "NSIS 3.11 official distribution: Docs/NSISdl/License.txt",
+          "encoding": "ASCII"
+        },
+        {
+          "path": "licenses/installer/nsis/Modern-UI-2-License.txt",
+          "sha256": "d5957bd99460eb21148bd2695eeb5a3718abae6b118040a4678926da3f4cfbc0",
+          "source": "NSIS 3.11 official distribution: Docs/Modern UI 2/License.txt",
+          "encoding": "windows-1252"
+        },
+        {
+          "path": "licenses/installer/nsis/Modern-UI-2-License.utf8.txt",
+          "sha256": "e225ae45f2f92a2ed8922305490432fc1fb2e36c3406a03a1d53af3d684097f9",
+          "source": "NSIS 3.11 official distribution: Docs/Modern UI 2/License.txt",
+          "note": "仅从Windows-1252转为UTF-8的可读副本，原始字节另行保留。"
+        },
+        {
+          "path": "licenses/installer/nsis/nsis-3.11-source.tar.gz",
+          "sha256": "f6a848112615514247dbbd6ee1fb60742b43d6d45a16982ca4cfd7bdac383a31",
+          "source": "https://api.github.com/repos/kichik/nsis/tarball/7359413009afd4f0fff472d841fc2f2cc0e0a5f8"
+        },
+        {
+          "path": "licenses/installer/nsis/Embedded-Plugin-Copyrights.txt",
+          "sha256": "04ab42a83b67cc41b71a04ff345b875e1c0fc384025eb5fc725e9f10c9dadbdc",
+          "source": "https://github.com/kichik/nsis/tree/7359413009afd4f0fff472d841fc2f2cc0e0a5f8/Contrib"
+        },
+        {
+          "path": "licenses/installer/nsis/tauri-utils/LICENSE_MIT",
+          "sha256": "1c1020fa10a6bf318717e82c911bcc54ebdfb9bb280460ae332bcb2f82f57fbe",
+          "source": "https://github.com/tauri-apps/nsis-tauri-utils/blob/13d9edd27b69310e108d6fbd49f90992f8a05390/LICENSE_MIT"
+        },
+        {
+          "path": "licenses/installer/nsis/tauri-utils/LICENSE_APACHE-2.0",
+          "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594",
+          "source": "https://github.com/tauri-apps/nsis-tauri-utils/blob/13d9edd27b69310e108d6fbd49f90992f8a05390/LICENSE_APACHE-2.0"
+        },
+        {
+          "path": "licenses/installer/nsis/tauri-utils/nsis-tauri-utils-0.5.3-source.tar.gz",
+          "sha256": "e32e3ec0e4c49ac50aff37302e10c1628d6e03e51951ac7f2bdbedc403fcf9e0",
+          "source": "https://api.github.com/repos/tauri-apps/nsis-tauri-utils/tarball/13d9edd27b69310e108d6fbd49f90992f8a05390"
+        },
+        {
+          "path": "licenses/installer/nsis/tauri-utils/Chromium-LICENSE",
+          "sha256": "368cca1106be99d39ecd32a38d8305585d802a475effb66380b91ffc9bcf709b",
+          "source": "https://github.com/chromium/chromium/blob/36e1c43ace542988d624bd1bc0813c184482d2ab/LICENSE"
+        },
+        {
+          "path": "licenses/installer/nsis/tauri-utils/Chromium-COPYRIGHT.txt",
+          "sha256": "fa52d121cb76cc736e8135134d68e0e6cc5d20dadfddf872088c109adf641532",
+          "source": "https://github.com/chromium/chromium/blob/36e1c43ace542988d624bd1bc0813c184482d2ab/base/win/elevation_util.cc#L1-L3"
+        }
+      ],
+      "note": "NSIS自身、MUI2和NSISdl未修改。源归档含LZMA模块及全部原始声明；CPL linking例外不将AG Relay自有代码改为CPL。不得去除该模块对应源码和免责文字。"
+    },
+    {
+      "ecosystem": "installer-runtime",
+      "name": "WiX installer runtime",
+      "version": "3.14.1.8722",
+      "license": "MS-RL",
+      "scope": "WiX3生成MSI所含标准UI/安装支持部分，非将AG Relay自有代码改为MS-RL。",
+      "source": "https://github.com/wixtoolset/wix3/releases/tag/wix3141rtm",
+      "verifiedToolVersion": "candle 3.14.1.8722",
+      "toolSha256": "a464676e2a2191d58e6ca643e89505bfb9628d3e721873a14994d3f4667987e5",
+      "sourceCommit": "b40e9a32c24033e11b77baf2c91a704382f898ed",
+      "embeddedArtifacts": [
+        {
+          "name": "WiXUI/uica.dll",
+          "version": "3.14.1.8722",
+          "sha256": "7f47d98ab25cfea9b3a2e898c3376cc9ba1cd893b4948b0c27caa530fd0e34cc",
+          "size": 135440,
+          "sourcePath": "src/ext/UIExtension/ca",
+          "evidence": "#27 静态提取 TEST-ONLY MSI 的 Binary/WixUIWixca；PE公司为.NET Foundation，版本与工具一致。"
+        }
+      ],
+      "materials": [
+        {
+          "path": "licenses/installer/wix/LICENSE.TXT",
+          "sha256": "4004370957cfc16afa52582f0cbd56c98a2f00846d6dadc51c7c7ab0500c0000",
+          "source": "https://github.com/wixtoolset/wix3/releases/download/wix3141rtm/wix314-binaries.zip#LICENSE.TXT"
+        },
+        {
+          "path": "licenses/installer/wix/wix-3.14.1-source.tar.gz",
+          "sha256": "97380da5375eccfb91f34566f4422a1255b8392b8b4e15e79f98c556f6d670e0",
+          "source": "https://api.github.com/repos/wixtoolset/wix3/tarball/b40e9a32c24033e11b77baf2c91a704382f898ed"
+        }
+      ],
+      "note": "使用未修改的WiX发行工具和标准UI；提供固定版本完整对应源码（含原始文件级许可）。接收方对所含WiX代码保有MS-RL权利。"
+    },
+    {
+      "ecosystem": "installer-runtime",
+      "name": "NSIS Tauri utils plugin",
+      "version": "0.5.3",
+      "license": "(MIT OR Apache-2.0) AND BSD-3-Clause; unresolved prebuilt dependency provenance",
+      "scope": "已匹配实际NSIS内嵌DLL；自有代码和Chromium移植原文已核实，预编译第三方patch/工具链仍未证实。",
+      "source": "https://github.com/tauri-apps/nsis-tauri-utils/releases/tag/nsis_tauri_utils-v0.5.3",
+      "sourceCommit": "13d9edd27b69310e108d6fbd49f90992f8a05390",
+      "originBundler": {
+        "name": "@tauri-apps/cli",
+        "version": "2.12.2",
+        "sourceCommit": "5b23c82ea5ba6b9aec420dd71f60493edc486aa9",
+        "pluginDownloadSource": "https://github.com/tauri-apps/tauri/blob/5b23c82ea5ba6b9aec420dd71f60493edc486aa9/crates/tauri-bundler/src/bundle/windows/nsis/mod.rs#L42-L43",
+        "downloadSha1": "75197fee3c6a814fe035788d1c34ead39349b860"
+      },
+      "binarySha256": "5ba143b5db4a87d32d6e7802e033330aae56cbceabe0d1e3ba41948385ad4709",
+      "binarySize": 34304,
+      "materials": [
+        {
+          "path": "licenses/installer/nsis/tauri-utils/LICENSE_MIT",
+          "sha256": "1c1020fa10a6bf318717e82c911bcc54ebdfb9bb280460ae332bcb2f82f57fbe",
+          "source": "https://github.com/tauri-apps/nsis-tauri-utils/blob/13d9edd27b69310e108d6fbd49f90992f8a05390/LICENSE_MIT"
+        },
+        {
+          "path": "licenses/installer/nsis/tauri-utils/LICENSE_APACHE-2.0",
+          "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594",
+          "source": "https://github.com/tauri-apps/nsis-tauri-utils/blob/13d9edd27b69310e108d6fbd49f90992f8a05390/LICENSE_APACHE-2.0"
+        },
+        {
+          "path": "licenses/installer/nsis/tauri-utils/nsis-tauri-utils-0.5.3-source.tar.gz",
+          "sha256": "e32e3ec0e4c49ac50aff37302e10c1628d6e03e51951ac7f2bdbedc403fcf9e0",
+          "source": "https://api.github.com/repos/tauri-apps/nsis-tauri-utils/tarball/13d9edd27b69310e108d6fbd49f90992f8a05390"
+        },
+        {
+          "path": "licenses/installer/nsis/tauri-utils/Chromium-LICENSE",
+          "sha256": "368cca1106be99d39ecd32a38d8305585d802a475effb66380b91ffc9bcf709b",
+          "source": "https://github.com/chromium/chromium/blob/36e1c43ace542988d624bd1bc0813c184482d2ab/LICENSE"
+        },
+        {
+          "path": "licenses/installer/nsis/tauri-utils/Chromium-COPYRIGHT.txt",
+          "sha256": "fa52d121cb76cc736e8135134d68e0e6cc5d20dadfddf872088c109adf641532",
+          "source": "https://github.com/chromium/chromium/blob/36e1c43ace542988d624bd1bc0813c184482d2ab/base/win/elevation_util.cc#L1-L3"
+        }
+      ],
+      "note": "官方DLL与工具缓存及#27静态提取候选DLL一致。源归档未包含Cargo.lock，发布未固定Rust工具链且历史构建日志已不可取；不能用AG Relay自己的lock/toolchain补填未知值。"
+    },
+    {
+      "ecosystem": "installer-dependency",
+      "name": "semver (prebuilt NSIS plugin)",
+      "version": "未证实（manifest约束1.0）",
+      "referenceVersion": "1.0.27",
+      "license": "参照原文见材料；不是旧DLL实际解析版本的证明",
+      "scope": "仅固定来源的许可参照，不能用于消除预编译产物的未决来源项。",
+      "source": "https://github.com/tauri-apps/nsis-tauri-utils/blob/13d9edd27b69310e108d6fbd49f90992f8a05390/Cargo.toml",
+      "referenceSource": "https://github.com/dtolnay/semver/tree/6ed8561154715b2c34df417a2052597d586f2c43",
+      "materials": [
+        {
+          "path": "licenses/installer/nsis/tauri-utils/reference-licenses/semver/LICENSE-MIT",
+          "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+          "source": "https://github.com/dtolnay/semver/blob/6ed8561154715b2c34df417a2052597d586f2c43/LICENSE-MIT"
+        },
+        {
+          "path": "licenses/installer/nsis/tauri-utils/reference-licenses/semver/LICENSE-APACHE",
+          "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a",
+          "source": "https://github.com/dtolnay/semver/blob/6ed8561154715b2c34df417a2052597d586f2c43/LICENSE-APACHE"
+        }
+      ],
+      "note": "保留公开原文供审查；referenceVersion不是resolvedVersion。要闭合正式许可核验需取得实际构建锁文件/工具链，或从固定源码隔离重建并核验新产物。"
+    },
+    {
+      "ecosystem": "installer-dependency",
+      "name": "windows-sys / windows-link (prebuilt NSIS plugin)",
+      "version": "未证实（sys约束0.61.2；link patch未知）",
+      "referenceVersion": "windows-sys 0.61.2 / windows-link 0.2.1",
+      "license": "参照原文见材料；不是旧DLL实际解析版本的证明",
+      "scope": "仅固定来源的许可参照，不能用于消除预编译产物的未决来源项。",
+      "source": "https://github.com/tauri-apps/nsis-tauri-utils/blob/13d9edd27b69310e108d6fbd49f90992f8a05390/Cargo.toml",
+      "referenceSource": "https://github.com/microsoft/windows-rs/tree/d468916ac27a36fb8a12bafc1bf5c0ec2fe92238",
+      "materials": [
+        {
+          "path": "licenses/installer/nsis/tauri-utils/reference-licenses/windows/license-mit",
+          "sha256": "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383",
+          "source": "https://github.com/microsoft/windows-rs/blob/d468916ac27a36fb8a12bafc1bf5c0ec2fe92238/license-mit"
+        },
+        {
+          "path": "licenses/installer/nsis/tauri-utils/reference-licenses/windows/license-apache-2.0",
+          "sha256": "c16f8dcf1a368b83be78d826ea23de4079fe1b4469a0ab9ee20563f37ff3d44b",
+          "source": "https://github.com/microsoft/windows-rs/blob/d468916ac27a36fb8a12bafc1bf5c0ec2fe92238/license-apache-2.0"
+        }
+      ],
+      "note": "保留公开原文供审查；referenceVersion不是resolvedVersion。要闭合正式许可核验需取得实际构建锁文件/工具链，或从固定源码隔离重建并核验新产物。"
+    },
+    {
+      "ecosystem": "installer-dependency",
+      "name": "Rust alloc/core/compiler-builtins (prebuilt NSIS plugin)",
+      "version": "未证实（未固定编译器）",
+      "referenceVersion": "1.93.0，仅同期许可参照",
+      "license": "参照原文见材料；不是旧DLL实际解析版本的证明",
+      "scope": "仅固定来源的许可参照，不能用于消除预编译产物的未决来源项。",
+      "source": "https://github.com/tauri-apps/nsis-tauri-utils/blob/13d9edd27b69310e108d6fbd49f90992f8a05390/Cargo.toml",
+      "referenceSource": "https://github.com/rust-lang/rust/tree/254b59607d4417e9dffbc307138ae5c86280fe4c",
+      "materials": [
+        {
+          "path": "licenses/installer/nsis/tauri-utils/reference-licenses/rust-reference/LICENSE-MIT",
+          "sha256": "b71bd43a069ca0641a9ecfe585ca7b3c53b5cc1608f8b68321168698e28b5ea1",
+          "source": "https://github.com/rust-lang/rust/blob/254b59607d4417e9dffbc307138ae5c86280fe4c/LICENSE-MIT"
+        },
+        {
+          "path": "licenses/installer/nsis/tauri-utils/reference-licenses/rust-reference/LICENSE-APACHE",
+          "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a",
+          "source": "https://github.com/rust-lang/rust/blob/254b59607d4417e9dffbc307138ae5c86280fe4c/LICENSE-APACHE"
+        },
+        {
+          "path": "licenses/installer/nsis/tauri-utils/reference-licenses/rust-reference/COPYRIGHT",
+          "sha256": "172020dbfd5b53a226dfde77616190a48dcff519b0bc0e6deb91a8450782c4af",
+          "source": "https://github.com/rust-lang/rust/blob/254b59607d4417e9dffbc307138ae5c86280fe4c/COPYRIGHT"
+        },
+        {
+          "path": "licenses/installer/nsis/tauri-utils/reference-licenses/rust-reference/Unicode-3.0.txt",
+          "sha256": "f5062c9a188d81dfe66b56db4182dcf9e4b17c0d9b0d311a8e20b3a1b075c443",
+          "source": "https://github.com/rust-lang/rust/blob/254b59607d4417e9dffbc307138ae5c86280fe4c/LICENSES/Unicode-3.0.txt"
+        },
+        {
+          "path": "licenses/installer/nsis/tauri-utils/reference-licenses/rust-reference/compiler-builtins-LICENSE.txt",
+          "sha256": "ab6eec6caf0fa5775e411c7a8bc6a45c4ef2956b0980b157ab74fc5cd62a928b",
+          "source": "https://github.com/rust-lang/rust/blob/254b59607d4417e9dffbc307138ae5c86280fe4c/library/compiler-builtins/LICENSE.txt"
+        }
+      ],
+      "note": "保留公开原文供审查；referenceVersion不是resolvedVersion。要闭合正式许可核验需取得实际构建锁文件/工具链，或从固定源码隔离重建并核验新产物。"
     }
   ],
   "excludedNpmPlatformPackages": [
@@ -17255,6 +17665,13 @@
         "arm64"
       ],
       "reason": "非 Windows x64 平台的可选构建工具二进制，不安装且不随 Windows 包分发。"
+    }
+  ],
+  "releaseBlockers": [
+    {
+      "component": "nsis_tauri_utils v0.5.3 prebuilt DLL",
+      "reason": "预编译官方产物的Cargo resolved依赖版本、Rust alloc/core/compiler-builtins工具链及实际版权闭包不可追溯；官方源无Cargo.lock/固定工具链，日志HTTP410且无可用构建artifact。",
+      "resolution": "正式发布前由维护者明确决定并记录：接受官方预编译来源及此处不可重复性限制的许可审核/例外，或者取得可信构建记录、另行受控重建固定源码并核验新产物。没有这一决定前保持未决；不能仅删除该项或把参照版本当已证实版本。"
     }
   ]
 }
