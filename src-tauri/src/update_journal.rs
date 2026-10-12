@@ -68,6 +68,14 @@ impl Journal {
         }
     }
 
+    pub fn clear(&self) -> Result<(), String> {
+        match fs::remove_file(&self.path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(_) => Err("无法清除更新恢复覆盖，未启动网关。".into()),
+        }
+    }
+
     pub fn write(&self, record: &Transaction) -> Result<(), String> {
         let parent = self.path.parent().ok_or("更新恢复目录无效。")?;
         fs::create_dir_all(parent).map_err(|_| "无法创建更新恢复目录。")?;

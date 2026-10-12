@@ -176,6 +176,16 @@ impl<C: Clone + Send + Sync> UpdateService<C> {
         service
     }
 
+    /// 仅显式「启动网关」调用，用户意图取代更新前停止覆盖；失败时不得继续启动。
+    pub fn acknowledge_manual_start(&self) -> Result<(), String> {
+        let _operation = self.begin_operation()?;
+        if let Some(journal) = &self.journal {
+            journal.clear()?;
+        }
+        self.state.lock().unwrap().view.recovery = None;
+        Ok(())
+    }
+
     pub fn boot_plan(&self) -> BootPlan {
         self.journal
             .as_ref()
@@ -313,7 +323,13 @@ impl<C: Clone + Send + Sync> UpdateService<C> {
                 UpdatePhase::Quiescing,
                 "正在优雅排空在途请求，超时将取消安装。",
             );
-            match gateway.safe_shutdown(Duration::from_secs(10)) {
+            // 原来已停止时绝不调用可发现外部实例的停机链，避免停掉随后出现的新实例。
+            let stopped = if original.running {
+                gateway.safe_shutdown(Duration::from_secs(10))
+            } else {
+                Ok(false)
+            };
+            match stopped {
                 Ok(was_running) if was_running == original.running => {}
                 Ok(_) => return Err("未证实原网关完整退出，拒绝安装。".into()),
                 Err(ShutdownFailure::Timeout) => {
@@ -384,7 +400,18 @@ impl<C: Clone + Send + Sync> UpdateService<C> {
             return Ok(self.set_phase(UpdatePhase::Disabled, "当前构建未配置更新源"));
         }
         self.set_phase(UpdatePhase::Checking, "正在检查 AG Relay 更新…");
-        let result = provider.check().await?;
+        {
+            let mut state = self.state.lock().unwrap();
+            state.candidate = None;
+            state.view.release = None;
+        }
+        let result = match provider.check().await {
+            Ok(result) => result,
+            Err(detail) => {
+                self.set_phase(UpdatePhase::Failed, detail.clone());
+                return Err(detail);
+            }
+        };
         let mut state = self.state.lock().unwrap();
         if let Some(release) = result {
             static NEXT: AtomicU64 = AtomicU64::new(1);
@@ -876,6 +903,107 @@ mod tests {
         ))
         .is_err());
         assert_eq!(updates.boot_plan(), BootPlan::NeedsAttention);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn 重新检查清除旧候选_网络错误不是最新版且允许重试() {
+        struct NoRelease(bool);
+        impl UpdateProvider for NoRelease {
+            type Candidate = ();
+            async fn check(&self) -> Result<Option<Release<()>>, String> {
+                if self.0 {
+                    Err("无法检查更新".into())
+                } else {
+                    Ok(None)
+                }
+            }
+            async fn download(&self, _: &()) -> Result<Vec<u8>, String> {
+                panic!("检查不可下载")
+            }
+            fn install(&self, _: &(), _: &[u8]) -> Result<(), String> {
+                panic!("检查不可安装")
+            }
+        }
+        let updates = UpdateService::new(true, "0.2.0".into());
+        let server = SuccessfulInstaller;
+        tauri::async_runtime::block_on(updates.check(&server)).unwrap();
+        let view = tauri::async_runtime::block_on(updates.check(&NoRelease(false))).unwrap();
+        assert!(view.release.is_none());
+        assert_eq!(view.phase, UpdatePhase::Idle);
+        assert!(tauri::async_runtime::block_on(updates.check(&NoRelease(true))).is_err());
+        assert_eq!(updates.view().phase, UpdatePhase::Failed);
+        assert!(!updates.controls_blocked());
+        assert!(tauri::async_runtime::block_on(updates.check(&server))
+            .unwrap()
+            .release
+            .is_some());
+    }
+
+    #[test]
+    fn 原来停止的更新不发送停机请求_不接管突然出现的外部实例() {
+        struct Stopped;
+        impl UpdateGateway for Stopped {
+            fn identity(&mut self) -> Result<GatewayIdentity, String> {
+                Ok(GatewayIdentity {
+                    running: false,
+                    token: "停止态".into(),
+                })
+            }
+            fn safe_shutdown(&mut self, _: Duration) -> Result<bool, ShutdownFailure> {
+                panic!("停止态不应扫描并停止外部实例")
+            }
+            fn restore(&mut self) -> Result<(), String> {
+                panic!("停止态不应自启")
+            }
+        }
+        let root = std::env::temp_dir().join(format!(
+            "ag-relay-update-{}",
+            crate::update_journal::unique_id()
+        ));
+        let updates = UpdateService::with_journal(
+            true,
+            "0.2.0".into(),
+            "隔离安装".into(),
+            root.join("update.json"),
+        );
+        let id = tauri::async_runtime::block_on(updates.check(&SuccessfulInstaller))
+            .unwrap()
+            .release
+            .unwrap()
+            .id;
+        let view = tauri::async_runtime::block_on(updates.confirm(
+            &SuccessfulInstaller,
+            &Sandbox(Mutex::new(Stopped)),
+            &id,
+        ))
+        .unwrap();
+        assert_eq!(view.phase, UpdatePhase::InstallPending);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn 用户明确选择启动后不再保留更新前的停止覆盖() {
+        let root = std::env::temp_dir().join(format!(
+            "ag-relay-update-{}",
+            crate::update_journal::unique_id()
+        ));
+        let path = root.join("update.json");
+        let updates =
+            UpdateService::with_journal(true, "0.2.0".into(), "隔离安装".into(), path.clone());
+        let host = Sandbox(Mutex::new(SandboxGateway { running: false }));
+        let id = tauri::async_runtime::block_on(updates.check(&SuccessfulInstaller))
+            .unwrap()
+            .release
+            .unwrap()
+            .id;
+        tauri::async_runtime::block_on(updates.confirm(&SuccessfulInstaller, &host, &id)).unwrap();
+        let reopened =
+            UpdateService::<()>::with_journal(true, "0.3.0".into(), "隔离安装".into(), path);
+        assert_eq!(reopened.recover(&host), BootPlan::KeepStopped);
+        reopened.acknowledge_manual_start().unwrap();
+        assert_eq!(reopened.boot_plan(), BootPlan::Normal);
+        assert!(reopened.view().recovery.is_none());
         std::fs::remove_dir_all(root).unwrap();
     }
 
