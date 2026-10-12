@@ -97,3 +97,20 @@ test('正式构建必须同时保有 NSIS 和 WiX 运行时的非空许可材料
   assert.notEqual(empty.status, 0);
   assert.match(empty.stderr, /缺少安装器运行时许可.*NSIS installer runtime/);
 });
+
+test('材料已齐全但仍有未决来源时正式检查不能假通过', async (t) => {
+  const root = await fixture(t);
+  await writeFile(join(root, 'licenses/fixture-LICENSE'), '原始许可\n');
+  const path = join(root, 'licenses/inventory.json');
+  const inventory = JSON.parse(await readFile(path, 'utf8'));
+  inventory.components.push(...['NSIS installer runtime', 'WiX installer runtime'].map((name) => ({
+    name, ecosystem: 'installer-runtime', version: '1.0.0', license: 'MIT', source: 'https://example.org/installer/1.0.0',
+    materials: [{ path: 'licenses/fixture-LICENSE', sha256: hash('原始许可\n') }],
+  })));
+  inventory.releaseBlockers = [{ component: 'nsis_tauri_utils', reason: '预编译依赖版本未能证实' }];
+  await writeFile(path, JSON.stringify(inventory));
+  assert.equal(run(root).status, 0, '保留普通材料核查能力，不把它当成正式验收');
+  const blocked = run(root, ['--installer-runtime']);
+  assert.notEqual(blocked.status, 0);
+  assert.match(blocked.stderr, /正式分发许可来源未闭合.*nsis_tauri_utils/);
+});

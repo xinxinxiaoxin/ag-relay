@@ -1,10 +1,26 @@
 # 第三方组件许可材料索引
 
-此索引与 `inventory.json` 同源，按组件列出锁定版本、元数据许可及保留原文。许可文件按内容 SHA-256 去重；同一原文可由多个组件引用，版权文字未改写。原始版本、仓库、下载完整性值、固定提交和取证例外详见 [核验清单](inventory.json)。
+此索引与 `inventory.json` 同源，列出锁定依赖及明确标注的预编译插件许可参照。参照版本不是旧 DLL 的实际解析版本；未决项保留在 `releaseBlockers`，正式检查不会将其当成已闭合。许可文件按内容 SHA-256 去重；同一原文可由多个组件引用，版权文字未改写。原始版本、仓库、下载完整性值、固定提交和取证例外详见 [核验清单](inventory.json)。
 
-快照日期：2026-10-12。目标：`x86_64-pc-windows-msvc`。共 713 项（npm 422，Rust crates 288，随包/工具链组件 3）。这包含构建/开发依赖，并非声称所有包都嵌入可执行文件。
+快照日期：2026-10-12。目标：`x86_64-pc-windows-msvc`。共 724 项（npm 422，Rust crates 293，随包/工具链/安装器及参照记录9）。这包含构建/开发依赖，并非声称所有包都嵌入可执行文件。
 
 原文链接在源码的 `licenses/` 与安装目录的 `licenses/third-party/` 内均可直接使用。MPL 源码 `.crate` 是完整 tar.gz 归档，可用支持 gzip 的归档工具阅读，无须执行其中脚本。
+
+## 安装器运行部分
+
+| 组件 | 版本 | 许可元数据 | 原文 / 对应源码 | 来源 |
+| --- | --- | --- | --- | --- |
+| `NSIS installer runtime` | 3.11 | zlib/libpng, bzip2, CPL-1.0 with NSIS LZMA linking exception (see full COPYING) | [COPYING](installer/nsis/COPYING) / [NSISdl-License.txt](installer/nsis/NSISdl-License.txt) / [Modern-UI-2-License.txt](installer/nsis/Modern-UI-2-License.txt) / [Modern-UI-2-License.utf8.txt](installer/nsis/Modern-UI-2-License.utf8.txt) / [nsis-3.11-source.tar.gz](installer/nsis/nsis-3.11-source.tar.gz) / [Embedded-Plugin-Copyrights.txt](installer/nsis/Embedded-Plugin-Copyrights.txt) / [LICENSE_MIT](installer/nsis/tauri-utils/LICENSE_MIT) / [LICENSE_APACHE-2.0](installer/nsis/tauri-utils/LICENSE_APACHE-2.0) / [nsis-tauri-utils-0.5.3-source.tar.gz](installer/nsis/tauri-utils/nsis-tauri-utils-0.5.3-source.tar.gz) / [Chromium-LICENSE](installer/nsis/tauri-utils/Chromium-LICENSE) / [L1-L3](installer/nsis/tauri-utils/Chromium-COPYRIGHT.txt) | [固定版本](https://github.com/kichik/nsis/tree/7359413009afd4f0fff472d841fc2f2cc0e0a5f8) |
+| `WiX installer runtime` | 3.14.1.8722 | MS-RL | [LICENSE.TXT](installer/wix/LICENSE.TXT) / [wix-3.14.1-source.tar.gz](installer/wix/wix-3.14.1-source.tar.gz) | [固定版本](https://github.com/wixtoolset/wix3/releases/tag/wix3141rtm) |
+| `NSIS Tauri utils plugin` | 0.5.3 | (MIT OR Apache-2.0) AND BSD-3-Clause; unresolved prebuilt dependency provenance | [LICENSE_MIT](installer/nsis/tauri-utils/LICENSE_MIT) / [LICENSE_APACHE-2.0](installer/nsis/tauri-utils/LICENSE_APACHE-2.0) / [nsis-tauri-utils-0.5.3-source.tar.gz](installer/nsis/tauri-utils/nsis-tauri-utils-0.5.3-source.tar.gz) / [Chromium-LICENSE](installer/nsis/tauri-utils/Chromium-LICENSE) / [L1-L3](installer/nsis/tauri-utils/Chromium-COPYRIGHT.txt) | [固定版本](https://github.com/tauri-apps/nsis-tauri-utils/releases/tag/nsis_tauri_utils-v0.5.3) |
+
+## 安装器插件的静态依赖
+
+| 组件 | 版本 | 许可元数据 | 原文 / 对应源码 | 来源 |
+| --- | --- | --- | --- | --- |
+| `semver (prebuilt NSIS plugin)` | 未证实（manifest约束1.0） | 参照原文见材料；不是旧DLL实际解析版本的证明 | [LICENSE-MIT](installer/nsis/tauri-utils/reference-licenses/semver/LICENSE-MIT) / [LICENSE-APACHE](installer/nsis/tauri-utils/reference-licenses/semver/LICENSE-APACHE) | [声明/参照](https://github.com/tauri-apps/nsis-tauri-utils/blob/13d9edd27b69310e108d6fbd49f90992f8a05390/Cargo.toml) |
+| `windows-sys / windows-link (prebuilt NSIS plugin)` | 未证实（sys约束0.61.2；link patch未知） | 参照原文见材料；不是旧DLL实际解析版本的证明 | [license-mit](installer/nsis/tauri-utils/reference-licenses/windows/license-mit) / [license-apache-2.0](installer/nsis/tauri-utils/reference-licenses/windows/license-apache-2.0) | [声明/参照](https://github.com/tauri-apps/nsis-tauri-utils/blob/13d9edd27b69310e108d6fbd49f90992f8a05390/Cargo.toml) |
+| `Rust alloc/core/compiler-builtins (prebuilt NSIS plugin)` | 未证实（未固定编译器） | 参照原文见材料；不是旧DLL实际解析版本的证明 | [LICENSE-MIT](installer/nsis/tauri-utils/reference-licenses/rust-reference/LICENSE-MIT) / [LICENSE-APACHE](installer/nsis/tauri-utils/reference-licenses/rust-reference/LICENSE-APACHE) / [COPYRIGHT](installer/nsis/tauri-utils/reference-licenses/rust-reference/COPYRIGHT) / [Unicode-3.0.txt](installer/nsis/tauri-utils/reference-licenses/rust-reference/Unicode-3.0.txt) / [compiler-builtins-LICENSE.txt](installer/nsis/tauri-utils/reference-licenses/rust-reference/compiler-builtins-LICENSE.txt) | [声明/参照](https://github.com/tauri-apps/nsis-tauri-utils/blob/13d9edd27b69310e108d6fbd49f90992f8a05390/Cargo.toml) |
 
 ## 随包二进制与 SDK
 
@@ -575,6 +591,8 @@
 | `mio` | 1.2.4 | MIT | [LICENSE](texts/07919255c7e04793d8ea760d6c2ce32d19f9ff02bdbdde3ce90b1e1880929a9b.txt) | [固定版本](https://crates.io/api/v1/crates/mio/1.2.4/download) |
 | `muda` | 0.20.0 | Apache-2.0 OR MIT | [LICENSE-APACHE](texts/a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2.txt) / [LICENSE-MIT](texts/2ab5537b8c0cb1d475e2145b6a7994b04e7c71e6e5bd836f7f9c47c221a5ad9a.txt) / [LICENSE.spdx](texts/b99f9d43803f2ac979c50949df630bd8eeaf2fcd1b9fdb9093710d70f5dfb63d.txt) | [固定版本](https://crates.io/api/v1/crates/muda/0.20.0/download) |
 | `new_debug_unreachable` | 1.0.6 | MIT | [LICENSE-MIT](texts/f7715d38a3fa1b4ac97c5729740752505a39cb92ee83ab5b102aeb5eaa7cdea4.txt) | [固定版本](https://crates.io/api/v1/crates/new_debug_unreachable/1.0.6/download) |
+| `notify-types` | 2.1.0 | MIT OR Apache-2.0 | [LICENSE-APACHE](texts/b5b413d7421d728c14f33d78198d6e255a0018beef717d78c4c3f6188be3dfb4.txt) / [LICENSE-MIT](texts/b63e167d61ced1d872a588c5ac764b0dda477d62209dc4f6b6bfea5517d0a24c.txt) | [固定版本](https://crates.io/api/v1/crates/notify-types/2.1.0/download) |
+| `notify` | 8.2.0 | CC0-1.0 | [LICENSE-CC0](texts/e0456cbab4f7b5e7203e678faff37eadbdfef02e822db3b7a52a1dd9d3dc514a.txt) | [固定版本](https://crates.io/api/v1/crates/notify/8.2.0/download) |
 | `num-conv` | 0.2.2 | MIT OR Apache-2.0 | [LICENSE-Apache](texts/0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594.txt) / [LICENSE-MIT](texts/e2e245f2b566d0bfafb0f6a04c16b82d710c4e6e7d799e39bb4ef6e541b85b98.txt) | [固定版本](https://crates.io/api/v1/crates/num-conv/0.2.2/download) |
 | `num-traits` | 0.2.19 | MIT OR Apache-2.0 | [LICENSE-APACHE](texts/a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2.txt) / [LICENSE-MIT](texts/6485b8ed310d3f0340bf1ad1f47645069ce4069dcc6bb46c7d5c6faf41de1fdb.txt) | [固定版本](https://crates.io/api/v1/crates/num-traits/0.2.19/download) |
 | `once_cell` | 1.21.4 | MIT OR Apache-2.0 | [LICENSE-APACHE](texts/a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2.txt) / [LICENSE-MIT](texts/23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3.txt) | [固定版本](https://crates.io/api/v1/crates/once_cell/1.21.4/download) |
@@ -716,12 +734,15 @@
 | `windows-result` | 0.4.1 | MIT OR Apache-2.0 | [license-apache-2.0](texts/c16f8dcf1a368b83be78d826ea23de4079fe1b4469a0ab9ee20563f37ff3d44b.txt) / [license-mit](texts/c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383.txt) | [固定版本](https://crates.io/api/v1/crates/windows-result/0.4.1/download) |
 | `windows-strings` | 0.5.1 | MIT OR Apache-2.0 | [license-apache-2.0](texts/c16f8dcf1a368b83be78d826ea23de4079fe1b4469a0ab9ee20563f37ff3d44b.txt) / [license-mit](texts/c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383.txt) | [固定版本](https://crates.io/api/v1/crates/windows-strings/0.5.1/download) |
 | `windows-sys` | 0.59.0 | MIT OR Apache-2.0 | [license-apache-2.0](texts/c16f8dcf1a368b83be78d826ea23de4079fe1b4469a0ab9ee20563f37ff3d44b.txt) / [license-mit](texts/c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383.txt) | [固定版本](https://crates.io/api/v1/crates/windows-sys/0.59.0/download) |
+| `windows-sys` | 0.60.2 | MIT OR Apache-2.0 | [license-apache-2.0](texts/c16f8dcf1a368b83be78d826ea23de4079fe1b4469a0ab9ee20563f37ff3d44b.txt) / [license-mit](texts/c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383.txt) | [固定版本](https://crates.io/api/v1/crates/windows-sys/0.60.2/download) |
 | `windows-sys` | 0.61.2 | MIT OR Apache-2.0 | [license-apache-2.0](texts/c16f8dcf1a368b83be78d826ea23de4079fe1b4469a0ab9ee20563f37ff3d44b.txt) / [license-mit](texts/c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383.txt) | [固定版本](https://crates.io/api/v1/crates/windows-sys/0.61.2/download) |
 | `windows-targets` | 0.52.6 | MIT OR Apache-2.0 | [license-apache-2.0](texts/c16f8dcf1a368b83be78d826ea23de4079fe1b4469a0ab9ee20563f37ff3d44b.txt) / [license-mit](texts/c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383.txt) | [固定版本](https://crates.io/api/v1/crates/windows-targets/0.52.6/download) |
+| `windows-targets` | 0.53.5 | MIT OR Apache-2.0 | [license-apache-2.0](texts/c16f8dcf1a368b83be78d826ea23de4079fe1b4469a0ab9ee20563f37ff3d44b.txt) / [license-mit](texts/c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383.txt) | [固定版本](https://crates.io/api/v1/crates/windows-targets/0.53.5/download) |
 | `windows-threading` | 0.2.1 | MIT OR Apache-2.0 | [license-apache-2.0](texts/c16f8dcf1a368b83be78d826ea23de4079fe1b4469a0ab9ee20563f37ff3d44b.txt) / [license-mit](texts/c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383.txt) | [固定版本](https://crates.io/api/v1/crates/windows-threading/0.2.1/download) |
 | `windows-version` | 0.1.7 | MIT OR Apache-2.0 | [license-apache-2.0](texts/c16f8dcf1a368b83be78d826ea23de4079fe1b4469a0ab9ee20563f37ff3d44b.txt) / [license-mit](texts/c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383.txt) | [固定版本](https://crates.io/api/v1/crates/windows-version/0.1.7/download) |
 | `windows` | 0.62.2 | MIT OR Apache-2.0 | [license-apache-2.0](texts/c16f8dcf1a368b83be78d826ea23de4079fe1b4469a0ab9ee20563f37ff3d44b.txt) / [license-mit](texts/c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383.txt) | [固定版本](https://crates.io/api/v1/crates/windows/0.62.2/download) |
 | `windows_x86_64_msvc` | 0.52.6 | MIT OR Apache-2.0 | [license-apache-2.0](texts/c16f8dcf1a368b83be78d826ea23de4079fe1b4469a0ab9ee20563f37ff3d44b.txt) / [license-mit](texts/c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383.txt) | [固定版本](https://crates.io/api/v1/crates/windows_x86_64_msvc/0.52.6/download) |
+| `windows_x86_64_msvc` | 0.53.1 | MIT OR Apache-2.0 | [license-apache-2.0](texts/c16f8dcf1a368b83be78d826ea23de4079fe1b4469a0ab9ee20563f37ff3d44b.txt) / [license-mit](texts/c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383.txt) | [固定版本](https://crates.io/api/v1/crates/windows_x86_64_msvc/0.53.1/download) |
 | `winnow` | 1.0.4 | MIT | [LICENSE-MIT](texts/cb5aedb296c5246d1f22e9099f925a65146f9f0d6b4eebba97fd27a6cdbbab2d.txt) | [固定版本](https://crates.io/api/v1/crates/winnow/1.0.4/download) |
 | `winreg` | 0.55.0 | MIT | [LICENSE](texts/ea021d8c6383c84d19c15ce90d3b1602cf448fdcc0bf3772c98e43c7bf1bf1d1.txt) | [固定版本](https://crates.io/api/v1/crates/winreg/0.55.0/download) |
 | `winreg` | 0.56.0 | MIT | [LICENSE](texts/ea021d8c6383c84d19c15ce90d3b1602cf448fdcc0bf3772c98e43c7bf1bf1d1.txt) | [固定版本](https://crates.io/api/v1/crates/winreg/0.56.0/download) |
@@ -752,6 +773,12 @@
 - `webview2-com-macros@0.8.1`：crate 发布包未附根许可；按 .cargo_vcs_info.json 固定源码提交补充上游原文。
 - `webview2-com-sys@0.39.1`：crate 发布包未附根许可；按 .cargo_vcs_info.json 固定源码提交补充上游原文。
 - `webview2-com@0.39.1`：crate 发布包未附根许可；按 .cargo_vcs_info.json 固定源码提交补充上游原文。
+- `NSIS installer runtime@3.11`：NSIS自身、MUI2和NSISdl未修改。源归档含LZMA模块及全部原始声明；CPL linking例外不将AG Relay自有代码改为CPL。不得去除该模块对应源码和免责文字。
+- `WiX installer runtime@3.14.1.8722`：使用未修改的WiX发行工具和标准UI；提供固定版本完整对应源码（含原始文件级许可）。接收方对所含WiX代码保有MS-RL权利。
+- `NSIS Tauri utils plugin@0.5.3`：官方DLL与工具缓存及#27静态提取候选DLL一致。源归档未包含Cargo.lock，发布未固定Rust工具链且历史构建日志已不可取；不能用AG Relay自己的lock/toolchain补填未知值。
+- `semver (prebuilt NSIS plugin)@未证实（manifest约束1.0）`：保留公开原文供审查；referenceVersion不是resolvedVersion。要闭合正式许可核验需取得实际构建锁文件/工具链，或从固定源码隔离重建并核验新产物。
+- `windows-sys / windows-link (prebuilt NSIS plugin)@未证实（sys约束0.61.2；link patch未知）`：保留公开原文供审查；referenceVersion不是resolvedVersion。要闭合正式许可核验需取得实际构建锁文件/工具链，或从固定源码隔离重建并核验新产物。
+- `Rust alloc/core/compiler-builtins (prebuilt NSIS plugin)@未证实（未固定编译器）`：保留公开原文供审查；referenceVersion不是resolvedVersion。要闭合正式许可核验需取得实际构建锁文件/工具链，或从固定源码隔离重建并核验新产物。
 
 ## 未安装的平台可选包
 
