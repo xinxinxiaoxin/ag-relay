@@ -3,7 +3,10 @@ use tauri::Manager;
 pub mod app_exit;
 pub mod autostart;
 pub mod autostart_commands;
+pub mod connection_settings;
 pub mod gateway_commands;
+pub mod gateway_connection;
+pub mod gateway_safe_shutdown;
 pub mod gateway_control;
 pub mod gateway_diagnostics;
 pub mod gateway_diagnostics_reader;
@@ -46,6 +49,8 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            gateway_commands::get_connection_settings,
+            gateway_commands::save_connection_settings,
             gateway_commands::start_gateway,
             gateway_commands::stop_gateway,
             gateway_status::get_status,
