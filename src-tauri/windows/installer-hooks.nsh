@@ -6,9 +6,14 @@
 !endif
 !macroundef CheckIfAppIsRunning
 
+; 安装/卸载前的等待预算：最多 N 次 × 间隔。updater 会先启动安装器再退出面板，
+; 允许这段短暂交叠；预算耗尽仍占用本安装目录即拒绝，绝不发停机信号或强停进程。
+!define AG_RELAY_RUNNING_WAIT_ATTEMPTS 10
+!define AG_RELAY_RUNNING_WAIT_INTERVAL_MS 500
+
 !macro CheckIfAppIsRunning executablePath productName
   !define AGRelayCheckID ${__LINE__}
-  StrCpy $R9 10
+  StrCpy $R9 ${AG_RELAY_RUNNING_WAIT_ATTEMPTS}
   !insertmacro RestartManager_StartSession $R0
   ${If} $R0 == ""
     SetErrorLevel 2
@@ -38,7 +43,7 @@
       ; updater 启动安装器后才退出面板，允许这个短暂交叠；不发任何停机信号。
       ${If} $R9 > 0
         IntOp $R9 $R9 - 1
-        Sleep 500
+        Sleep ${AG_RELAY_RUNNING_WAIT_INTERVAL_MS}
         Goto ag_relay_wait_${AGRelayCheckID}
       ${EndIf}
       !insertmacro RestartManager_EndSession $R0
