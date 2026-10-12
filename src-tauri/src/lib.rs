@@ -1,10 +1,14 @@
 use tauri::Manager;
 
 pub mod app_exit;
+pub mod bounded_log;
 pub mod autostart;
 pub mod autostart_commands;
+pub mod connection_settings;
 pub mod gateway_activity;
 pub mod gateway_commands;
+pub mod gateway_connection;
+pub mod gateway_safe_shutdown;
 pub mod gateway_control;
 pub mod gateway_diagnostics;
 pub mod gateway_diagnostics_reader;
@@ -17,6 +21,8 @@ pub mod tray;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // 只由 Rust 安全更新服务调用；不给前端开放可绕过排空的 updater 安装权限。
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(gateway_commands::GatewayState::default())
         .manage(autostart_commands::AutostartUiState::default())
         .manage(gateway_activity::ActivityState::default())
@@ -47,6 +53,8 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            gateway_commands::get_connection_settings,
+            gateway_commands::save_connection_settings,
             gateway_commands::start_gateway,
             gateway_commands::stop_gateway,
             gateway_status::get_status,
