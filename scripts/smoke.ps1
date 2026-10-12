@@ -1,4 +1,4 @@
-# 只读发布物冒烟：不启动应用、不安装、不修改注册表、不探测/停止网关。
+﻿# 只读发布物冒烟：不启动应用、不安装、不修改注册表、不探测/停止网关。
 # 真实 Windows 安装/升级须在独立 VM 或 Windows Sandbox 内人工验收。
 # 用法：npm run smoke -- -Artifacts <发布物目录> [-Config <该构建的 tauri 配置>]
 param(

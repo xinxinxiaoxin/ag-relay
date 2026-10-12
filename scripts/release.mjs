@@ -18,11 +18,11 @@ function preflight(file = configPath, { signing = true, inputs = true } = {}) {
   if (signing && !process.env.TAURI_SIGNING_PRIVATE_KEY?.trim()) throw new Error('必须通过环境提供 TAURI_SIGNING_PRIVATE_KEY；拒绝正式发布');
   const updater = config.plugins.updater;
   if (JSON.stringify(updater.endpoints) !== JSON.stringify([endpoint])
-      || updater.requireSignedVersion !== true || updater.allowDowngrades
+      || updater.requireSignedVersion !== true || updater.allowDowngrades || updater['allow-downgrades']
       || Object.keys(updater).some(key => key.startsWith('dangerous') && updater[key])) {
     throw new Error('生产更新配置不安全：必须使用正式 HTTPS 端点、版本绑定和默认 TLS 验证，禁止降级');
   }
-  if (inputs) checkBuildInputs(config);
+  if (inputs) checkBuildInputs(config, true);
   return config;
 }
 
@@ -49,9 +49,13 @@ function verify(config, artifacts, production = false) {
     const sums = expected.map(name => `${createHash('sha256').update(fs.readFileSync(path.join(artifacts, name))).digest('hex')}  ${name}`).join('\n');
     if (fs.readFileSync(path.join(artifacts, 'SHA256SUMS'), 'utf8') !== `${sums}\n`) throw new Error('发布文件校验和不匹配');
   }
+  const env = { ...process.env };
+  delete env.TAURI_SIGNING_PRIVATE_KEY;
+  delete env.TAURI_SIGNING_PRIVATE_KEY_PATH;
+  delete env.TAURI_SIGNING_PRIVATE_KEY_PASSWORD;
   const result = spawnSync('cargo', ['run', '--locked', '-j', '2', '--manifest-path',
     path.join(root, 'src-tauri/Cargo.toml'), '--example', 'verify-update', '--', config, artifacts],
-  { cwd: root, stdio: 'inherit' });
+  { cwd: root, env, stdio: 'inherit' });
   if (result.status !== 0) throw new Error('更新物验签未通过');
 }
 
@@ -97,7 +101,7 @@ function stage(configFile, bundleDir, out, notesFile, testOnly) {
   }
 }
 
-function checkBuildInputs(config) {
+function checkBuildInputs(config, installerRuntime = false) {
   const versions = [JSON.parse(fs.readFileSync(path.join(root, 'package.json'))).version,
     JSON.parse(fs.readFileSync(path.join(root, 'package-lock.json'))).version,
     JSON.parse(fs.readFileSync(path.join(root, 'package-lock.json'))).packages[''].version,
@@ -111,11 +115,46 @@ function checkBuildInputs(config) {
       || config.bundle.windows?.wix?.upgradeCode !== 'ba1f2de2-325d-5641-9f4f-cdc34e692497') {
     throw new Error('安装标识或签名安装器配置漂移，拒绝改变既有数据/升级约定');
   }
+  const resources = config.bundle.resources;
+  const requiredResources = { 'resources/gateway/': 'resources/gateway/', '../LICENSE': 'licenses/LICENSE',
+    '../THIRD_PARTY_NOTICES.md': 'licenses/THIRD_PARTY_NOTICES.md', '../licenses/': 'licenses/third-party/' };
+  if (JSON.stringify(config.bundle.externalBin) !== JSON.stringify(['binaries/node'])
+      || !resources || Array.isArray(resources)
+      || Object.entries(requiredResources).some(([from, to]) => resources[from] !== to)
+      || Object.keys(resources).length !== Object.keys(requiredResources).length
+      || !fs.existsSync(path.join(root, 'src-tauri/binaries/node-x86_64-pc-windows-msvc.exe'))) {
+    throw new Error('随包资源必须包含自带 Node、完整网关目录及完整许可目录，且不能混入额外资源');
+  }
   const rustc = spawnSync('rustc', ['--version'], { cwd: root, encoding: 'utf8' });
   const rustVersion = rustc.stdout?.match(/^rustc (\S+)/)?.[1];
   if (rustc.status !== 0 || !rustVersion) throw new Error('无法读取实际 Rust 工具链版本');
-  const licenses = spawnSync(process.execPath, [path.join(root, 'scripts/check-licenses.mjs'), '--rust-version', rustVersion], { cwd: root, stdio: 'inherit' });
+  const licenses = spawnSync(process.execPath, [path.join(root, 'scripts/check-licenses.mjs'), '--rust-version', rustVersion,
+    ...(installerRuntime ? ['--installer-runtime'] : [])], { cwd: root, stdio: 'inherit' });
   if (licenses.status !== 0) throw new Error('许可资源校验未通过，拒绝打包');
+}
+
+function buildPathMappings() {
+  const home = os.homedir();
+  const mappings = [
+    [home, '/builder'],
+    [process.env.CARGO_HOME || path.join(home, '.cargo'), '/cargo'],
+    [process.env.RUSTUP_HOME || path.join(home, '.rustup'), '/rustup'],
+    [root, '/workspace'],
+    [process.env.CARGO_TARGET_DIR || path.join(root, 'src-tauri/target'), '/target'],
+  ];
+  return mappings.flatMap(([from, to]) => {
+    const absolute = path.resolve(from);
+    return [...new Set([absolute, absolute.replaceAll('\\', '/')])].map(prefix => [prefix, to]);
+  });
+}
+
+function auditPaths(file) {
+  if (!file) throw new Error('audit-paths 需要 --binary');
+  const bytes = fs.readFileSync(file);
+  const texts = [bytes.toString('utf8'), bytes.toString('utf16le'), bytes.subarray(1).toString('utf16le')].map(text => text.toLowerCase());
+  const found = buildPathMappings().filter(([prefix]) => texts.some(text => text.includes(prefix.toLowerCase()))).length;
+  if (found) throw new Error(`本机构建路径残留：匹配 ${found} 项，拒绝发布（不显示路径内容）`);
+  console.log('产物路径隐私检查通过');
 }
 
 function build(options, testOnly) {
@@ -123,10 +162,17 @@ function build(options, testOnly) {
   if (process.platform !== 'win32' || process.arch !== 'x64') throw new Error('仅支持 Windows x64 构建');
   if (!options.out || fs.existsSync(options.out)) throw new Error('--out 必须是一个尚不存在的新目录');
   if (!testOnly && !options.notes) throw new Error('正式构建需要 --notes 更新说明文件');
-  checkBuildInputs(config);
+  if (testOnly) checkBuildInputs(config);
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'ag-relay-build-'));
   const tauri = path.join(root, 'node_modules/@tauri-apps/cli/tauri.js');
-  const env = { ...process.env, CARGO_BUILD_JOBS: '2' };
+  // WiX 会把 sidecar 中转为临时目录下的 node.exe；必须隔离 TEMP/TMP，不能共用用户临时文件。
+  const env = { ...process.env, CARGO_BUILD_JOBS: '2', TEMP: temp, TMP: temp, TMPDIR: temp };
+  // 仅影响本次构建子进程；编码形式避免 Windows 含空格路径被 Cargo 拆成多个参数。
+  const inheritedFlags = env.CARGO_ENCODED_RUSTFLAGS !== undefined
+    ? env.CARGO_ENCODED_RUSTFLAGS.split('\x1f') : (env.RUSTFLAGS || '').split(/\s+/);
+  env.CARGO_ENCODED_RUSTFLAGS = [...inheritedFlags.filter(Boolean),
+    ...buildPathMappings().map(([from, to]) => `--remap-path-prefix=${from}=${to}`)].join('\x1f');
+  delete env.RUSTFLAGS;
   let activeConfig = configPath;
   let notes = options.notes;
   try {
@@ -163,7 +209,9 @@ function build(options, testOnly) {
     for (const secret of secrets.filter(Boolean)) output = output.replaceAll(secret, '[签名材料已隐藏]');
     process.stdout.write(output);
     if (result.status !== 0) throw new Error('Tauri 签名构建失败，未生成发布清单');
-    const bundleDir = path.join(target, 'x86_64-pc-windows-msvc/release/bundle');
+    const releaseDir = path.join(target, 'x86_64-pc-windows-msvc/release');
+    auditPaths(path.join(releaseDir, 'ag-relay.exe'));
+    const bundleDir = path.join(releaseDir, 'bundle');
     for (const [kind, name] of Object.entries(installerNames(config.version))) {
       if (fs.statSync(path.join(bundleDir, kind, name)).mtimeMs < started - 2000) throw new Error('检测到旧安装产物，拒绝生成清单');
     }
@@ -177,7 +225,7 @@ try {
   const { values, positionals } = parseArgs({ allowPositionals: true, options: {
     config: { type: 'string' }, artifacts: { type: 'string' },
     'bundle-dir': { type: 'string' }, out: { type: 'string' }, notes: { type: 'string' },
-    production: { type: 'boolean', default: false },
+    production: { type: 'boolean', default: false }, binary: { type: 'string' },
   } });
   if (positionals[0] === 'preflight') {
     preflight(values.config);
@@ -187,12 +235,11 @@ try {
     build(values, positionals[0] === 'test-build');
   } else if (positionals[0] === 'test-manifest') {
     stage(values.config, values['bundle-dir'], values.out, values.notes, true);
-  } else if (positionals[0] === 'manifest') {
-    preflight();
-    stage(configPath, values['bundle-dir'], values.out, values.notes, false);
+  } else if (positionals[0] === 'audit-paths') {
+    auditPaths(values.binary);
   } else if (positionals[0] === 'verify') {
     verify(values.config, values.artifacts, values.production);
-  } else throw new Error('用法：node scripts/release.mjs preflight|verify');
+  } else throw new Error('用法：node scripts/release.mjs preflight|build|test-build|test-manifest|verify|audit-paths；构建/清单需 --out，验签需 --config 与 --artifacts');
 } catch (error) {
   console.error(error.message);
   process.exitCode = 1;

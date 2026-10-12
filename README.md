@@ -20,7 +20,7 @@ AG Relay 是由**网关核心**与 **Tauri 桌面面板**组成的本地网关�
 
 用户分发采用 **NSIS（优先）或 MSI**，两者都自带 `node.exe` 与 `resources/gateway/`，不依赖宿主机安装 Node。保留 `identifier=ag-relay` 和 MSI UpgradeCode，安装位置变化不改变 `%APPDATA%\ag-relay\` 下的设置与日志。旧 ZIP 版需先在安全停止网关后手动安装一次具备更新能力的版本；后续升级保持原安装器类型。
 
-开发前置：Windows x64、Node/npm、Rust/MSVC、WebView2；`npm ci` 安装锁定依赖。构建工具可以下载 WiX、NSIS/WebView2 bootstrapper，**构建不等于运行安装器**。未配置生产公钥时，默认 `pubkey=""`、`endpoints=[]`，应用更新禁用；普通 Tauri 打包若缺少签名私钥会失败，不会降级为无签名发布。
+开发前置：Windows x64、Node/npm、Rust/MSVC、WebView2；`npm ci` 安装锁定依赖。构建工具可能准备 WiX、NSIS；安装时若缺少 WebView2，将联网下载其 bootstrapper。**构建不等于运行安装器**。未配置生产公钥时，默认 `pubkey=""`、`endpoints=[]`，应用更新禁用；普通 Tauri 打包若缺少签名私钥会失败，不会降级为无签名发布。
 
 ```powershell
 # 只编译面板和程序，不生成安装包、不启动应用
@@ -31,19 +31,19 @@ npm run tauri -- build --no-bundle -- --locked -j 2
 node scripts/release.mjs test-build --out C:\Temp\ag-relay-test-artifacts
 ```
 
-可设置 `CARGO_TARGET_DIR` 复用隔离构建缓存；不要指向现用程序目录。共享 target 的构建必须串行排队，cargo 采用 `-j 2`，不要在另一个打包任务进行时重用其 `release/bundle`。测试构建在临时目录产生并销毁私钥，仅输出测试配置、公钥、签名产物及醒目标记。
+可设置 `CARGO_TARGET_DIR` 复用隔离构建缓存；不要指向现用程序目录。共享 target 的构建必须串行排队，cargo 采用 `-j 2`，不要在另一个打包任务进行时重用其 `release/bundle`。测试构建在独立 TEMP/TMP 目录产生并销毁私钥，仅输出测试配置、公钥、签名产物及醒目标记。构建子进程通过 Rust `--remap-path-prefix` 把工作树、用户 home、Cargo/Rustup 与 target 路径映射为固定无身份前缀，不改变系统环境；生成清单前扫描未压缩主程序的 UTF-8/UTF-16 本机路径残留，发现即拒绝。该检查不能代替完整资产核查。
 
 ### 正式发布门槛（目前未满足，不代表已发布）
 
 1. 维护者在可信离线环境生成并备份正式 Tauri 签名密钥，只把**公钥内容**提交到 `src-tauri/tauri.conf.json` 的 `plugins.updater.pubkey`。不要把私钥、密码或 `.env` 提交/随包分发。
 2. 将 `endpoints` 设置为 `https://github.com/xinxinxiaoxin/ag-relay/releases/latest/download/latest.json`，保留 `requireSignedVersion=true`，不得打开不安全 TLS 或允许降级。公钥变更需设计旧版本信任迁移，不能随意换钥。
 3. GitHub Environment `release-signing` 保存 `TAURI_SIGNING_PRIVATE_KEY`、`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` secrets（密码变量可为空）；`release-publish` 设置人工必需审批与允许的发布 tag。仓库及 Release 必须能被用户匿名读取；私有仓库的 404 不能伪装成“没有更新”，不向客户端嵌入 GitHub token。
-4. 同步 `package.json`、`package-lock.json`、`Cargo.toml`、`tauri.conf.json` 版本并创建新的稳定 `vX.Y.Z` tag；补齐所有 `LICENSE`、`THIRD_PARTY_NOTICES.md`、`licenses/**`。发布前完成源码/历史/资产敏感信息复核。
+4. 同步 `package.json`、`package-lock.json`、`Cargo.toml`、`tauri.conf.json` 版本并创建新的稳定 `vX.Y.Z` tag；补齐所有 `LICENSE`、`THIRD_PARTY_NOTICES.md`、`licenses/**`（含实际 NSIS/WiX 及插件运行时材料）；正式预检强制按实际 Rust 版本及 `--installer-runtime` 核对许可。发布前完成源码/历史/资产敏感信息复核。
 5. 在独立 Windows Sandbox/VM 实测无系统 Node 安装启动、旧版升级、数据保留及安全排空更新。**本机尚未执行干净机器安装验收，不运行安装包，也未触碰现用网关。**
 
 隔离验收使用独立 Windows 用户、AppData、安装目录和端口，不连接现用上游服务。至少验证：检查更新显示版本/说明但未确认不下载；独立测试签名新版升级；超过排空预算的合成长请求不断流、提示稍后再试且不安装；篡改字节验签失败且不停机；更新前运行/停止两种状态重开后分别恢复；设置和日志保留；UAC 拒绝、取消安装或旧版重开不得误报成功；窗口/托盘退出不能绕过更新事务的安全排空。此人工验收清单不由只读 smoke 自动完成。
 
-手动触发 `.github/workflows/release.yml`：默认只构建并上传 Actions 产物，勾选发布后仍须通过 `release-publish` 审批才创建 GitHub Release；不覆盖已有 tag/Release。也可先本地执行 `node scripts/release.mjs preflight`，通过后运行 `node scripts/release.mjs build --out <新空目录> --notes <UTF-8更新说明文件>`。私钥仅通过当前进程环境/CI secrets 提供，脚本不读 `.env`、不回显密钥。
+从新的稳定版本 tag 手动触发 `.github/workflows/release.yml`：默认只构建并上传 Actions 产物，勾选发布后仍须通过 `release-publish` 审批，先完整上传到草稿再公开 GitHub Release；不覆盖已有 tag/Release。也可先本地执行 `node scripts/release.mjs preflight`，通过后运行 `node scripts/release.mjs build --out <新空目录> --notes <UTF-8更新说明文件>`。私钥仅通过当前进程环境/CI secrets 提供，脚本不读 `.env`、不回显密钥。
 
 发布资产包括 NSIS `.exe`、MSI `.msi`、各自 `.sig`、UTF-8 可读 `latest.json` 与 `SHA256SUMS`。清单使用 `windows-x86_64-nsis` / `windows-x86_64-msi`，嵌入签名内容而非签名路径；应用按原安装器选择。Tauri updater 签名与 Windows Authenticode 是两件事：此流程未配置 Authenticode 证书，不能承诺“已验证发布者”或无 SmartScreen 警告。
 
@@ -52,7 +52,7 @@ node scripts/release.mjs test-build --out C:\Temp\ag-relay-test-artifacts
 `src-tauri/resources/gateway/` 是 AG Relay 自主维护的核心源码，不是等待外部项目覆盖的缓存。按 [ADR-0004](docs/adr/0004-owned-gateway-core.md)，继续保留现有 Node 核心与桌面面板分工，不为产品整合重写已有能力。
 
 1. **在本仓演进**：直接修改本仓核心，保留现有能力与测试；配置、控制协议或诊断事件变化时，同步修改桌面面板适配及契约测试。文件职责、测试入口与安全边界见[网关核心维护说明](docs/gateway-core-maintenance.md)。
-2. **配套验证**：保留环境装配、诊断字典覆盖打包脚本事件码、诊断读取、状态与重启受理等契约；先跑维护说明中的隔离测试。旧全量测试及 `scripts/smoke.ps1` 可能触碰固定端口或真实系统状态，不能在现用网关所在环境直接执行。真实起停、重启与诊断展示验收需独立隔离环境，不能用 HTTP mock 通过代替。
+2. **配套验证**：保留环境装配、诊断字典覆盖打包脚本事件码、诊断读取、状态与重启受理等契约；先跑维护说明中的隔离测试。旧全量测试及旧版 `scripts/smoke.ps1` 可能触碰固定端口或真实系统状态，不能在现用网关所在环境直接执行。真实起停、重启与诊断展示验收需独立隔离环境，不能用 HTTP mock 通过代替。
 3. **作为一个产品构建发布**：验证后按构建流程将核心与桌面面板一并打包，使用同一 AG Relay 版本发布；不提供独立追踪外部源码的「仅更新核心」。不得覆盖正在运行的网关文件。
 4. **记录可追溯快照**：实际完成构建后，记录本仓构建提交、核心三个 `.mjs` 与 `gateway-config.bat` 的 SHA-256、成品哈希及构建时间。外部改进按需审查、择取补丁，记录来源提交并保留版权与许可要求，不再整体覆盖脚本；详见维护说明。
 

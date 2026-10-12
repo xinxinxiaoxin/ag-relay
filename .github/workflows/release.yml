@@ -76,6 +76,7 @@ jobs:
     environment: release-publish
     permissions:
       contents: write
+      actions: read
     env:
       CARGO_BUILD_JOBS: '2'
       RELEASE_TAG: ${{ github.ref_name }}
@@ -101,11 +102,16 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
         run: |
+          $reviewers = gh api "repos/$env:GITHUB_REPOSITORY/environments/release-publish" --jq '[.protection_rules[]? | select(.type == "required_reviewers") | .reviewers[]?] | length'
+          if ($LASTEXITCODE -ne 0 -or [int]$reviewers -lt 1) { throw 'release-publish 未配置必需审批，拒绝发布（环境名称本身不构成门禁）' }
           $private = gh repo view $env:GITHUB_REPOSITORY --json isPrivate --jq .isPrivate
           if ($LASTEXITCODE -ne 0 -or $private -ne 'false') { throw '仓库尚不能匿名读取，停止发布；不自动修改可见性' }
           gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY *> $null
           if ($LASTEXITCODE -eq 0) { throw 'Release 已存在，拒绝覆盖已有版本/资产' }
           $env:RELEASE_NOTES | Set-Content -Encoding utf8 release-notes.txt
           $assets = Get-ChildItem release-artifacts -File | ForEach-Object FullName
-          gh release create $env:RELEASE_TAG @assets --repo $env:GITHUB_REPOSITORY --verify-tag --title "AG Relay $env:RELEASE_TAG" --notes-file release-notes.txt --latest
-          if ($LASTEXITCODE -ne 0) { throw 'Release 创建失败' }
+          # 先完整上传到草稿，避免 latest 指向尚未上传完资产的半成品。
+          gh release create $env:RELEASE_TAG @assets --repo $env:GITHUB_REPOSITORY --verify-tag --title "AG Relay $env:RELEASE_TAG" --notes-file release-notes.txt --draft
+          if ($LASTEXITCODE -ne 0) { throw '草稿创建/资产上传失败，保持未公开状态' }
+          gh release edit $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --draft=false --latest
+          if ($LASTEXITCODE -ne 0) { throw '发布失败；检查草稿，不自动覆盖或删除' }

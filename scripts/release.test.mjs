@@ -92,6 +92,7 @@ test('发布拒绝测试端点和不安全的签名策略', () => {
     { requireSignedVersion: false },
     { dangerousAcceptInvalidCerts: true },
     { allowDowngrades: true },
+    { 'allow-downgrades': true },
   ]) {
     const config = JSON.parse(fs.readFileSync(testConfig));
     Object.assign(config.plugins.updater, { endpoints: ['https://github.com/xinxinxiaoxin/ag-relay/releases/latest/download/latest.json'] }, patch);
@@ -101,6 +102,32 @@ test('发布拒绝测试端点和不安全的签名策略', () => {
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /生产更新配置不安全/);
   }
+});
+
+test('发布预检拒绝遗漏随包 Node 的安装配置', () => {
+  const config = JSON.parse(fs.readFileSync(path.join(root, 'src-tauri/tauri.conf.json')));
+  config.plugins.updater = { pubkey: fs.readFileSync(`${key}.pub`, 'utf8').trim(),
+    endpoints: ['https://github.com/xinxinxiaoxin/ag-relay/releases/latest/download/latest.json'], requireSignedVersion: true };
+  config.bundle.externalBin = [];
+  const file = path.join(temp, 'missing-node.json');
+  fs.writeFileSync(file, JSON.stringify(config));
+  const result = run(['preflight', '--config', file], { TAURI_SIGNING_PRIVATE_KEY: key });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /随包资源/);
+});
+
+test('产物路径审计拒绝用户路径残留且不回显隐私内容', () => {
+  const file = path.join(temp, 'path-audit.bin');
+  for (const encoding of ['utf8', 'utf16le']) {
+    fs.writeFileSync(file, Buffer.concat([Buffer.from('MZ'), Buffer.from(os.homedir(), encoding)]));
+    const result = run(['audit-paths', '--binary', file]);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /本机构建路径残留/);
+    assert.ok(!result.stderr.includes(os.homedir()));
+  }
+  fs.writeFileSync(file, '/workspace/src/main.rs /cargo/registry/src/library.rs');
+  const clean = run(['audit-paths', '--binary', file]);
+  assert.equal(clean.status, 0, clean.stderr);
 });
 
 test('Tauri 清单可读且两种更新物的独立临时签名验证通过', () => {
@@ -142,6 +169,32 @@ test('删除测试标记也不能把测试端点和混杂文件冒充正式发�
   const result = run(['verify', '--config', testConfig, '--artifacts', artifacts, '--production']);
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /生产更新配置不安全/);
+});
+
+test('篡改更新物字节后验签拒绝，完整原件仍可验证', () => {
+  const file = path.join(artifacts, 'ag-relay_0.2.0_x64-setup.exe');
+  const original = fs.readFileSync(file);
+  fs.appendFileSync(file, '篡改');
+  try {
+    const result = run(['verify', '--config', testConfig, '--artifacts', artifacts]);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /更新物验签未通过/);
+  } finally {
+    fs.writeFileSync(file, original);
+  }
+});
+
+test('篡改独立 sig 文件也必须拒绝，不能只信清单中的签名', () => {
+  const file = path.join(artifacts, 'ag-relay_0.2.0_x64-setup.exe.sig');
+  const original = fs.readFileSync(file);
+  fs.writeFileSync(file, '篡改签名');
+  try {
+    const result = run(['verify', '--config', testConfig, '--artifacts', artifacts]);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /独立签名文件与清单不一致/);
+  } finally {
+    fs.writeFileSync(file, original);
+  }
 });
 
 test('有效旧签名不能冒充更高的清单版本', () => {

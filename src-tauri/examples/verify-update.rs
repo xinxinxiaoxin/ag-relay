@@ -31,6 +31,11 @@ fn verify(config_path: &Path, artifacts: &Path) -> Result<()> {
         {
             return Err("资产文件名不安全".into());
         }
+        if fs::read_to_string(artifacts.join(format!("{name}.sig")))?.trim()
+            != release.signature(target)?.trim()
+        {
+            return Err("独立签名文件与清单不一致".into());
+        }
         let signature = Signature::decode(&decode(release.signature(target)?)?)?;
         public_key.verify(&fs::read(artifacts.join(name))?, &signature, true)?;
         // 只有经过 global signature 验证后才读取 trusted comment，防止重放旧包冒充新版本。
