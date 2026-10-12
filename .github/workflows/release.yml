@@ -1,0 +1,117 @@
+name: Windows 签名安装包与更新清单
+
+# 只在维护者明确手动触发时运行；从新的稳定版本 tag 运行，不监听 push。
+on:
+  workflow_dispatch:
+    inputs:
+      notes:
+        description: 中文更新说明（将写入 latest.json 和 Release）
+        required: true
+        type: string
+      publish:
+        description: 构建后申请发布审批（默认仅保存 Actions 产物）
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-latest
+    # 必须预先配置 required reviewers 和允许的稳定版本 tags，密钥仅存此环境。
+    environment: release-signing
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_TARGET_DIR: ${{ github.workspace }}/src-tauri/target
+      RELEASE_TAG: ${{ github.ref_name }}
+      RELEASE_NOTES: ${{ inputs.notes }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: 验证手动选择的是新稳定版本 tag
+        shell: pwsh
+        run: |
+          if ('${{ github.ref_type }}' -ne 'tag' -or $env:RELEASE_TAG -notmatch '^v\d+\.\d+\.\d+$') {
+            throw '请从新的稳定版本 vX.Y.Z tag 手动运行，不接受分支或预发布版本'
+          }
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - name: 使用与许可材料匹配的 Rust
+        run: |
+          rustup toolchain install 1.99.0 --profile minimal --no-self-update
+          rustup default 1.99.0
+      - run: npm ci --ignore-scripts
+      - name: 仅运行隔离的发布工具回归（不运行旧全量网关测试/安装）
+        run: node --test --test-concurrency=1 scripts/release.test.mjs
+      - name: 正式签名构建与清单验签
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        shell: pwsh
+        run: |
+          $env:RELEASE_NOTES | Set-Content -Encoding utf8 release-notes.txt
+          node scripts/release.mjs build --out release-artifacts --notes release-notes.txt
+          if ($LASTEXITCODE -ne 0) { throw '构建失败；不允许上传不完整发布物' }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ag-relay-${{ github.ref_name }}-windows
+          path: release-artifacts/
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    needs: build
+    if: ${{ inputs.publish }}
+    runs-on: windows-latest
+    # 独立人工审批门槛；不要取消此环境的 required reviewers。
+    environment: release-publish
+    permissions:
+      contents: write
+      actions: read
+    env:
+      CARGO_BUILD_JOBS: '2'
+      RELEASE_TAG: ${{ github.ref_name }}
+      RELEASE_NOTES: ${{ inputs.notes }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: |
+          rustup toolchain install 1.99.0 --profile minimal --no-self-update
+          rustup default 1.99.0
+      - uses: actions/download-artifact@v4
+        with:
+          name: ag-relay-${{ github.ref_name }}-windows
+          path: release-artifacts
+      - name: 独立复验公钥和完整发布物（此 job 无私钥）
+        run: node scripts/release.mjs verify --config src-tauri/tauri.conf.json --artifacts release-artifacts --production
+      - name: 审批后创建新公开 Release，不覆盖旧版本
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $reviewers = gh api "repos/$env:GITHUB_REPOSITORY/environments/release-publish" --jq '[.protection_rules[]? | select(.type == "required_reviewers") | .reviewers[]?] | length'
+          if ($LASTEXITCODE -ne 0 -or [int]$reviewers -lt 1) { throw 'release-publish 未配置必需审批，拒绝发布（环境名称本身不构成门禁）' }
+          $private = gh repo view $env:GITHUB_REPOSITORY --json isPrivate --jq .isPrivate
+          if ($LASTEXITCODE -ne 0 -or $private -ne 'false') { throw '仓库尚不能匿名读取，停止发布；不自动修改可见性' }
+          gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -eq 0) { throw 'Release 已存在，拒绝覆盖已有版本/资产' }
+          $env:RELEASE_NOTES | Set-Content -Encoding utf8 release-notes.txt
+          $assets = Get-ChildItem release-artifacts -File | ForEach-Object FullName
+          # 先完整上传到草稿，避免 latest 指向尚未上传完资产的半成品。
+          gh release create $env:RELEASE_TAG @assets --repo $env:GITHUB_REPOSITORY --verify-tag --title "AG Relay $env:RELEASE_TAG" --notes-file release-notes.txt --draft
+          if ($LASTEXITCODE -ne 0) { throw '草稿创建/资产上传失败，保持未公开状态' }
+          gh release edit $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --draft=false --latest
+          if ($LASTEXITCODE -ne 0) { throw '发布失败；检查草稿，不自动覆盖或删除' }
