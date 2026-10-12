@@ -4,6 +4,7 @@ pub mod app_exit;
 pub mod app_update;
 mod update_commands;
 mod update_journal;
+pub mod atomic_write;
 pub mod bounded_log;
 pub mod autostart;
 pub mod autostart_commands;
