@@ -4,7 +4,15 @@ AG Relay 是由**网关核心**与 **Tauri 桌面面板**组成的本地网关�
 
 规范与工单见仓库 Issues（规范 #1，骨架工单 #2，网关工单 #3）。
 
-## 日常使用
+## 安装
+
+到 [Releases](https://github.com/xinxinxiaoxin/ag-relay/releases) 下载最新版的 Windows 安装程序（`ag-relay_x.y.z_x64-setup.exe`，或 `.msi`），双击安装即可。安装包自带运行所需的 Node，**不要求机器上预装 Node**；安装位置与数据位置分离，`%APPDATA%\ag-relay\` 下的连接设置与日志在安装和升级中都保留。
+
+装好之后不需要再手动找新版本：软件会检查更新，发现新版时显示更新说明，**由你确认后**才下载安装；安装前会先排空在途请求，若一次请求还没结束就等到超时并提示稍后再试，不会强行掐断。更新包经过签名校验，被篡改的包会被拒绝。
+
+从旧的 ZIP 版本迁移：ZIP 版没有更新能力，需要**先手动安装一次本版本**，之后才能在应用内升级。
+
+## 便携使用（ZIP / 裸目录）
 
 双击 `ag-relay.exe` 即可（自用裸目录产物：`ag-relay.exe` 旁边必须有 `node.exe` 和 `resources\gateway\`，整个 release 目录一起拷贝即可，无需安装、无需系统 Node——已实测隐藏系统 Node 的最小 PATH 环境下全链路正常）：
 
@@ -35,13 +43,17 @@ node scripts/release.mjs test-build --out C:\Temp\ag-relay-test-artifacts
 
 可设置 `CARGO_TARGET_DIR` 复用隔离构建缓存；不要指向现用程序目录。共享 target 的构建必须串行排队，cargo 采用 `-j 2`，不要在另一个打包任务进行时重用其 `release/bundle`。测试构建在独立 TEMP/TMP 目录产生并销毁私钥，仅输出测试配置、公钥、签名产物及醒目标记。构建子进程通过 Rust `--remap-path-prefix` 把工作树、用户 home、Cargo/Rustup 与 target 路径映射为固定无身份前缀，不改变系统环境；生成清单前扫描未压缩主程序的 UTF-8/UTF-16 本机路径残留，发现即拒绝。该检查不能代替完整资产核查。
 
-### 正式发布门槛（目前未满足，不代表已发布）
+### 正式发布门槛
 
-1. 维护者在可信离线环境生成并备份正式 Tauri 签名密钥，只把**公钥内容**提交到 `src-tauri/tauri.conf.json` 的 `plugins.updater.pubkey`。不要把私钥、密码或 `.env` 提交/随包分发。
+当前状态（2026-10-12）：生产签名密钥已生成并保存在仓库之外，公钥与更新端点已提交，`v0.3.0`/`v0.3.1` 已按本文流程发布，仓库已公开，安装、启动、网关托管、连接设置持久化与实时活动刷新已在本机实测通过。**仍待完成的是独立 Windows Sandbox/VM 中的干净机器安装与升级验收**，以及可选的 Authenticode 代码签名（见本小节末）。
+
+发布前逐项确认：
+
+1. 维护者在可信离线环境生成并备份正式 Tauri 签名密钥，只把**公钥内容**提交到 `src-tauri/tauri.conf.json` 的 `plugins.updater.pubkey`。不要把私钥、密码或 `.env` 提交/随包分发。私钥是后续所有更新的信任根：**丢失后无法再通过应用内更新升级，只能让用户手动重装**，务必备份到仓库之外的安全位置。
 2. 将 `endpoints` 设置为 `https://github.com/xinxinxiaoxin/ag-relay/releases/latest/download/latest.json`，保留 `requireSignedVersion=true`，不得打开不安全 TLS 或允许降级。公钥变更需设计旧版本信任迁移，不能随意换钥。
 3. GitHub Environment `release-signing` 保存 `TAURI_SIGNING_PRIVATE_KEY`、`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` secrets（密码变量可为空）；`release-publish` 设置人工必需审批与允许的发布 tag。仓库及 Release 必须能被用户匿名读取；私有仓库的 404 不能伪装成“没有更新”，不向客户端嵌入 GitHub token。
-4. 同步 `package.json`、`package-lock.json`、`Cargo.toml`、`tauri.conf.json` 版本并创建新的稳定 `vX.Y.Z` tag；补齐所有 `LICENSE`、`THIRD_PARTY_NOTICES.md`、`licenses/**`（含实际 NSIS/WiX 及插件运行时材料）；正式预检强制按实际 Rust 版本及 `--installer-runtime` 核对许可。发布前完成源码/历史/资产敏感信息复核。
-5. 在独立 Windows Sandbox/VM 实测无系统 Node 安装启动、旧版升级、数据保留及安全排空更新。逐条步骤、判定标准与证据留存见[真实 Windows 成品验收清单](docs/windows-acceptance-checklist.md)。**本机尚未执行干净机器安装验收，不运行安装包，也未触碰现用网关。**
+4. 同步 `package.json`、`package-lock.json`、`Cargo.toml`、`tauri.conf.json` 版本并创建新的稳定 `vX.Y.Z` tag；补齐所有 `LICENSE`、`THIRD_PARTY_NOTICES.md`、`licenses/**`（含实际 NSIS/WiX 及插件运行时材料）；正式预检强制按实际 Rust 版本及 `--installer-runtime` 核对许可。发布前完成源码/历史/资产敏感信息复核，结论记在[公开前敏感信息复核报告](docs/security/spec19-prepublication-audit.md)。
+5. 在独立 Windows Sandbox/VM 实测无系统 Node 安装启动、旧版升级、数据保留及安全排空更新。本机已实测「安装 → 启动 → 网关托管 → 设置持久化 → 实时活动刷新」，但**干净机器与完整升级链路仍须在隔离环境中逐条确认**。逐条步骤、判定标准与证据留存见[真实 Windows 成品验收清单](docs/windows-acceptance-checklist.md)。
 
 隔离验收使用独立 Windows 用户、AppData、安装目录和端口，不连接现用上游服务。至少验证：检查更新显示版本/说明但未确认不下载；独立测试签名新版升级；超过排空预算的合成长请求不断流、提示稍后再试且不安装；篡改字节验签失败且不停机；更新前运行/停止两种状态重开后分别恢复；设置和日志保留；UAC 拒绝、取消安装或旧版重开不得误报成功；窗口/托盘退出不能绕过更新事务的安全排空。上述每条的可执行步骤、判定标准与证据位置见[真实 Windows 成品验收清单](docs/windows-acceptance-checklist.md)；此人工验收不由只读 smoke 自动完成。
 
