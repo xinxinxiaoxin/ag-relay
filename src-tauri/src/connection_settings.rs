@@ -2,6 +2,10 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+// 本机监听地址的单一真值来自 gateway_process：它必须与网关核心默认监听地址一致。
+// 此处复用同一常量，避免 host()/endpoint() 各写字面量而与生命周期层漂移。
+use crate::gateway_process::GATEWAY_HOST;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ConnectionSettings {
     upstream: String,
@@ -52,10 +56,10 @@ impl ConnectionSettings {
         self.port
     }
     pub fn host(&self) -> &'static str {
-        "127.0.0.1"
+        GATEWAY_HOST
     }
     pub fn endpoint(&self) -> String {
-        format!("http://127.0.0.1:{}", self.port)
+        format!("http://{GATEWAY_HOST}:{}", self.port)
     }
 }
 
@@ -92,31 +96,9 @@ impl ConnectionSettingsStore {
             std::fs::create_dir_all(parent).map_err(|_| "无法创建连接设置目录")?;
         }
         let bytes = serde_json::to_vec_pretty(&settings).map_err(|_| "无法编码连接设置")?;
-        use std::{
-            io::Write,
-            sync::atomic::{AtomicU64, Ordering},
-        };
-        static SEQUENCE: AtomicU64 = AtomicU64::new(0);
-        let pending = self.path.with_extension(format!(
-            "tmp-{}-{}",
-            std::process::id(),
-            SEQUENCE.fetch_add(1, Ordering::Relaxed)
-        ));
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&pending)
-            .map_err(|_| "无法创建设置临时文件，原设置保持不变")?;
-        let result = (|| -> std::io::Result<()> {
-            file.write_all(&bytes)?;
-            file.sync_all()?;
-            drop(file);
-            std::fs::rename(&pending, &self.path)
-        })();
-        if result.is_err() {
-            let _ = std::fs::remove_file(&pending);
-            return Err("无法保存连接设置，原设置保持不变".into());
-        }
+        // 同目录原子替换（与更新恢复凭据共享同一实现）：失败清理临时文件，原设置保持不变。
+        crate::atomic_write::replace(&self.path, &bytes)
+            .map_err(|_| String::from("无法保存连接设置，原设置保持不变"))?;
         Ok(settings)
     }
 }

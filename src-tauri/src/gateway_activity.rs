@@ -88,7 +88,7 @@ impl ActivitySubscription {
             .map_err(|_| "无法监听诊断目录，请检查目录权限后重试。")?;
 
         // 先监听，再在捕获长度内建立快照；初始化期间的追加仍在通知队列里，之后补读。
-        let mut reader = TailReader::new(live, 50);
+        let mut reader = TailReader::new(live);
         let initial = reader.snapshot();
         let mut initialized = initial.is_ok();
         let mut notice = ActivityNotice {

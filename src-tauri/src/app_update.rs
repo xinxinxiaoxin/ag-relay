@@ -91,13 +91,58 @@ struct UpdateState<C> {
     candidate: Option<C>,
 }
 
-// 0=可操作，1=检查/确认/退出排空中，2=已安全停止并允许退出。同步锁不跨 await。
+// 更新/退出操作的原子闸门状态。以 AtomicU8 承载保持无锁原子语义，枚举化取代表意不明的 0/1/2/3。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+enum OperationState {
+    /// 可操作：没有更新或退出在进行。
+    Idle = 0,
+    /// 检查/确认/退出排空中：新操作被拒绝，控件封锁。
+    Busy = 1,
+    /// 已安全停止并允许退出。
+    ExitAuthorized = 2,
+    /// 安装器已交接：即使假适配器返回也必须保持封锁，不能重新开启控制。
+    Committing = 3,
+}
+
+impl OperationState {
+    fn load(atomic: &AtomicU8) -> Self {
+        match atomic.load(Ordering::Acquire) {
+            1 => Self::Busy,
+            2 => Self::ExitAuthorized,
+            3 => Self::Committing,
+            _ => Self::Idle,
+        }
+    }
+    fn store(self, atomic: &AtomicU8) {
+        atomic.store(self as u8, Ordering::Release);
+    }
+    /// 仅当当前为 Idle 时置为 Busy；失败表示已有操作在进行。
+    fn try_begin(atomic: &AtomicU8) -> bool {
+        atomic
+            .compare_exchange(
+                Self::Idle as u8,
+                Self::Busy as u8,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+    /// 仅当当前为 Busy 时置回 Idle。
+    fn end(atomic: &AtomicU8) {
+        let _ = atomic.compare_exchange(
+            Self::Busy as u8,
+            Self::Idle as u8,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+    }
+}
+
 struct Operation<'a>(&'a AtomicU8);
 impl Drop for Operation<'_> {
     fn drop(&mut self) {
-        let _ = self
-            .0
-            .compare_exchange(1, 0, Ordering::AcqRel, Ordering::Acquire);
+        OperationState::end(self.0);
     }
 }
 pub struct UpdateService<C> {
@@ -130,23 +175,24 @@ impl<C: Clone + Send + Sync> UpdateService<C> {
                 candidate: None,
             }),
             journal: None,
-            operation: AtomicU8::new(0),
+            operation: AtomicU8::new(OperationState::Idle as u8),
             enabled,
         }
     }
 
     fn begin_operation(&self) -> Result<Operation<'_>, String> {
-        self.operation
-            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
-            .map(|_| Operation(&self.operation))
-            .map_err(|_| "更新或退出正在进行，请等待当前操作完成。".into())
+        if OperationState::try_begin(&self.operation) {
+            Ok(Operation(&self.operation))
+        } else {
+            Err("更新或退出正在进行，请等待当前操作完成。".into())
+        }
     }
 
     pub fn controls_blocked(&self) -> bool {
-        self.operation.load(Ordering::Acquire) != 0
+        OperationState::load(&self.operation) != OperationState::Idle
     }
     pub fn exit_authorized(&self) -> bool {
-        self.operation.load(Ordering::Acquire) == 2
+        OperationState::load(&self.operation) == OperationState::ExitAuthorized
     }
 
     pub fn prepare_exit(&self, host: &impl GatewayHost) -> Result<(), String> {
@@ -154,7 +200,7 @@ impl<C: Clone + Send + Sync> UpdateService<C> {
         let outcome = host.with_gateway(|g| g.safe_shutdown(Duration::from_secs(10)))?;
         match outcome {
             Ok(_) => {
-                self.operation.store(2, Ordering::Release);
+                OperationState::ExitAuthorized.store(&self.operation);
                 Ok(())
             }
             Err(_) => {
@@ -382,7 +428,7 @@ impl<C: Clone + Send + Sync> UpdateService<C> {
                 return Err(view.detail);
             }
             // Windows 真适配器成功后直接 process::exit；假适配器返回时也必须保持封锁。
-            self.operation.store(3, Ordering::Release);
+            OperationState::Committing.store(&self.operation);
             Ok(self.view())
         })?
     }

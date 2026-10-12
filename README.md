@@ -41,9 +41,9 @@ node scripts/release.mjs test-build --out C:\Temp\ag-relay-test-artifacts
 2. 将 `endpoints` 设置为 `https://github.com/xinxinxiaoxin/ag-relay/releases/latest/download/latest.json`，保留 `requireSignedVersion=true`，不得打开不安全 TLS 或允许降级。公钥变更需设计旧版本信任迁移，不能随意换钥。
 3. GitHub Environment `release-signing` 保存 `TAURI_SIGNING_PRIVATE_KEY`、`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` secrets（密码变量可为空）；`release-publish` 设置人工必需审批与允许的发布 tag。仓库及 Release 必须能被用户匿名读取；私有仓库的 404 不能伪装成“没有更新”，不向客户端嵌入 GitHub token。
 4. 同步 `package.json`、`package-lock.json`、`Cargo.toml`、`tauri.conf.json` 版本并创建新的稳定 `vX.Y.Z` tag；补齐所有 `LICENSE`、`THIRD_PARTY_NOTICES.md`、`licenses/**`（含实际 NSIS/WiX 及插件运行时材料）；正式预检强制按实际 Rust 版本及 `--installer-runtime` 核对许可。发布前完成源码/历史/资产敏感信息复核。
-5. 在独立 Windows Sandbox/VM 实测无系统 Node 安装启动、旧版升级、数据保留及安全排空更新。**本机尚未执行干净机器安装验收，不运行安装包，也未触碰现用网关。**
+5. 在独立 Windows Sandbox/VM 实测无系统 Node 安装启动、旧版升级、数据保留及安全排空更新。逐条步骤、判定标准与证据留存见[真实 Windows 成品验收清单](docs/windows-acceptance-checklist.md)。**本机尚未执行干净机器安装验收，不运行安装包，也未触碰现用网关。**
 
-隔离验收使用独立 Windows 用户、AppData、安装目录和端口，不连接现用上游服务。至少验证：检查更新显示版本/说明但未确认不下载；独立测试签名新版升级；超过排空预算的合成长请求不断流、提示稍后再试且不安装；篡改字节验签失败且不停机；更新前运行/停止两种状态重开后分别恢复；设置和日志保留；UAC 拒绝、取消安装或旧版重开不得误报成功；窗口/托盘退出不能绕过更新事务的安全排空。此人工验收清单不由只读 smoke 自动完成。
+隔离验收使用独立 Windows 用户、AppData、安装目录和端口，不连接现用上游服务。至少验证：检查更新显示版本/说明但未确认不下载；独立测试签名新版升级；超过排空预算的合成长请求不断流、提示稍后再试且不安装；篡改字节验签失败且不停机；更新前运行/停止两种状态重开后分别恢复；设置和日志保留；UAC 拒绝、取消安装或旧版重开不得误报成功；窗口/托盘退出不能绕过更新事务的安全排空。上述每条的可执行步骤、判定标准与证据位置见[真实 Windows 成品验收清单](docs/windows-acceptance-checklist.md)；此人工验收不由只读 smoke 自动完成。
 
 从新的稳定版本 tag 手动触发 `.github/workflows/release.yml`：默认只构建并上传 Actions 产物，勾选发布后仍须通过 `release-publish` 审批，先完整上传到草稿再公开 GitHub Release；不覆盖已有 tag/Release。也可先本地执行 `node scripts/release.mjs preflight`，通过后运行 `node scripts/release.mjs build --out <新空目录> --notes <UTF-8更新说明文件>`。私钥仅通过当前进程环境/CI secrets 提供，脚本不读 `.env`、不回显密钥。
 
@@ -56,7 +56,7 @@ node scripts/release.mjs test-build --out C:\Temp\ag-relay-test-artifacts
 1. **在本仓演进**：直接修改本仓核心，保留现有能力与测试；配置、控制协议或诊断事件变化时，同步修改桌面面板适配及契约测试。文件职责、测试入口与安全边界见[网关核心维护说明](docs/gateway-core-maintenance.md)。
 2. **配套验证**：保留环境装配、诊断字典覆盖打包脚本事件码、诊断读取、状态与重启受理等契约；先跑维护说明中的隔离测试。旧全量测试及旧版 `scripts/smoke.ps1` 可能触碰固定端口或真实系统状态，不能在现用网关所在环境直接执行。真实起停、重启与诊断展示验收需独立隔离环境，不能用 HTTP mock 通过代替。
 3. **作为一个产品构建发布**：验证后按构建流程将核心与桌面面板一并打包，使用同一 AG Relay 版本发布；不提供独立追踪外部源码的「仅更新核心」。不得覆盖正在运行的网关文件。
-4. **记录可追溯快照**：实际完成构建后，记录本仓构建提交、核心三个 `.mjs` 与 `gateway-config.bat` 的 SHA-256、成品哈希及构建时间。外部改进按需审查、择取补丁，记录来源提交并保留版权与许可要求，不再整体覆盖脚本；详见维护说明。
+4. **记录可追溯快照**：实际完成构建后，记录本仓构建提交、核心四个 `.mjs`（`relay-retry-proxy.mjs`、`relay-supervisor.mjs`、`relay-start-check.mjs`、`bounded-file-log.mjs`）与 `gateway-config.bat` 的 SHA-256、成品哈希及构建时间。四个 `.mjs` 与配置文件一样逐份纳入发布快照，任一改动后重打包都刷新对应哈希。外部改进按需审查、择取补丁，记录来源提交并保留版权与许可要求，不再整体覆盖脚本；详见维护说明。
 
 ## 当前打包快照
 
@@ -79,7 +79,7 @@ node scripts/release.mjs test-build --out C:\Temp\ag-relay-test-artifacts
 npm run smoke -- -Artifacts C:\Temp\ag-relay-test-artifacts -Config C:\Temp\ag-relay-test-artifacts\tauri.test.json
 ```
 
-只读检查 `latest.json` 与两种安装器签名，**不启动应用、不执行安装、不访问/停止网关**；不传产物目录直接拒绝。正式产物省略 `-Config`，使用仓库生产公钥。此检查不能代替独立虚拟机上的安装/升级验收。发布工具回归测试：`node --test --test-concurrency=1 scripts/release.test.mjs`（临时密钥自动销毁，Cargo `-j 2`）。
+只读检查 `latest.json` 与两种安装器签名，**不启动应用、不执行安装、不访问/停止网关**；不传产物目录直接拒绝。正式产物省略 `-Config`，使用仓库生产公钥。此检查不能代替独立虚拟机上的安装/升级验收（见[真实 Windows 成品验收清单](docs/windows-acceptance-checklist.md)）。发布工具回归测试：`node --test --test-concurrency=1 scripts/release.test.mjs`（临时密钥自动销毁，Cargo `-j 2`）。
 
 ## 许可与代码来源
 
@@ -93,6 +93,6 @@ AG Relay 的自有代码（桌面面板、纳入本仓库自主维护的网关�
 
 - `src/`：前端（原生 HTML/CSS/JS，无框架）
 - `src-tauri/`：Tauri 2 壳（Rust）
-- `src-tauri/resources/gateway/`：本仓自主维护的网关核心三脚本 + `gateway-config.bat` 默认配置契约（见[维护说明](docs/gateway-core-maintenance.md)）
+- `src-tauri/resources/gateway/`：本仓自主维护的网关核心四脚本（`relay-retry-proxy.mjs`、`relay-supervisor.mjs`、`relay-start-check.mjs`、`bounded-file-log.mjs`）+ `gateway-config.bat` 默认配置契约（见[维护说明](docs/gateway-core-maintenance.md)）
 - `scripts/make-icons.ps1`：重新生成应用图标（AG 字样，PNG + ICO）
 - `scripts/smoke.ps1`：构建冒烟检查

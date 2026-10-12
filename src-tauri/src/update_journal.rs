@@ -1,6 +1,6 @@
 //! 更新恢复凭据独立于连接设置和轮转日志。仅原子替换本模块自己的单个文件。
 use serde::{Deserialize, Serialize};
-use std::{fs, io::Write, path::PathBuf};
+use std::{fs, path::PathBuf};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BootPlan {
@@ -79,22 +79,11 @@ impl Journal {
     pub fn write(&self, record: &Transaction) -> Result<(), String> {
         let parent = self.path.parent().ok_or("更新恢复目录无效。")?;
         fs::create_dir_all(parent).map_err(|_| "无法创建更新恢复目录。")?;
-        let temp = parent.join(format!(".update-{}.tmp", unique_id()));
-        let result = (|| {
-            let mut file = fs::OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .open(&temp)?;
-            file.write_all(&serde_json::to_vec(record)?)?;
-            file.sync_all()?;
-            drop(file);
-            // Windows std::fs::rename 使用 replace-existing；同目录原子替换，不先删除旧凭据。
-            fs::rename(&temp, &self.path)
-        })();
-        if result.is_err() {
-            let _ = fs::remove_file(&temp);
-        }
-        result.map_err(|_: std::io::Error| "无法持久化更新恢复记录；未获准安装。".into())
+        let bytes = serde_json::to_vec(record)
+            .map_err(|_| "无法持久化更新恢复记录；未获准安装。")?;
+        // 同目录原子替换（临时文件 → fsync → rename 覆盖），失败清理临时文件。
+        crate::atomic_write::replace(&self.path, &bytes)
+            .map_err(|_| "无法持久化更新恢复记录；未获准安装。".into())
     }
 
     pub fn boot_plan(&self) -> BootPlan {

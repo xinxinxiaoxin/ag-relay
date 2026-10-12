@@ -14,7 +14,7 @@ import { Label } from '@/components/ui/label'
 import { Separator } from '@/components/ui/separator'
 import { Switch } from '@/components/ui/switch'
 import { type SettingsPageProps } from '@/lib/types'
-import { DEFAULT_CONNECTION, getConnectionSettings, saveConnectionSettings, type ConnectionSettingsView } from '@/lib/connection-settings'
+import { connectionSettingsError, DEFAULT_CONNECTION, getConnectionSettings, saveConnectionSettings, type ConnectionSettingsView } from '@/lib/connection-settings'
 import {
   FALLBACK_APP_VERSION,
   getAppVersion,
@@ -56,8 +56,10 @@ export function SettingsPage(props: SettingsPageProps) {
   const saveConnection = async () => {
     setConnectionError('')
     setSavedNotice(false)
-    if (!/^\d+$/.test(port) || Number(port) < 1 || Number(port) > 65535) {
-      setConnectionError('本机端口须为 1 到 65535 的整数')
+    // 校验复用 lib 里的单一实现，避免文案与规则在页面与保存层重复。
+    const draftError = connectionSettingsError(upstream, Number(port))
+    if (draftError) {
+      setConnectionError(draftError)
       return
     }
     setConnectionBusy(true)
