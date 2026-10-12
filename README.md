@@ -79,6 +79,14 @@ npm run smoke
 
 检查构建产物存在、启动后主窗口标题含「AG Relay」并能正常退出。
 
+## 许可与代码来源
+
+AG Relay 的自有代码（桌面面板、纳入本仓库自主维护的网关核心，以及维护者确认权属的导入设计代码）按 [MIT LICENSE](LICENSE) 授权，见 [ADR-0007](docs/adr/0007-mit-open-source-distribution.md)。允许使用、修改、再分发和商用，包括修改后闭源分发，但必须保留相应版权和许可声明。
+
+第三方代码、图标、字体和随包二进制不因本项目采用 MIT 或使用 AI 辅助开发而改换许可证。完整说明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)，逐项版本、原文及来源见 [许可材料索引](licenses/COMPONENTS.md)。其中包括 Node 及其内含第三方的完整声明、Geist OFL、Lucide ISC / Feather MIT、React / Radix / shadcn / Tailwind、Rust 依赖和标准库，以及 WebView2Loader 的实际许可。
+
+安装分发应保留安装目录的 `licenses/LICENSE`、`licenses/THIRD_PARTY_NOTICES.md` 与整个 `licenses/third-party/`，不能只复制主程序或只附一份 MIT 文本。提交打包前运行 `node scripts/check-licenses.mjs` 可离线检查材料缺失、原文删节及依赖/Node 二进制变化；它不是法律审核或真实安装验收。本说明不变更任何仓库的可见性，也不表示已通过公开核查或已发布新版。
+
 ## 目录结构
 
 - `src/`：前端（原生 HTML/CSS/JS，无框架）
