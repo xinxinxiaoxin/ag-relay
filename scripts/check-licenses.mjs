@@ -31,6 +31,11 @@ try {
       return !Array.isArray(component?.materials) || component.materials.length === 0;
     });
     if (missing.length) throw new Error(`缺少安装器运行时许可：${missing.join('、')}`);
+    const blockers = inventory.releaseBlockers ?? [];
+    if (!Array.isArray(blockers)) throw new Error('许可清单的未决来源项格式无效');
+    if (blockers.length) {
+      throw new Error(`正式分发许可来源未闭合：${blockers.map((item) => item.component).join('、')}；请按清单补齐取证，不可仅删除阻塞记录`);
+    }
   }
   if (values['rust-version'] !== undefined) {
     const actual = values['rust-version'];

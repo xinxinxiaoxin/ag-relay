@@ -1,10 +1,26 @@
 # 第三方组件许可材料索引
 
-此索引与 `inventory.json` 同源，按组件列出锁定版本、元数据许可及保留原文。许可文件按内容 SHA-256 去重；同一原文可由多个组件引用，版权文字未改写。原始版本、仓库、下载完整性值、固定提交和取证例外详见 [核验清单](inventory.json)。
+此索引与 `inventory.json` 同源，列出锁定依赖及明确标注的预编译插件许可参照。参照版本不是旧 DLL 的实际解析版本；未决项保留在 `releaseBlockers`，正式检查不会将其当成已闭合。许可文件按内容 SHA-256 去重；同一原文可由多个组件引用，版权文字未改写。原始版本、仓库、下载完整性值、固定提交和取证例外详见 [核验清单](inventory.json)。
 
-快照日期：2026-10-12。目标：`x86_64-pc-windows-msvc`。共 713 项（npm 422，Rust crates 288，随包/工具链组件 3）。这包含构建/开发依赖，并非声称所有包都嵌入可执行文件。
+快照日期：2026-10-12。目标：`x86_64-pc-windows-msvc`。共 719 项（npm 422，Rust crates 288，随包/工具链/安装器及参照记录9）。这包含构建/开发依赖，并非声称所有包都嵌入可执行文件。
 
 原文链接在源码的 `licenses/` 与安装目录的 `licenses/third-party/` 内均可直接使用。MPL 源码 `.crate` 是完整 tar.gz 归档，可用支持 gzip 的归档工具阅读，无须执行其中脚本。
+
+## 安装器运行部分
+
+| 组件 | 版本 | 许可元数据 | 原文 / 对应源码 | 来源 |
+| --- | --- | --- | --- | --- |
+| `NSIS installer runtime` | 3.11 | zlib/libpng, bzip2, CPL-1.0 with NSIS LZMA linking exception (see full COPYING) | [COPYING](installer/nsis/COPYING) / [NSISdl-License.txt](installer/nsis/NSISdl-License.txt) / [Modern-UI-2-License.txt](installer/nsis/Modern-UI-2-License.txt) / [Modern-UI-2-License.utf8.txt](installer/nsis/Modern-UI-2-License.utf8.txt) / [nsis-3.11-source.tar.gz](installer/nsis/nsis-3.11-source.tar.gz) / [Embedded-Plugin-Copyrights.txt](installer/nsis/Embedded-Plugin-Copyrights.txt) / [LICENSE_MIT](installer/nsis/tauri-utils/LICENSE_MIT) / [LICENSE_APACHE-2.0](installer/nsis/tauri-utils/LICENSE_APACHE-2.0) / [nsis-tauri-utils-0.5.3-source.tar.gz](installer/nsis/tauri-utils/nsis-tauri-utils-0.5.3-source.tar.gz) / [Chromium-LICENSE](installer/nsis/tauri-utils/Chromium-LICENSE) / [L1-L3](installer/nsis/tauri-utils/Chromium-COPYRIGHT.txt) | [固定版本](https://github.com/kichik/nsis/tree/7359413009afd4f0fff472d841fc2f2cc0e0a5f8) |
+| `WiX installer runtime` | 3.14.1.8722 | MS-RL | [LICENSE.TXT](installer/wix/LICENSE.TXT) / [wix-3.14.1-source.tar.gz](installer/wix/wix-3.14.1-source.tar.gz) | [固定版本](https://github.com/wixtoolset/wix3/releases/tag/wix3141rtm) |
+| `NSIS Tauri utils plugin` | 0.5.3 | (MIT OR Apache-2.0) AND BSD-3-Clause; unresolved prebuilt dependency provenance | [LICENSE_MIT](installer/nsis/tauri-utils/LICENSE_MIT) / [LICENSE_APACHE-2.0](installer/nsis/tauri-utils/LICENSE_APACHE-2.0) / [nsis-tauri-utils-0.5.3-source.tar.gz](installer/nsis/tauri-utils/nsis-tauri-utils-0.5.3-source.tar.gz) / [Chromium-LICENSE](installer/nsis/tauri-utils/Chromium-LICENSE) / [L1-L3](installer/nsis/tauri-utils/Chromium-COPYRIGHT.txt) | [固定版本](https://github.com/tauri-apps/nsis-tauri-utils/releases/tag/nsis_tauri_utils-v0.5.3) |
+
+## 安装器插件的静态依赖
+
+| 组件 | 版本 | 许可元数据 | 原文 / 对应源码 | 来源 |
+| --- | --- | --- | --- | --- |
+| `semver (prebuilt NSIS plugin)` | 未证实（manifest约束1.0） | 参照原文见材料；不是旧DLL实际解析版本的证明 | [LICENSE-MIT](installer/nsis/tauri-utils/reference-licenses/semver/LICENSE-MIT) / [LICENSE-APACHE](installer/nsis/tauri-utils/reference-licenses/semver/LICENSE-APACHE) | [声明/参照](https://github.com/tauri-apps/nsis-tauri-utils/blob/13d9edd27b69310e108d6fbd49f90992f8a05390/Cargo.toml) |
+| `windows-sys / windows-link (prebuilt NSIS plugin)` | 未证实（sys约束0.61.2；link patch未知） | 参照原文见材料；不是旧DLL实际解析版本的证明 | [license-mit](installer/nsis/tauri-utils/reference-licenses/windows/license-mit) / [license-apache-2.0](installer/nsis/tauri-utils/reference-licenses/windows/license-apache-2.0) | [声明/参照](https://github.com/tauri-apps/nsis-tauri-utils/blob/13d9edd27b69310e108d6fbd49f90992f8a05390/Cargo.toml) |
+| `Rust alloc/core/compiler-builtins (prebuilt NSIS plugin)` | 未证实（未固定编译器） | 参照原文见材料；不是旧DLL实际解析版本的证明 | [LICENSE-MIT](installer/nsis/tauri-utils/reference-licenses/rust-reference/LICENSE-MIT) / [LICENSE-APACHE](installer/nsis/tauri-utils/reference-licenses/rust-reference/LICENSE-APACHE) / [COPYRIGHT](installer/nsis/tauri-utils/reference-licenses/rust-reference/COPYRIGHT) / [Unicode-3.0.txt](installer/nsis/tauri-utils/reference-licenses/rust-reference/Unicode-3.0.txt) / [compiler-builtins-LICENSE.txt](installer/nsis/tauri-utils/reference-licenses/rust-reference/compiler-builtins-LICENSE.txt) | [声明/参照](https://github.com/tauri-apps/nsis-tauri-utils/blob/13d9edd27b69310e108d6fbd49f90992f8a05390/Cargo.toml) |
 
 ## 随包二进制与 SDK
 
@@ -752,6 +768,12 @@
 - `webview2-com-macros@0.8.1`：crate 发布包未附根许可；按 .cargo_vcs_info.json 固定源码提交补充上游原文。
 - `webview2-com-sys@0.39.1`：crate 发布包未附根许可；按 .cargo_vcs_info.json 固定源码提交补充上游原文。
 - `webview2-com@0.39.1`：crate 发布包未附根许可；按 .cargo_vcs_info.json 固定源码提交补充上游原文。
+- `NSIS installer runtime@3.11`：NSIS自身、MUI2和NSISdl未修改。源归档含LZMA模块及全部原始声明；CPL linking例外不将AG Relay自有代码改为CPL。不得去除该模块对应源码和免责文字。
+- `WiX installer runtime@3.14.1.8722`：使用未修改的WiX发行工具和标准UI；提供固定版本完整对应源码（含原始文件级许可）。接收方对所含WiX代码保有MS-RL权利。
+- `NSIS Tauri utils plugin@0.5.3`：官方DLL与工具缓存及#27静态提取候选DLL一致。源归档未包含Cargo.lock，发布未固定Rust工具链且历史构建日志已不可取；不能用AG Relay自己的lock/toolchain补填未知值。
+- `semver (prebuilt NSIS plugin)@未证实（manifest约束1.0）`：保留公开原文供审查；referenceVersion不是resolvedVersion。要闭合正式许可核验需取得实际构建锁文件/工具链，或从固定源码隔离重建并核验新产物。
+- `windows-sys / windows-link (prebuilt NSIS plugin)@未证实（sys约束0.61.2；link patch未知）`：保留公开原文供审查；referenceVersion不是resolvedVersion。要闭合正式许可核验需取得实际构建锁文件/工具链，或从固定源码隔离重建并核验新产物。
+- `Rust alloc/core/compiler-builtins (prebuilt NSIS plugin)@未证实（未固定编译器）`：保留公开原文供审查；referenceVersion不是resolvedVersion。要闭合正式许可核验需取得实际构建锁文件/工具链，或从固定源码隔离重建并核验新产物。
 
 ## 未安装的平台可选包
 
