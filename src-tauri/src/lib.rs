@@ -1,6 +1,7 @@
 use tauri::Manager;
 
 pub mod app_exit;
+pub mod bounded_log;
 pub mod autostart;
 pub mod autostart_commands;
 pub mod connection_settings;
@@ -19,6 +20,8 @@ pub mod tray;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // 只由 Rust 安全更新服务调用；不给前端开放可绕过排空的 updater 安装权限。
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(gateway_commands::GatewayState::default())
         .manage(autostart_commands::AutostartUiState::default())
         .manage(gateway_diagnostics_reader::DiagnosticsState::default())

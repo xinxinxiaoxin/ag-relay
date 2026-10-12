@@ -25,6 +25,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { appendFileSync, mkdirSync, readFileSync, renameSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createFileLogger } from './bounded-file-log.mjs';
 
 const num = (v, d) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? n : d; };
 
@@ -68,7 +69,6 @@ const cfg = {
   sessionCompatMaxKeys: Math.floor(num(process.env.PROXY_SESSION_COMPAT_MAX_KEYS, 4096)),
   diagnosticsFile: process.env.PROXY_DIAGNOSTICS_FILE || fileURLToPath(new URL('./relay-diagnostics.jsonl', import.meta.url)),
   diagnosticsMaxBytes: Math.max(4096, Math.floor(num(process.env.PROXY_DIAGNOSTICS_MAX_BYTES, 1024 * 1024))),
-  logFile: process.env.PROXY_LOG_FILE || '',
   verbose: process.env.PROXY_VERBOSE !== '0',
   extraRetryCodes: (process.env.PROXY_EXTRA_RETRY_CODES || '')
     .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean),
@@ -386,21 +386,13 @@ function isDeterministicBodyError(bodyText) {
   return isQuotaErrorText(bodyText) || DETERMINISTIC_BODY_TEXT.test(String(bodyText || ''));
 }
 
-// 日志：默认只打到控制台；设了 PROXY_LOG_FILE 就同时写文件，便于事后排查
-let logStream = null;
-if (cfg.logFile) {
-  try {
-    const { createWriteStream } = await import('node:fs');
-    logStream = createWriteStream(cfg.logFile, { flags: 'a' });
-  } catch (e) {
-    console.error(`无法打开日志文件 ${cfg.logFile}: ${e.message}`);
-  }
-}
+// 日志：默认只打到控制台；显式启用的普通文件日志也受总容量约束。
+const fileLog = createFileLogger(process.env);
 
 const log = (...a) => {
   const line = `${new Date().toISOString()} ${a.map((x) => (typeof x === 'string' ? x : JSON.stringify(x))).join(' ')}`;
   if (cfg.verbose) console.log(line);
-  if (logStream) logStream.write(line + '\n');
+  fileLog(line);
 };
 const snippet = (b) => String(b).replace(/\s+/g, ' ').slice(0, 160);
 

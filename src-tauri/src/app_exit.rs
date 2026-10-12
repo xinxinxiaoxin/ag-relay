@@ -3,7 +3,7 @@
 //! 三条路都汇入 RunEvent::Exit 的既有钩子（shutdown_blocking_on_exit）优雅停网关。
 //! 关窗路径不调 exit：默认链放行（CloseRequested → ExitRequested(None) → Exit），只记日志。
 
-use std::io::Write;
+use crate::bounded_log::{append_record, LogPolicy};
 
 use tauri::{AppHandle, Manager};
 
@@ -81,7 +81,11 @@ impl ExternalStopEvent {
 
 /// 一条外部停止事件日志行的完整格式（UTC 时间 + event=白名单枚举值）。
 pub fn format_external_stop_record(unix_secs: u64, event: ExternalStopEvent) -> String {
-    format!("{} event={}", format_utc_timestamp(unix_secs), event.as_str())
+    format!(
+        "{} event={}",
+        format_utc_timestamp(unix_secs),
+        event.as_str()
+    )
 }
 
 /// 把外部停止事件追加到壳侧日志（与退出来源同一文件，便于一并查看）。
@@ -92,10 +96,7 @@ pub fn log_external_stop(app: &AppHandle, event: ExternalStopEvent) {
 /// 把退出来源追加到壳侧日志（%APPDATA%\ag-relay\logs\shell-exit.log）。
 /// 尽力而为：目录建不了 / 写不进去都不影响退出流程本身。
 pub fn log_exit_source(app: &AppHandle, source: ExitSource) {
-    append_shell_log(
-        app,
-        &format_exit_record(now_unix_secs(), source),
-    );
+    append_shell_log(app, &format_exit_record(now_unix_secs(), source));
 }
 
 /// 追加一行到壳侧日志（shell-exit.log）；日志目录复用 gateway_control::logs_dir。
@@ -104,15 +105,19 @@ fn append_shell_log(app: &AppHandle, line: &str) {
     let Ok(app_data) = app.path().app_data_dir() else {
         return;
     };
-    let dir = logs_dir(&app_data);
-    if std::fs::create_dir_all(&dir).is_err() {
-        return;
-    }
-    let _ = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(dir.join(EXIT_LOG_FILE))
-        .and_then(|mut f| writeln!(f, "{line}"));
+    let _ = append_shell_record_in(&app_data, line);
+}
+
+/// 应用层文件接缝：调用方只传入已格式化的白名单记录，路径可注入。
+pub fn append_shell_record_in(app_data: &std::path::Path, line: &str) -> std::io::Result<()> {
+    append_record(
+        &logs_dir(app_data).join(EXIT_LOG_FILE),
+        line,
+        LogPolicy {
+            max_total_bytes: 1024 * 1024,
+            retention: None,
+        },
+    )
 }
 
 /// 统一退出入口：记来源日志 → app.exit(0)。
@@ -131,6 +136,30 @@ pub fn quit_app(app: AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn 壳侧退出日志_应用入口有界且重开后保留此前记录() {
+        // 只在独立临时目录验证，不构造 AppHandle，不实际退出或启动网关。
+        let base = std::env::temp_dir().join(format!(
+            "ag-relay-exit-log-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(logs_dir(&base)).unwrap();
+        let path = logs_dir(&base).join(EXIT_LOG_FILE);
+        let old = "old\n".repeat(131072); // 512 KiB：达到单档上限
+        std::fs::write(&path, &old).unwrap();
+        append_shell_record_in(&base, &format_exit_record(0, ExitSource::WindowClose)).unwrap();
+        append_shell_record_in(&base, &format_exit_record(1, ExitSource::PanelButton)).unwrap();
+        let result = std::fs::read_to_string(&path).unwrap();
+        let backup = std::fs::read_to_string(logs_dir(&base).join("shell-exit.log.1"));
+        std::fs::remove_dir_all(&base).unwrap();
+        assert_eq!(result, "1970-01-01T00:00:00Z exit_source=window_close\n1970-01-01T00:00:01Z exit_source=panel_button\n");
+        assert_eq!(backup.unwrap(), old);
+    }
 
     #[test]
     fn 退出来源白名单_只有三个枚举值() {

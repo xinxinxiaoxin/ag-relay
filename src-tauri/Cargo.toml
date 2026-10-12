@@ -1,6 +1,6 @@
 [package]
 name = "ag-relay"
-version = "0.2.0"
+version = "0.3.0"
 description = "AG Relay · 网关桌面壳"
 edition = "2021"
 
@@ -13,6 +13,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-updater = "2.13.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 winreg = "0.55"
@@ -27,6 +28,10 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_Diagnostics_Debug",
     "Wdk_System_Threading",
 ] }
+
+[dev-dependencies]
+base64 = "0.22"
+minisign-verify = "0.3"
 
 [profile.release]
 strip = true
