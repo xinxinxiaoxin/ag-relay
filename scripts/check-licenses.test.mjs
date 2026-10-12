@@ -114,3 +114,36 @@ test('材料已齐全但仍有未决来源时正式检查不能假通过', async
   assert.notEqual(blocked.status, 0);
   assert.match(blocked.stderr, /正式分发许可来源未闭合.*nsis_tauri_utils/);
 });
+
+test('未决来源只有在维护者留下完整接受决定后才允许正式放行', async (t) => {
+  const root = await fixture(t);
+  await writeFile(join(root, 'licenses/fixture-LICENSE'), '原始许可\n');
+  const path = join(root, 'licenses/inventory.json');
+  const inventory = JSON.parse(await readFile(path, 'utf8'));
+  inventory.components.push(...['NSIS installer runtime', 'WiX installer runtime'].map((name) => ({
+    name, ecosystem: 'installer-runtime', version: '1.0.0', license: 'MIT', source: 'https://example.org/installer/1.0.0',
+    materials: [{ path: 'licenses/fixture-LICENSE', sha256: hash('原始许可\n') }],
+  })));
+  inventory.releaseBlockers = [{
+    component: 'nsis_tauri_utils', reason: '预编译依赖版本未能证实',
+    decision: { decidedBy: '', decidedAt: '2026-10-12', rationale: '接受该来源限制' },
+  }];
+  await writeFile(path, JSON.stringify(inventory));
+  assert.notEqual(run(root, ['--installer-runtime']).status, 0, '缺少决策人仍应拒绝');
+
+  inventory.releaseBlockers[0].decision.decidedBy = '维护者';
+  inventory.releaseBlockers[0].decision.decidedAt = '2026/10/12';
+  await writeFile(path, JSON.stringify(inventory));
+  assert.notEqual(run(root, ['--installer-runtime']).status, 0, '日期格式不合规仍应拒绝');
+
+  inventory.releaseBlockers[0].decision.decidedAt = '2026-10-12';
+  inventory.releaseBlockers[0].decision.rationale = '   ';
+  await writeFile(path, JSON.stringify(inventory));
+  assert.notEqual(run(root, ['--installer-runtime']).status, 0, '空理由仍应拒绝');
+
+  inventory.releaseBlockers[0].decision.rationale = '接受官方预编译来源及其不可重复性限制';
+  await writeFile(path, JSON.stringify(inventory));
+  const accepted = run(root, ['--installer-runtime', '--rust-version', '1.99.0']);
+  assert.equal(accepted.status, 0, accepted.stderr);
+  assert.match(accepted.stdout, /已记录维护者接受决定.*nsis_tauri_utils/);
+});

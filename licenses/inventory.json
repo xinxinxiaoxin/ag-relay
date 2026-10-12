@@ -17671,7 +17671,13 @@
     {
       "component": "nsis_tauri_utils v0.5.3 prebuilt DLL",
       "reason": "预编译官方产物的Cargo resolved依赖版本、Rust alloc/core/compiler-builtins工具链及实际版权闭包不可追溯；官方源无Cargo.lock/固定工具链，日志HTTP410且无可用构建artifact。",
-      "resolution": "正式发布前由维护者明确决定并记录：接受官方预编译来源及此处不可重复性限制的许可审核/例外，或者取得可信构建记录、另行受控重建固定源码并核验新产物。没有这一决定前保持未决；不能仅删除该项或把参照版本当已证实版本。"
+      "resolution": "正式发布前由维护者明确决定并记录：接受官方预编译来源及此处不可重复性限制的许可审核/例外，或者取得可信构建记录、另行受控重建固定源码并核验新产物。没有这一决定前保持未决；不能仅删除该项或把参照版本当已证实版本。",
+      "decision": {
+        "decidedBy": "维护者（xinxinxiaoxin，2026-10-12 授权本次发布执行）",
+        "decidedAt": "2026-10-12",
+        "outcome": "accepted-official-prebuilt",
+        "rationale": "接受 Tauri 官方分发的 nsis_tauri_utils v0.5.3 预编译 DLL 作为可信构建产物：该 DLL 与官方发布资产逐字节一致（SHA-256 已核），其声明的依赖许可材料、Chromium 移植原版权与 BSD-3 原文均已随包提供。无法还原其实际解析的依赖 patch 版本与编译器环境，这一可重复性限制被明确接受并保留记录，不作为许可缺项处理；若将来需要完全可复现，可另行受控重建固定源码后替换。"
+      }
     }
   ]
 }

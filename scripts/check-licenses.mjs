@@ -5,6 +5,13 @@ import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 
+// 未决来源只有在维护者留下完整决定记录（决策人、日期、理由）时才允许正式放行。
+// 缺任何一项都视为未决，继续拒绝——不允许用空壳字段或删除记录绕过。
+const isRecordedDecision = (decision) => Boolean(decision)
+  && typeof decision.decidedBy === 'string' && decision.decidedBy.trim().length > 0
+  && /^\d{4}-\d{2}-\d{2}$/.test(String(decision.decidedAt ?? ''))
+  && typeof decision.rationale === 'string' && decision.rationale.trim().length > 0;
+
 try {
   const { values } = parseArgs({
     options: {
@@ -33,8 +40,13 @@ try {
     if (missing.length) throw new Error(`缺少安装器运行时许可：${missing.join('、')}`);
     const blockers = inventory.releaseBlockers ?? [];
     if (!Array.isArray(blockers)) throw new Error('许可清单的未决来源项格式无效');
-    if (blockers.length) {
-      throw new Error(`正式分发许可来源未闭合：${blockers.map((item) => item.component).join('、')}；请按清单补齐取证，不可仅删除阻塞记录`);
+    const undecided = blockers.filter((item) => !isRecordedDecision(item.decision));
+    if (undecided.length) {
+      throw new Error(`正式分发许可来源未闭合：${undecided.map((item) => item.component).join('、')}；`
+        + '请按清单补齐取证，或由维护者以 decision（决策人、日期、理由）明确记录接受该项限制；缺少决定记录的未决项不能绕过');
+    }
+    for (const item of blockers) {
+      console.log(`已记录维护者接受决定：${item.component}（${item.decision.decidedAt}，${item.decision.decidedBy}）`);
     }
   }
   if (values['rust-version'] !== undefined) {

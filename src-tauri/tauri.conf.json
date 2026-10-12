@@ -61,8 +61,8 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "",
-      "endpoints": [],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEUxOTEwQjA3OUQ2MTAyMDEKUldRQkFtR2RCd3VSNFFJU3I1SE55eEpiVldqblBsclltRzVyRnZzWXJ0QWg4YkJSeStOdlc5YncK",
+      "endpoints": ["https://github.com/xinxinxiaoxin/ag-relay/releases/latest/download/latest.json"],
       "requireSignedVersion": true,
       "windows": { "installMode": "passive" }
     }
