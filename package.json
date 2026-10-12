@@ -1,7 +1,7 @@
 {
   "name": "ag-relay",
   "private": true,
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "AG Relay · 网关桌面壳",
   "type": "module",
   "scripts": {
