@@ -20,13 +20,13 @@ async function fixture(t) {
   await writeFile(join(root, 'licenses/inventory.json'), JSON.stringify({
     schemaVersion: 1,
     inputs: [{ path: 'package-lock.json', sha256: hash('{}\n'), normalizeLf: true }],
-    components: [{ name: 'fixture', version: '1.0.0', license: 'MIT', source: 'https://example.org/fixture/1.0.0',
+    components: [{ name: 'Rust standard library', ecosystem: 'toolchain-runtime', version: '1.99.0', license: 'MIT', source: 'https://example.org/fixture/1.99.0',
       materials: [{ path: 'licenses/fixture-LICENSE', sha256: hash('原始许可\n') }] }],
   }));
   return root;
 }
 
-const run = (root) => spawnSync(process.execPath, [cli, '--root', root], { encoding: 'utf8' });
+const run = (root, args = []) => spawnSync(process.execPath, [cli, '--root', root, ...args], { encoding: 'utf8' });
 
 test('打包前缺少清单引用的许可原文时拒绝通过并指出路径', async (t) => {
   const root = await fixture(t);
@@ -56,4 +56,15 @@ test('锁文件实际变更要求重新核验，但允许 Windows 换行差异',
   const changed = run(root);
   assert.notEqual(changed.status, 0);
   assert.match(changed.stderr, /依赖或二进制已变化.*package-lock.json/);
+});
+
+test('发布调用者提供的实测 Rust 版本必须与标准库许可快照一致', async (t) => {
+  const root = await fixture(t);
+  await writeFile(join(root, 'licenses/fixture-LICENSE'), '原始许可\n');
+  const changed = run(root, ['--rust-version', '1.100.0']);
+  assert.notEqual(changed.status, 0);
+  assert.match(changed.stderr, /Rust 工具链与许可快照不一致.*1\.100\.0.*1\.99\.0/);
+  const matched = run(root, ['--rust-version', '1.99.0']);
+  assert.equal(matched.status, 0, matched.stderr);
+  assert.match(matched.stdout, /许可校验通过/);
 });

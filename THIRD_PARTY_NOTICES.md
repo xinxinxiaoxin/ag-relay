@@ -52,7 +52,7 @@ Lightning CSS 的 npm 原生包用于 Tailwind/Vite 构建，本项目只分发�
 2. 使用 `cargo metadata --locked --filter-platform x86_64-pc-windows-msvc --format-version 1 --manifest-path src-tauri/Cargo.toml` 的已解析节点，读取实际 Cargo 元数据和 crate 原文。普通依赖与构建/过程宏依赖标注范围；保守包含完整解析树，不声称这是经链接器裁剪后的精确二进制 SBOM。
 3. 发行包没有附 LICENSE 的例外按上游固定提交补原文，清单逐项记录原因和来源。特别是 `react-remove-scroll-bar@2.3.8` 的 npm 元数据为 MIT，但包内没有许可证；保留其上游后来补入的原始 LICENSE（固定提交和版权年份均保留），不伪称发行包自带该文件。平台工具绑定则采用同版本同仓库主包附带的许可。
 4. Node 使用对应版本标签的完整 LICENSE，二进制比对 nodejs.org 官方 SHASUMS；WebView2 SDK 来源为精确版本的官方 NuGet 包并核对 loader；Rust 标准库来自实际工具链附带的标准库版权声明。
-5. 清单记录了 `package.json`、`package-lock.json`、`Cargo.toml`、`Cargo.lock` 和随包 Node 的指纹。运行 `node scripts/check-licenses.mjs` 进行**离线、只读**校验；缺失材料、许可原文被删节或依赖/二进制变化均非零退出。文本输入允许 CRLF/LF 差异，许可原文自身按原始字节核对。
+5. 清单记录了 `package.json`、`package-lock.json`、`Cargo.toml`、`Cargo.lock` 和随包 Node 的指纹。运行 `node scripts/check-licenses.mjs` 进行**离线、只读**校验；缺失材料、许可原文被删节或依赖/二进制变化均非零退出。文本输入允许 CRLF/LF 差异，许可原文自身按原始字节核对。发布校验还须从实际 `rustc --version` 提取版本号，以 `node scripts/check-licenses.mjs --rust-version <实测版本号>` 传入并比对标准库材料；不能硬编码一个期望值代替实测。省略参数只做文件校验，不表示已核验构建工具链。
 
 升级依赖、改变目标平台、替换 Node、更新 Rust 工具链或新增发行包中嵌入的工具/二进制后，应重新执行上述核验、补齐原文和适用源码、更新 `inventory.json` / `COMPONENTS.md` 并重跑检查，不能只改指纹让旧清单通过。完整性校验不是版权权属审核或法律结论，也不能替代对安装包实际资源的检查。
 
