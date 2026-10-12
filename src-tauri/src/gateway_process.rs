@@ -881,9 +881,9 @@ mod tests {
             }
             let status = status.expect("60 秒内 /_relay/status 未就绪");
 
-            // 自主维护后脚本会变更，状态仍须返回完整内容指纹；不再钉住历史脚本哈希。
-            assert_eq!(status.loaded_version.len(), 64);
-            assert!(status.loaded_version.bytes().all(|b| b.is_ascii_hexdigit()));
+            // 独立真值：sha256sum 对本仓当前核心资源的结果（#22 有界日志 + #23 安全停机）。
+            // 核心变更时显式更新，保持「运行的是打包脚本」的精确契约，不以长度检查代替。
+            assert_eq!(status.loaded_version, "9f2c196d2a2077fda192e41bb903222f3f8d87bb8d5c3b571f6159db01a299b8");
             // supervisor 链路成立（gateway 由 supervisor fork，PROXY_SUPERVISED 由它自己注入）
             assert!(status.supervisor_enabled, "网关应处于 supervisor 托管模式");
             // status.config 暴露的配置项与环境变量表逐项对上（端到端证明环境变量生效；
