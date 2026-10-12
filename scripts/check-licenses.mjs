@@ -7,7 +7,11 @@ import { parseArgs } from 'node:util';
 
 try {
   const { values } = parseArgs({
-    options: { root: { type: 'string' }, 'rust-version': { type: 'string' } },
+    options: {
+      root: { type: 'string' },
+      'rust-version': { type: 'string' },
+      'installer-runtime': { type: 'boolean', default: false },
+    },
   });
   const root = resolve(values.root ?? resolve(dirname(fileURLToPath(import.meta.url)), '..'));
   const read = (path) => {
@@ -20,6 +24,13 @@ try {
   const inventory = JSON.parse(read('licenses/inventory.json'));
   if (inventory.schemaVersion !== 1 || !inventory.components?.length || !inventory.inputs?.length) {
     throw new Error('许可清单格式无效或组件/输入为空');
+  }
+  if (values['installer-runtime']) {
+    const missing = ['NSIS installer runtime', 'WiX installer runtime'].filter((name) => {
+      const component = inventory.components.find((item) => item.ecosystem === 'installer-runtime' && item.name === name);
+      return !Array.isArray(component?.materials) || component.materials.length === 0;
+    });
+    if (missing.length) throw new Error(`缺少安装器运行时许可：${missing.join('、')}`);
   }
   if (values['rust-version'] !== undefined) {
     const actual = values['rust-version'];
