@@ -49,6 +49,7 @@ export interface ActivityFeed {
   retry: () => void
 }
 export interface PageProps {
+  endpoint: string
   snapshot: GatewaySnapshot
   events: ActivityEvent[]
   activity: ActivityFeed
@@ -66,7 +67,6 @@ export interface GatewayErrorInfo {
 // 偏好设置页 props：目前与通用页 props 相同（开机自启由页面自管读写，退出走 onAction('exit')）。
 export type SettingsPageProps = PageProps
 export const ENDPOINT = 'http://127.0.0.1:8787'
-export const DISPLAY_ENDPOINT = '127.0.0.1:8787'
 // 应用版本的单一来源是动态状态（gateway.ts 的 getAppVersion()，回退 FALLBACK_APP_VERSION）；
 // 侧栏/页脚/总览/设置页统一渲染该状态，显示层各自加 "v" 前缀——此处不再留静态版本常量以防分叉。
 // 网关状态 → 中文短名（用于 App 全局 sr-only 实时播报）。

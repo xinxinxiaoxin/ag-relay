@@ -43,7 +43,7 @@ export function isTauri(): boolean {
   return tauriInvoke() !== null
 }
 
-async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+export async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   const fn = tauriInvoke()
   if (!fn) throw new Error(`Tauri 运行时不可用，无法调用命令：${cmd}`)
   return fn<T>(cmd, args)
@@ -204,7 +204,7 @@ export async function stopGateway(): Promise<GatewayActionResult> {
   catch (e) { return { kind: 'failed', reason: `invoke_error: ${String(e)}` } }
 }
 
-/** 安全重启（restart_gateway，60 秒上限）。浏览器回退：默认「已受理」，?mock=restart_fail 时回退失败。 */
+/** 安全重启（restart_gateway）：排空预算 10 秒，超时撤销不强杀；成功已确认新实例就绪。 */
 export async function restartGateway(): Promise<RestartResult> {
   if (!isTauri()) {
     if (mockScenario() === 'restart_fail') return { kind: 'failed', detail: '排空超时后无法重新拉起（模拟）' }

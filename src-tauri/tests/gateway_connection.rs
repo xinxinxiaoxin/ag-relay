@@ -67,6 +67,44 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn 安全排空_请求自然完成后才停止整个网关() {
+    use std::sync::mpsc;
+    let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
+    let upstream_port = upstream.local_addr().unwrap().port();
+    let (seen_tx, seen_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = upstream.accept().unwrap();
+        let mut bytes = [0; 8192];
+        stream.read(&mut bytes).unwrap();
+        seen_tx.send(()).unwrap();
+        release_rx.recv_timeout(Duration::from_secs(15)).unwrap();
+        stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"ok\":true}").unwrap();
+    });
+    let port = free_port();
+    let mut fixture = Fixture::new("drain-completion", &format!("http://127.0.0.1:{upstream_port}"), port);
+    fixture.gateway.start().unwrap();
+    let client = std::thread::spawn(move || request(port, "/hold"));
+    seen_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    let release = std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            let body = ag_relay_lib::gateway_status::fetch_status_body("127.0.0.1", port).unwrap();
+            let status: serde_json::Value = serde_json::from_str(&body).unwrap();
+            if status["draining"] == true { break; }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        release_tx.send(()).unwrap();
+    });
+    assert!(fixture.gateway.safe_shutdown(Duration::from_secs(5)).unwrap());
+    assert!(client.join().unwrap().contains("{\"ok\":true}"));
+    release.join().unwrap();
+    server.join().unwrap();
+    assert!(TcpListener::bind(("127.0.0.1", port)).is_ok());
+}
+
+#[test]
 fn 安全停机_响应中断不能当作退出成功() {
     let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://127.0.0.1:{}", upstream.local_addr().unwrap().port());

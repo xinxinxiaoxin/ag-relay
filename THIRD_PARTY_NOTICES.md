@@ -54,6 +54,8 @@ Lightning CSS 的 npm 原生包用于 Tailwind/Vite 构建，本项目只分发�
 4. Node 使用对应版本标签的完整 LICENSE，二进制比对 nodejs.org 官方 SHASUMS；WebView2 SDK 来源为精确版本的官方 NuGet 包并核对 loader；Rust 标准库来自实际工具链附带的标准库版权声明。
 5. 清单记录了 `package.json`、`package-lock.json`、`Cargo.toml`、`Cargo.lock` 和随包 Node 的指纹。运行 `node scripts/check-licenses.mjs` 进行**离线、只读**校验；缺失材料、许可原文被删节或依赖/二进制变化均非零退出。文本输入允许 CRLF/LF 差异，许可原文自身按原始字节核对。发布校验还须从实际 `rustc --version` 提取版本号，以 `node scripts/check-licenses.mjs --rust-version <实测版本号>` 传入并比对标准库材料；不能硬编码一个期望值代替实测。省略参数只做文件校验，不表示已核验构建工具链。
 
+6. 正式安装包构建必须同时传入 `--rust-version <实测版本号> --installer-runtime`。后者要求清单含 `installer-runtime` 类别的 `NSIS installer runtime` 和 `WiX installer runtime` 两项及其非空材料，随后继续校验所有原文指纹。安装器原文固定存放于 `installer/nsis/` 与 `installer/wix/`。首轮仅用于探测实际工具版本、明确标记为 TEST-ONLY 的构建可不要求尚未取得的安装器材料，但不能将这种探测产物当成已通过正式分发许可验收。
+
 升级依赖、改变目标平台、替换 Node、更新 Rust 工具链或新增发行包中嵌入的工具/二进制后，应重新执行上述核验、补齐原文和适用源码、更新 `inventory.json` / `COMPONENTS.md` 并重跑检查，不能只改指纹让旧清单通过。完整性校验不是版权权属审核或法律结论，也不能替代对安装包实际资源的检查。
 
 本材料不包含用户系统预装的 Windows / WebView2 Runtime / 系统字体本体，也不授予它们新的许可。若发行方式增加离线 WebView2 Runtime、安装器附加二进制或其他资源，应按实际版本补相应许可后再发布。正式公开/Release 及历史资产的核查由独立发布流程完成；本工单没有运行现用网关或安装器，也没有发布新版。
