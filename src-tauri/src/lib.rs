@@ -1,6 +1,8 @@
 use tauri::Manager;
 
 pub mod app_exit;
+pub mod app_update;
+mod update_journal;
 pub mod autostart;
 pub mod autostart_commands;
 pub mod gateway_commands;

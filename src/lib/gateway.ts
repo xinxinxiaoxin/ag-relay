@@ -40,7 +40,7 @@ export function isTauri(): boolean {
   return tauriInvoke() !== null
 }
 
-async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+export async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   const fn = tauriInvoke()
   if (!fn) throw new Error(`Tauri 运行时不可用，无法调用命令：${cmd}`)
   return fn<T>(cmd, args)
