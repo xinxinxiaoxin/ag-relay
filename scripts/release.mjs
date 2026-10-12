@@ -101,6 +101,37 @@ function stage(configFile, bundleDir, out, notesFile, testOnly) {
   }
 }
 
+// ADR-0005：安装与卸载都不得替应用强停进程、不得由 Restart Manager 重启、不得重启系统、不得降级。
+// 产物生成前静态校验配置与安装器模板/hooks 确实声明了该策略；只写注释不算数，缺失即 fail-closed。
+function assertInstallerSafetyPolicy(config) {
+  const windows = config.bundle?.windows;
+  if (windows?.allowDowngrades !== false
+      || windows.nsis?.installerHooks !== 'windows/installer-hooks.nsh'
+      || JSON.stringify(windows.wix?.fragmentPaths) !== JSON.stringify(['windows/installer-policy.wxs'])
+      || JSON.stringify(windows.wix?.componentRefs) !== JSON.stringify(['AGRelayInstallerSafety'])) {
+    throw new Error('安装器安全策略缺失：必须拒绝占用目录、禁强停/自动重启并禁止降级');
+  }
+  // 配置里写了路径还不够：被引用的模板文件必须真实存在且确实覆盖了 Tauri 的强停接缝。
+  const hooks = path.join(root, 'src-tauri/windows/installer-hooks.nsh');
+  const policy = path.join(root, 'src-tauri/windows/installer-policy.wxs');
+  if (!fs.existsSync(hooks) || !fs.existsSync(policy)) {
+    throw new Error('安装器安全策略缺失：NSIS hooks 或 WiX 片段文件不存在');
+  }
+  const hooksText = fs.readFileSync(hooks, 'utf8');
+  if (!hooksText.includes('!macroundef CheckIfAppIsRunning') || !hooksText.includes('!macro CheckIfAppIsRunning')) {
+    throw new Error('安装器安全策略缺失：NSIS hooks 未覆盖 Tauri 的 CheckIfAppIsRunning 占用检查');
+  }
+  if (/RestartManager_Shutdown|RmShutdown|RmForceShutdown/.test(hooksText)) {
+    throw new Error('安装器安全策略缺失：NSIS hooks 仍包含强停进程的调用');
+  }
+  const policyText = fs.readFileSync(policy, 'utf8');
+  for (const marker of ['MSIRESTARTMANAGERCONTROL', 'DisableShutdown', 'MSIDISABLERMRESTART', 'REBOOT', 'ReallySuppress']) {
+    if (!policyText.includes(marker)) {
+      throw new Error('安装器安全策略缺失：WiX 片段未声明禁用 Restart Manager 关程序/重启');
+    }
+  }
+}
+
 function checkBuildInputs(config, installerRuntime = false) {
   const versions = [JSON.parse(fs.readFileSync(path.join(root, 'package.json'))).version,
     JSON.parse(fs.readFileSync(path.join(root, 'package-lock.json'))).version,
@@ -115,6 +146,7 @@ function checkBuildInputs(config, installerRuntime = false) {
       || config.bundle.windows?.wix?.upgradeCode !== 'ba1f2de2-325d-5641-9f4f-cdc34e692497') {
     throw new Error('安装标识或签名安装器配置漂移，拒绝改变既有数据/升级约定');
   }
+  assertInstallerSafetyPolicy(config);
   const resources = config.bundle.resources;
   const requiredResources = { 'resources/gateway/': 'resources/gateway/', '../LICENSE': 'licenses/LICENSE',
     '../THIRD_PARTY_NOTICES.md': 'licenses/THIRD_PARTY_NOTICES.md', '../licenses/': 'licenses/third-party/' };

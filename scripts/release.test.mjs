@@ -116,6 +116,36 @@ test('发布预检拒绝遗漏随包 Node 的安装配置', () => {
   assert.match(result.stderr, /随包资源/);
 });
 
+test('发布预检拒绝缺失安装器拒绝占用与禁止降级策略的配置', () => {
+  for (const weaken of [
+    config => { config.bundle.windows.allowDowngrades = true; },
+    config => { delete config.bundle.windows.nsis.installerHooks; },
+    config => { config.bundle.windows.wix.fragmentPaths = []; },
+    config => { config.bundle.windows.wix.componentRefs = []; },
+  ]) {
+    const config = JSON.parse(fs.readFileSync(path.join(root, 'src-tauri/tauri.conf.json')));
+    config.plugins.updater = { pubkey: fs.readFileSync(`${key}.pub`, 'utf8').trim(),
+      endpoints: ['https://github.com/xinxinxiaoxin/ag-relay/releases/latest/download/latest.json'], requireSignedVersion: true };
+    weaken(config);
+    const file = path.join(temp, 'unsafe-installer.json');
+    fs.writeFileSync(file, JSON.stringify(config));
+    const result = run(['preflight', '--config', file], { TAURI_SIGNING_PRIVATE_KEY: key });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /安装器安全策略/);
+  }
+});
+
+test('随包 NSIS hooks 覆盖强停接缝且不调用强停，WiX 片段声明禁用关程序/重启', () => {
+  const hooks = fs.readFileSync(path.join(root, 'src-tauri/windows/installer-hooks.nsh'), 'utf8');
+  assert.match(hooks, /!macroundef CheckIfAppIsRunning/);
+  assert.match(hooks, /!macro CheckIfAppIsRunning/);
+  assert.doesNotMatch(hooks, /RestartManager_Shutdown|RmShutdown|RmForceShutdown/);
+  const policy = fs.readFileSync(path.join(root, 'src-tauri/windows/installer-policy.wxs'), 'utf8');
+  for (const marker of ['MSIRESTARTMANAGERCONTROL', 'DisableShutdown', 'MSIDISABLERMRESTART', 'REBOOT', 'ReallySuppress']) {
+    assert.ok(policy.includes(marker), `WiX 片段缺少 ${marker}`);
+  }
+});
+
 test('产物路径审计拒绝用户路径残留且不回显隐私内容', () => {
   const file = path.join(temp, 'path-audit.bin');
   for (const encoding of ['utf8', 'utf16le']) {
