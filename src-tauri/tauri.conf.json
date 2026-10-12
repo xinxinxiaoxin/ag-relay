@@ -30,14 +30,18 @@
     "targets": ["nsis", "msi"],
     "createUpdaterArtifacts": true,
     "windows": {
+      "allowDowngrades": false,
       "webviewInstallMode": { "type": "downloadBootstrapper" },
       "nsis": {
         "installMode": "currentUser",
+        "installerHooks": "windows/installer-hooks.nsh",
         "languages": ["SimpChinese", "English"]
       },
       "wix": {
         "upgradeCode": "ba1f2de2-325d-5641-9f4f-cdc34e692497",
-        "language": "zh-CN"
+        "language": "zh-CN",
+        "fragmentPaths": ["windows/installer-policy.wxs"],
+        "componentRefs": ["AGRelayInstallerSafety"]
       }
     },
     "icon": [
