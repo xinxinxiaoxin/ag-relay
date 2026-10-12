@@ -125,7 +125,11 @@ export default function App() {
   const refreshConnection = useCallback(async () => {
     try { setEndpoint((await getConnectionSettings()).endpoint) } catch { /* 读取失败由设置页明确展示 */ }
   }, [])
-  useEffect(() => { void refreshConnection() }, [refreshConnection])
+  useEffect(() => {
+    let active = true
+    void getConnectionSettings().then(view => { if (active) setEndpoint(view.endpoint) }).catch(() => {})
+    return () => { active = false }
+  }, [])
   const [snapshot, setSnapshot] = useState<GatewaySnapshot>({ state: 'stopped', inflight: null, uptime: null, version: null, owner: 'none' })
   const [events, setEvents] = useState<ActivityEvent[]>([])
   const [commandOpen, setCommandOpen] = useState(false)
