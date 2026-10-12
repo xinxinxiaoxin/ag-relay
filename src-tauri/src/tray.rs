@@ -74,8 +74,9 @@ pub fn handle_tray_action(app: &AppHandle, action: TrayAction) {
         TrayAction::OpenPanel => show_main_window(app),
         TrayAction::RestartGateway => {
             // 与面板「安全重启」按钮同一命令函数：托盘不另写路径
+            let app = app.clone();
             tauri::async_runtime::spawn(async move {
-                let _result = crate::gateway_commands::restart_gateway().await;
+                let _result = crate::gateway_commands::restart_gateway(app).await;
             });
         }
         TrayAction::Quit => app_exit::request_exit(app, ExitSource::TrayMenu),

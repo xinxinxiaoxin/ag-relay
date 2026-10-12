@@ -33,7 +33,8 @@ use windows_sys::Win32::System::JobObjects::{
 
 use std::os::windows::io::AsRawHandle;
 
-use crate::gateway_env::gateway_env_pairs;
+use crate::gateway_env::gateway_env_pairs_with_settings;
+use crate::connection_settings::ConnectionSettings;
 
 /// 无窗口创建标志（MSDN CREATE_NO_WINDOW）。
 /// 实测：子进程拥有一个隐藏控制台（可 AttachConsole），CTRL_C 广播可达。
@@ -122,6 +123,12 @@ pub struct JobHandle(pub(crate) HANDLE);
 unsafe impl Send for JobHandle {}
 unsafe impl Sync for JobHandle {}
 
+impl Drop for JobHandle {
+    fn drop(&mut self) {
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(self.0); }
+    }
+}
+
 /// 受管子进程：壳持有 Child 与 Job Object 句柄。
 /// 刻意不实现「Drop 杀进程」（std Child 默认不 kill on drop）——
 /// 生命周期只由 stop_managed / KILL_ON_JOB_CLOSE 决定。
@@ -180,6 +187,12 @@ pub fn spawn_managed(
     let _lifecycle = LIFECYCLE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
     let mut cmd = Command::new(node_exe);
+    // 只继承 Node 在 Windows 上运行必需的非凭据环境；配置、日志路径由显式参数给出。
+    // 避免继承外部 PROXY_LOG_FILE / NODE_OPTIONS，测试与生产均不会写到另一实例的数据目录。
+    cmd.env_clear();
+    for key in ["SystemRoot", "WINDIR", "TEMP", "TMP"] {
+        if let Some(value) = std::env::var_os(key) { cmd.env(key, value); }
+    }
     cmd.arg(script).current_dir(cwd);
     for (k, v) in extra_env {
         cmd.env(k, v);
@@ -326,14 +339,18 @@ pub fn port_in_use(host: &str, port: u16) -> bool {
 
 /// 启动网关：端口被占则明确报错（不重复拉起）；否则拉起 supervisor。
 pub fn start_gateway_process(paths: &GatewayPaths) -> Result<ManagedChild, GatewayError> {
-    if port_in_use(GATEWAY_HOST, GATEWAY_PORT) {
+    start_gateway_process_with_settings(paths, &ConnectionSettings::default())
+}
+
+pub fn start_gateway_process_with_settings(paths: &GatewayPaths, settings: &ConnectionSettings) -> Result<ManagedChild, GatewayError> {
+    if port_in_use(settings.host(), settings.port()) {
         return Err(GatewayError::PortAlreadyInUse {
-            host: GATEWAY_HOST.to_string(),
-            port: GATEWAY_PORT,
+            host: settings.host().to_string(),
+            port: settings.port(),
         });
     }
     let supervisor_script = paths.gateway_dir.join("relay-supervisor.mjs");
-    let extra_env = gateway_env_pairs(&paths.diagnostics_file);
+    let extra_env = gateway_env_pairs_with_settings(&paths.diagnostics_file, settings);
     spawn_managed(&paths.node_exe, &supervisor_script, &paths.gateway_dir, &extra_env)
 }
 
@@ -674,40 +691,8 @@ mod tests {
         serde_json::from_str(body.as_str()).map_err(|e| format!("解析状态 JSON 失败：{e}"))
     }
 
-    /// 触碰 8787 端口与全局控制台的测试串行执行
+    /// 旧控制台广播桩仍需串行；真实核心测试仅使用动态端口与 HTTP 安全停机。
     static PORT_TESTS_LOCK: TestMutex<()> = TestMutex::new(());
-
-    /// 等 8787 空闲再动它。PORT_TESTS_LOCK 只串行本测试进程——同一台机器上
-    /// 并行工单的测试（各自 worktree）也会占用 8787，瞬时争用属正常排队，
-    /// 最多等 120 秒；超时仍被占才按「环境不干净（残留网关）」失败。
-    fn wait_port_free() {
-        let deadline = Instant::now() + Duration::from_secs(120);
-        while port_in_use(GATEWAY_HOST, GATEWAY_PORT) {
-            assert!(
-                Instant::now() < deadline,
-                "8787 持续被占用超过 120 秒，测试环境不干净（可能有残留网关）"
-            );
-            std::thread::sleep(Duration::from_millis(500));
-        }
-    }
-
-    /// 占住 8787 给「端口被占」测试用：等待与绑定之间仍可能被并行测试抢先，
-    /// 故 bind 失败就重试（同一 120 秒预算），把瞬时争用变成排队。
-    fn occupy_port_for_test() -> TcpListener {
-        let deadline = Instant::now() + Duration::from_secs(120);
-        loop {
-            match TcpListener::bind((GATEWAY_HOST, GATEWAY_PORT)) {
-                Ok(listener) => return listener,
-                Err(_) => {
-                    assert!(
-                        Instant::now() < deadline,
-                        "8787 持续被占用超过 120 秒，测试环境不干净（可能有残留网关）"
-                    );
-                    std::thread::sleep(Duration::from_millis(500));
-                }
-            }
-        }
-    }
 
     /// 持 LIFECYCLE_LOCK 后执行 stop 并返回（耗时不含与并行测试排队等锁的时间）。
     /// 等价于 stop_managed，只是把「持锁」与「计时」的责任留给调用方——
@@ -847,22 +832,18 @@ mod tests {
             gateway_dir: manifest.join("resources").join("gateway"),
             diagnostics_file: std::env::temp_dir().join("ag-relay-port-test").join("diag.jsonl"),
         };
-        // 占住 8787（含等并行测试放口 + bind 重试）
-        let listener = occupy_port_for_test();
-        let result = start_gateway_process(&paths);
+        let listener = TcpListener::bind((GATEWAY_HOST, 0)).unwrap();
+        let occupied_port = listener.local_addr().unwrap().port();
+        let settings = ConnectionSettings::new("http://127.0.0.1:1", occupied_port.into()).unwrap();
+        let result = start_gateway_process_with_settings(&paths, &settings);
         drop(listener);
         match result {
             Err(GatewayError::PortAlreadyInUse { host, port }) => {
-                assert_eq!((host.as_str(), port), (GATEWAY_HOST, GATEWAY_PORT));
+                assert_eq!((host.as_str(), port), (GATEWAY_HOST, occupied_port));
             }
             other => panic!("端口被占时应返回 PortAlreadyInUse，实际 {:?}", other.map(|_| ())),
         }
     }
-
-    /// 工单给定的独立真值：28b764d 版 relay-retry-proxy.mjs 的 sha256
-    /// （网关 /_relay/status 的 loadedVersion 就是该脚本自身的 sha256 全文）。
-    const EXPECTED_GATEWAY_SHA256: &str =
-        "e8395e0f90fe46bf1059bfcbac77e65d887d09d4ed5057490f85847e5cde85dc";
 
     #[test]
     fn 真网关冒烟_起停_版本与配置断言_端口释放_诊断日志落位() {
@@ -881,23 +862,10 @@ mod tests {
             diagnostics_file: diag.clone(),
         };
 
-        wait_port_free();
-        // 启动真网关：wait 与 start 之间仍可能被并行测试抢走 8787，PortAlreadyInUse 就重试
-        let smoke_deadline = Instant::now() + Duration::from_secs(120);
-        let mut gw = loop {
-            match start_gateway_process(&paths) {
-                Ok(gw) => break gw,
-                Err(GatewayError::PortAlreadyInUse { .. }) => {
-                    assert!(
-                        Instant::now() < smoke_deadline,
-                        "8787 被并行测试反复抢占，冒烟无法开始"
-                    );
-                    std::thread::sleep(Duration::from_millis(500));
-                    wait_port_free();
-                }
-                Err(e) => panic!("启动真网关失败：{e:?}"),
-            }
-        };
+        let port = free_port();
+        let upstream = TcpListener::bind((GATEWAY_HOST, 0)).unwrap();
+        let settings = ConnectionSettings::new(&format!("http://127.0.0.1:{}", upstream.local_addr().unwrap().port()), port.into()).unwrap();
+        let gw = start_gateway_process_with_settings(&paths, &settings).expect("启动隔离真网关");
 
         // 断言失败也要把网关停掉，避免污染后续测试
         let result = catch_unwind(AssertUnwindSafe(|| {
@@ -905,7 +873,7 @@ mod tests {
             let deadline = Instant::now() + Duration::from_secs(60);
             let mut status = None;
             while Instant::now() < deadline {
-                if let Ok(s) = get_relay_status(GATEWAY_PORT) {
+                if let Ok(s) = get_relay_status(port) {
                     status = Some(s);
                     break;
                 }
@@ -913,8 +881,9 @@ mod tests {
             }
             let status = status.expect("60 秒内 /_relay/status 未就绪");
 
-            // loadedVersion = 打包脚本自身的 sha256 → 证明拉起的是自带脚本（28b764d 版）
-            assert_eq!(status.loaded_version, EXPECTED_GATEWAY_SHA256);
+            // 独立真值：sha256sum 对本仓当前核心资源的结果（#22 有界日志 + #23 安全停机）。
+            // 核心变更时显式更新，保持「运行的是打包脚本」的精确契约，不以长度检查代替。
+            assert_eq!(status.loaded_version, "9f2c196d2a2077fda192e41bb903222f3f8d87bb8d5c3b571f6159db01a299b8");
             // supervisor 链路成立（gateway 由 supervisor fork，PROXY_SUPERVISED 由它自己注入）
             assert!(status.supervisor_enabled, "网关应处于 supervisor 托管模式");
             // status.config 暴露的配置项与环境变量表逐项对上（端到端证明环境变量生效；
@@ -928,20 +897,13 @@ mod tests {
             assert_eq!(status.config.session_compat, true, "PROXY_SESSION_COMPAT 未生效");
         }));
 
-        // 停止（命令层同一路径）
-        let outcome = stop_managed(&mut gw, STOP_TIMEOUT);
-        match outcome {
-            StopOutcome::Graceful { exit_code } => {
-                assert_eq!(exit_code, Some(0), "真网关应优雅退出（退出码 0）");
-            }
-            other => panic!("真网关应走优雅路径，实际 {:?}", other),
-        }
+        // 控制仅发往本测试独占端口，并核对刚拉起的 supervisor；不广播 CTRL_C。
+        assert_eq!(crate::gateway_safe_shutdown::safe_shutdown_at(port, Some(gw.supervisor_pid), STOP_TIMEOUT), Ok(true));
 
-        // 端口释放（gateway 进程已死的最直接证据）
-        std::thread::sleep(Duration::from_millis(300));
+        std::thread::sleep(Duration::from_millis(100));
         assert!(
-            !port_in_use(GATEWAY_HOST, GATEWAY_PORT),
-            "停止后 8787 端口应释放（无残留网关进程）"
+            !port_in_use(GATEWAY_HOST, port),
+            "停止后测试端口应释放（无残留网关进程）"
         );
         // 诊断日志写入指定路径（PROXY_DIAGNOSTICS_FILE 生效，而非脚本目录默认值）
         assert!(diag.is_file(), "诊断日志应写入 PROXY_DIAGNOSTICS_FILE 指定路径：{}", diag.display());

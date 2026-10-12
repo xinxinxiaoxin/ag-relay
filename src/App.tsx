@@ -27,16 +27,20 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { Input } from '@/components/ui/input'
+import { UpdatePanel } from '@/components/update-panel'
 import { Toaster } from '@/components/ui/sonner'
 import { OverviewPage } from '@/pages/overview-page'
 import { LogsPage } from '@/pages/logs-page'
 import { SettingsPage } from '@/pages/settings-page'
+import { useActivity } from '@/hooks/use-activity'
 import { ENDPOINT, stateNames } from '@/lib/types'
-import type { ActivityEvent, GatewayAction, GatewayErrorInfo, GatewaySnapshot, PageId } from '@/lib/types'
+import type { GatewayAction, GatewayErrorInfo, GatewaySnapshot, PageId } from '@/lib/types'
 import {
-  getStatus, deriveSnapshot, getRecentActivity, getAppVersion, FALLBACK_APP_VERSION,
+  getStatus, deriveSnapshot, getAppVersion, FALLBACK_APP_VERSION,
   startGateway, stopGateway, restartGateway, openLogsDir, quitApp, STATUS_POLL_MS,
 } from '@/lib/gateway'
+
+import { getConnectionSettings } from '@/lib/connection-settings'
 
 const pageNames: Record<PageId, string> = { overview: '网关总览', logs: '诊断日志', settings: '偏好设置' }
 // start_gateway 失败原因 → 中文吐司（port_already_in_use 需先探测，单独处理，见 runStart）。
@@ -47,7 +51,7 @@ const START_FAILURE_TEXT: Record<string, string> = {
   job_setup_failed: '进程树兜底建立失败，已回滚。',
 }
 // 端口冲突错误态详情（T7 错误态；端口被占且探测不可达时持久呈现于总览）。
-const PORT_CONFLICT_DETAIL = '另一个程序正在占用 8787 端口，且未响应网关探测。请关闭占用该端口的程序后重试；本页面不会强制结束占用进程。'
+const PORT_CONFLICT_DETAIL = '另一个程序正在占用所选端口，且未响应网关探测。请在连接设置里换一个端口，或处理占用程序后重试；本页面不会强制结束占用进程。'
 const navigation = [
   { id: 'overview' as const, name: '网关总览', icon: ActivityIcon },
   { id: 'logs' as const, name: '诊断日志', icon: FileTextIcon },
@@ -119,12 +123,21 @@ function AppSidebar({ page, onNavigate, onSearch, onAction, appVersion }: {
 
 export default function App() {
   const [page, setPage] = useState<PageId>('overview')
+  const [endpoint, setEndpoint] = useState(ENDPOINT)
+  const refreshConnection = useCallback(async () => {
+    try { setEndpoint((await getConnectionSettings()).endpoint) } catch { /* 读取失败由设置页明确展示 */ }
+  }, [])
+  useEffect(() => {
+    let active = true
+    void getConnectionSettings().then(view => { if (active) setEndpoint(view.endpoint) }).catch(() => {})
+    return () => { active = false }
+  }, [])
   const [snapshot, setSnapshot] = useState<GatewaySnapshot>({ state: 'stopped', inflight: null, uptime: null, version: null, owner: 'none' })
-  const [events, setEvents] = useState<ActivityEvent[]>([])
+  const { events, activity } = useActivity(snapshot.owner)
   const [commandOpen, setCommandOpen] = useState(false)
   const [copyFallbackOpen, setCopyFallbackOpen] = useState(false)
   // 破坏性操作二次确认（T8：集中到壳层，使命令面板 / 页面按钮 / 侧栏菜单共用同一组守卫）。
-  //  - confirmRestart：受管网关「安全重启」确认（排空 + 60 秒上限）。
+  //  - confirmRestart：受管网关「安全重启」确认（排空预算 10 秒，超时取消）。
   //  - externalConfirm：外部网关「停止 / 重启」二次确认（ADR-0003，非只读）。
   //  - confirmExit：退出应用确认（受管/外部语义不同，退出前优雅停网关）。
   const [confirmRestart, setConfirmRestart] = useState(false)
@@ -142,11 +155,11 @@ export default function App() {
   // 立即刷新一次状态（变更型动作完成后调用，不等下一轮 3 秒轮询）。
   const refreshStatus = useCallback(async () => {
     setSnapshot(deriveSnapshot(await getStatus()))
-  }, [])
+    await refreshConnection()
+  }, [refreshConnection])
 
   // 状态轮询：挂载即首刷，此后每 STATUS_POLL_MS 刷新（8787 上有网关即接管显示）。
-  // 「最近活动」随同一轮询并行拉取（与 getStatus 各自独立更新、互不阻塞）：启动后新产生的
-  // 事件无需重启面板即可点亮；读取层只读、失败兜空，不改变 status 的轮询节奏。
+  // 活动事件由 useActivity 的文件通知独立刷新，不随状态定时轮询。
   useEffect(() => {
     let active = true
     const tick = () => {
@@ -155,9 +168,6 @@ export default function App() {
         setSnapshot(deriveSnapshot(status))
         // 端口冲突态在网关恢复可达后自动消解（其余错误条保留到用户重试或忽略）。
         if (status.available) setGatewayError(prev => (prev?.portConflict ? null : prev))
-      })
-      void getRecentActivity().then(list => {
-        if (active) setEvents(list)
       })
     }
     tick()
@@ -185,7 +195,7 @@ export default function App() {
   const navigate = (next: PageId) => { setPage(next); setCommandOpen(false); mainRef.current?.scrollTo({ top: 0 }) }
 
   const copyEndpoint = async () => {
-    try { await navigator.clipboard.writeText(ENDPOINT); toast('连接地址已复制', { description: ENDPOINT, icon: <CheckIcon className="size-4" /> }) }
+    try { await navigator.clipboard.writeText(endpoint); toast('连接地址已复制', { description: endpoint, icon: <CheckIcon className="size-4" /> }) }
     catch { setCopyFallbackOpen(true) }
   }
 
@@ -205,8 +215,8 @@ export default function App() {
           if (status.available) {
             toast('检测到已有网关在运行，已接管显示其状态。')
           } else {
-            toast.error('端口 8787 已被占用，网关启动失败。')
-            setGatewayError({ portConflict: true, title: '端口 8787 已被占用', detail: PORT_CONFLICT_DETAIL })
+            toast.error('所选端口已被占用，网关启动失败。')
+            setGatewayError({ portConflict: true, title: '所选端口已被占用', detail: PORT_CONFLICT_DETAIL })
           }
         } else {
           const text = START_FAILURE_TEXT[r.reason] ?? `启动失败：${r.reason}`
@@ -247,9 +257,9 @@ export default function App() {
     try {
       const r = await restartGateway()
       switch (r.kind) {
-        case 'restarted': toast('已受理安全重启，排空后将自动重新拉起。'); break
+        case 'restarted': toast('网关已安全重启，已应用保存的连接设置。'); break
         case 'not_running': toast('网关未运行，请先启动。'); break
-        case 'timeout': toast('重启等待超时，可能仍在排空在途请求。'); break
+        case 'timeout': toast('排空超时，已恢复接单，未强杀；连接设置尚未应用，请稍后重试。'); break
         case 'failed':
           toast.error(`安全重启失败：${r.detail}`)
           setGatewayError({ portConflict: false, title: '安全重启失败', detail: `重启网关时出错：${r.detail}。请稍后重试，或打开日志文件夹查看详情。` })
@@ -297,7 +307,7 @@ export default function App() {
   // 命令面板动作可用性（与总览页按钮同源）：启动仅「未启动」可用；停止/重启 = 受管运行中 或 外部实例。
   const canStart = view.state === 'stopped'
   const canStopOrRestart = (view.state === 'running' && view.owner === 'window') || view.state === 'external'
-  const common = { snapshot: view, events, onAction: act, onNavigate: navigate }
+  const common = { endpoint, activity, snapshot: view, events, onAction: act, onNavigate: navigate }
   return (
     <TooltipProvider delayDuration={200}>
       <SidebarProvider defaultOpen style={{ '--sidebar-width': '15rem', '--sidebar-width-icon': '4rem' } as React.CSSProperties}>
@@ -310,6 +320,7 @@ export default function App() {
           </header>
           <main ref={mainRef} className="app-main min-w-0 flex-1 px-5 pb-7 pt-7 sm:px-6 lg:px-8 lg:pt-8" id="main-content">
             <div className="mx-auto w-full max-w-[1280px]">
+              <UpdatePanel />
               {page === 'overview' && <OverviewPage {...common} appVersion={appVersion} gatewayError={gatewayError} onDismissError={() => setGatewayError(null)} />}
               {page === 'logs' && <LogsPage {...common} />}
               {page === 'settings' && <SettingsPage {...common} />}
@@ -333,15 +344,15 @@ export default function App() {
         </CommandList>
         </Command>
       </CommandDialog>
-      <Dialog open={copyFallbackOpen} onOpenChange={setCopyFallbackOpen}><DialogContent><DialogHeader><DialogTitle>复制连接地址</DialogTitle><DialogDescription>系统暂不允许自动复制，请选中下方地址手动复制。</DialogDescription></DialogHeader><Input aria-label="手动复制的连接地址" value={ENDPOINT} readOnly autoFocus onFocus={event => event.currentTarget.select()} className="font-mono" /></DialogContent></Dialog>
+      <Dialog open={copyFallbackOpen} onOpenChange={setCopyFallbackOpen}><DialogContent><DialogHeader><DialogTitle>复制连接地址</DialogTitle><DialogDescription>系统暂不允许自动复制，请选中下方地址手动复制。</DialogDescription></DialogHeader><Input aria-label="手动复制的连接地址" value={endpoint} readOnly autoFocus onFocus={event => event.currentTarget.select()} className="font-mono" /></DialogContent></Dialog>
 
-      {/* 受管网关「安全重启」确认（排空 + 60 秒上限）。页面按钮与命令面板共用。 */}
+      {/* 受管网关「安全重启」确认（排空预算 10 秒，超时取消）。页面按钮与命令面板共用。 */}
       <AlertDialog open={confirmRestart} onOpenChange={setConfirmRestart}>
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>安全重启网关？</AlertDialogTitle>
             <AlertDialogDescription>
-              将先优雅排空在途请求，再重启网关，最长等待 60 秒。网关受理重启不等于已恢复，恢复后面板状态会自动刷新。
+              将先优雅排空在途请求，再使用已保存的连接设置重新启动网关。排空最多等待 10 秒，超时不强杀、不应用设置，恢复接单后可稍后重试。
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -361,7 +372,7 @@ export default function App() {
             <AlertDialogTitle>{externalConfirm === 'restart' ? '重启外部实例？' : '停止外部实例？'}</AlertDialogTitle>
             <AlertDialogDescription>
               {externalConfirm === 'restart'
-                ? '将优雅排空在途请求后，重启监听端口上的外部网关，最长等待 60 秒。'
+                ? '将优雅排空外部网关后，使用已保存的连接设置启动受管网关。排空最多等待 10 秒，超时不强杀；不支持安全停机的旧实例将保持不动。'
                 : '将优雅停止监听端口上的外部网关（先排空在途请求）。'}
             </AlertDialogDescription>
           </AlertDialogHeader>

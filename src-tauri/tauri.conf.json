@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "ag-relay",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "identifier": "ag-relay",
   "build": {
     "frontendDist": "../dist",
@@ -27,6 +27,23 @@
   },
   "bundle": {
     "active": true,
+    "targets": ["nsis", "msi"],
+    "createUpdaterArtifacts": true,
+    "windows": {
+      "allowDowngrades": false,
+      "webviewInstallMode": { "type": "downloadBootstrapper" },
+      "nsis": {
+        "installMode": "currentUser",
+        "installerHooks": "windows/installer-hooks.nsh",
+        "languages": ["SimpChinese", "English"]
+      },
+      "wix": {
+        "upgradeCode": "ba1f2de2-325d-5641-9f4f-cdc34e692497",
+        "language": "zh-CN",
+        "fragmentPaths": ["windows/installer-policy.wxs"],
+        "componentRefs": ["AGRelayInstallerSafety"]
+      }
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -35,6 +52,19 @@
       "icons/icon.ico"
     ],
     "externalBin": ["binaries/node"],
-    "resources": ["resources/gateway/"]
+    "resources": {
+      "resources/gateway/": "resources/gateway/",
+      "../LICENSE": "licenses/LICENSE",
+      "../THIRD_PARTY_NOTICES.md": "licenses/THIRD_PARTY_NOTICES.md",
+      "../licenses/": "licenses/third-party/"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEUxOTEwQjA3OUQ2MTAyMDEKUldRQkFtR2RCd3VSNFFJU3I1SE55eEpiVldqblBsclltRzVyRnZzWXJ0QWg4YkJSeStOdlc5YncK",
+      "endpoints": ["https://github.com/xinxinxiaoxin/ag-relay/releases/latest/download/latest.json"],
+      "requireSignedVersion": true,
+      "windows": { "installMode": "passive" }
+    }
   }
 }

@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Fragment>
+    <!-- ADR-0005：不自动关闭占用程序、不由 Restart Manager 恢复旧进程、不重启系统。 -->
+    <Property Id="MSIRESTARTMANAGERCONTROL" Value="DisableShutdown" />
+    <Property Id="MSIDISABLERMRESTART" Value="1" />
+    <Property Id="REBOOT" Value="ReallySuppress" />
+    <!-- ComponentRef 保证整个 fragment 被链接；只引用安装目录，不碰用户数据/注册表。 -->
+    <DirectoryRef Id="INSTALLDIR">
+      <Component Id="AGRelayInstallerSafety" Guid="3b9a9da0-7bd3-5096-9ddb-f05119366218" Win64="yes">
+        <CreateFolder />
+      </Component>
+    </DirectoryRef>
+  </Fragment>
+</Wix>

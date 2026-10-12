@@ -49,6 +49,23 @@ pub fn gateway_env_pairs(diagnostics_file: &Path) -> Vec<(String, String)> {
     pairs
 }
 
+/// 用户连接设置在默认配方之上覆盖；密钥不属于设置表。
+pub fn gateway_env_pairs_with_settings(
+    diagnostics_file: &Path,
+    settings: &crate::connection_settings::ConnectionSettings,
+) -> Vec<(String, String)> {
+    let mut pairs = gateway_env_pairs(diagnostics_file);
+    for (key, value) in &mut pairs {
+        match key.as_str() {
+            "PROXY_UPSTREAM" => *value = settings.upstream().into(),
+            "PROXY_HOST" => *value = settings.host().into(),
+            "PROXY_PORT" => *value = settings.port().to_string(),
+            _ => {}
+        }
+    }
+    pairs
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
