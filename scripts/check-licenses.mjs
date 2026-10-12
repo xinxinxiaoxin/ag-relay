@@ -3,13 +3,13 @@ import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parseArgs } from 'node:util';
 
 try {
-  const args = process.argv.slice(2);
-  if (args.length && (args.length !== 2 || args[0] !== '--root')) {
-    throw new Error('用法：node scripts/check-licenses.mjs [--root 仓库目录]');
-  }
-  const root = resolve(args[1] ?? resolve(dirname(fileURLToPath(import.meta.url)), '..'));
+  const { values } = parseArgs({
+    options: { root: { type: 'string' }, 'rust-version': { type: 'string' } },
+  });
+  const root = resolve(values.root ?? resolve(dirname(fileURLToPath(import.meta.url)), '..'));
   const read = (path) => {
     try { return readFileSync(resolve(root, path)); }
     catch { throw new Error(`缺少许可材料：${path}`); }
@@ -20,6 +20,14 @@ try {
   const inventory = JSON.parse(read('licenses/inventory.json'));
   if (inventory.schemaVersion !== 1 || !inventory.components?.length || !inventory.inputs?.length) {
     throw new Error('许可清单格式无效或组件/输入为空');
+  }
+  if (values['rust-version'] !== undefined) {
+    const actual = values['rust-version'];
+    const standardLibrary = inventory.components.find((component) =>
+      component.ecosystem === 'toolchain-runtime' && component.name === 'Rust standard library');
+    if (!standardLibrary || actual !== standardLibrary.version) {
+      throw new Error(`Rust 工具链与许可快照不一致：实测 ${actual}，材料 ${standardLibrary?.version ?? '缺失'}；请重新核验标准库许可`);
+    }
   }
   for (const input of inventory.inputs) {
     const bytes = read(input.path);
