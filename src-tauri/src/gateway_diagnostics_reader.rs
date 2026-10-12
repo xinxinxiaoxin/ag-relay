@@ -5,7 +5,6 @@
 //! I/O 失败向调用方返回明确错误，翻译复用 gateway_diagnostics::localize_line。
 //! 不写诊断文件，不触碰任何网关控制接口。
 
-use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -17,7 +16,7 @@ use crate::gateway_diagnostics::{localize_line, ActivityEvent, ActivityLevel};
 // 诊断文件名的单一真值在 gateway_process（与 resolve_paths 同源），本模块复用以防两处漂移。
 use crate::gateway_process::DIAGNOSTICS_FILE_NAME;
 
-/// 「最近活动」内存缓冲容量（只保留最近这么多条活动事件）。
+/// 「最近活动」事件条数上限（复用分页服务的首页大小）。
 const RECENT_CAPACITY: usize = 50;
 /// 分页默认页大小。
 const DEFAULT_PAGE_SIZE: usize = 50;
@@ -93,19 +92,18 @@ fn file_len(path: &Path) -> u64 {
 // ───────────────────────── 增量 tail 读取器（有状态：偏移 + 有界最近缓冲） ─────────────────────────
 
 /// 增量 tail 读取器：记 live 文件已消费的字节偏移，每次 `poll` 只读自偏移以来新增的**完整**行，
-/// 感知轮转/截断。内存只留最近 `capacity` 条活动事件（有界环形缓冲）。只读，绝不触碰网关进程。
+/// 感知轮转/截断。只读，绝不触碰网关进程。「最近活动」的内容查询走 `query_activity_in`（分页服务），
+/// 本读取器只负责推进偏移并报告新增条数，不保留内存缓冲。
 pub struct TailReader {
     live: PathBuf,
     rotated: PathBuf,
     offset: u64,
     current: Option<OpenedDiagnostic>,
     archive_identity: Option<same_file::Handle>,
-    recent: VecDeque<ActivityEvent>,
-    capacity: usize,
 }
 
 impl TailReader {
-    pub fn new(live: PathBuf, capacity: usize) -> Self {
+    pub fn new(live: PathBuf) -> Self {
         let rotated = rotated_path_of(&live);
         Self {
             live,
@@ -113,12 +111,11 @@ impl TailReader {
             offset: 0,
             current: None,
             archive_identity: None,
-            recent: VecDeque::new(),
-            capacity: capacity.max(1),
         }
     }
 
-    /// 建立首次快照；后续 poll 仅报告快照之后的新活动事件。
+    /// 建立首次快照基线；返回快照起点已存在的完整行（仅供测试/诊断校验，生产忽略其内容）。
+    /// 后续 poll 仅报告快照之后的新活动事件。
     pub fn snapshot(&mut self) -> Result<Vec<ActivityEvent>, String> {
         let (mut live, mut rotated) = open_pair(&self.live, &self.rotated)?;
         let mut events = Vec::new();
@@ -134,10 +131,6 @@ impl TailReader {
             offset = consumed;
             events.extend(newer);
         }
-        self.recent.clear();
-        for event in events {
-            self.push_event(event);
-        }
         // 若正处于 rename→create 间隙，继续持有旧档以接续，而非下次重读旧档。
         self.offset = if live.is_some() { offset } else { old_offset };
         if live.is_some() {
@@ -147,7 +140,7 @@ impl TailReader {
             self.archive_identity = None;
             self.current = rotated;
         }
-        Ok(self.recent_newest_first())
+        Ok(events)
     }
 
     /// 已消费的 live 字节偏移（测试 / 诊断用）。
@@ -187,23 +180,7 @@ impl TailReader {
         self.current = next;
         self.archive_identity = archived.map(|old| old.identity);
         self.offset = consumed;
-        let added = events.len();
-        for event in events {
-            self.push_event(event);
-        }
-        Ok(added)
-    }
-
-    /// 最近活动事件快照，**最新在前**（供总览「最近活动」）。
-    pub fn recent_newest_first(&self) -> Vec<ActivityEvent> {
-        self.recent.iter().rev().cloned().collect()
-    }
-
-    fn push_event(&mut self, ev: ActivityEvent) {
-        if self.recent.len() >= self.capacity {
-            self.recent.pop_front();
-        }
-        self.recent.push_back(ev);
+        Ok(events.len())
     }
 
     /// 读 live[offset..]，消费到最后一个换行为止（保留未完成的尾行），推进 offset。
@@ -218,11 +195,7 @@ impl TailReader {
         }
         let (consumed, events) = read_new_complete_lines(&mut current.file, self.offset, len)?;
         self.offset += consumed;
-        let n = events.len();
-        for ev in events {
-            self.push_event(ev);
-        }
-        Ok(n)
+        Ok(events.len())
     }
 }
 
@@ -564,7 +537,7 @@ mod tests {
         let dir = temp_dir("tail-inc");
         let live = dir.join("relay-diagnostics.jsonl");
         write_file(&live, &format!("{L_STARTED}\n{L_RECEIVED}\n"));
-        let mut reader = TailReader::new(live.clone(), 10);
+        let mut reader = TailReader::new(live.clone());
 
         assert_eq!(reader.poll().unwrap(), 2, "首轮应读到 2 条事件");
         assert_eq!(
@@ -582,7 +555,6 @@ mod tests {
         append_file(&live, &format!("{L_FIN_200}\n"));
         assert_eq!(reader.poll().unwrap(), 1, "应只读到新追加的 1 条");
         assert_eq!(reader.byte_offset(), file_len(&live));
-        assert_eq!(reader.recent_newest_first().len(), 3);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -592,7 +564,7 @@ mod tests {
         let live = dir.join("relay-diagnostics.jsonl");
         // 一条完整 + 一条未完成（无结尾换行）
         write_file(&live, &format!("{L_STARTED}\n{{\"event\":\"recei"));
-        let mut reader = TailReader::new(live.clone(), 10);
+        let mut reader = TailReader::new(live.clone());
         assert_eq!(reader.poll().unwrap(), 1, "只应消费完整的那一行");
         assert_eq!(
             reader.byte_offset(),
@@ -612,7 +584,7 @@ mod tests {
         let rotated = rotated_path_of(&live);
 
         write_file(&live, &format!("{L_STARTED}\n{L_RECEIVED}\n"));
-        let mut reader = TailReader::new(live.clone(), 20);
+        let mut reader = TailReader::new(live.clone());
         assert_eq!(reader.poll().unwrap(), 2);
         let off = reader.byte_offset();
 
@@ -626,7 +598,6 @@ mod tests {
             "新 live 应短于旧偏移，才触发轮转检测"
         );
 
-        let before = reader.recent_newest_first().len();
         let n = reader.poll().unwrap();
         assert_eq!(
             n, 2,
@@ -637,14 +608,15 @@ mod tests {
             file_len(&live),
             "偏移应重置并推进到新 live 末尾"
         );
-        let evs = reader.recent_newest_first();
-        assert_eq!(evs.len(), before + 2);
+        // TailReader 只报告新增条数；记录内容由查询服务核对（同一文件、同一完整行语义）。
+        let page = query_activity_in(&live, &rotated, &query(LevelFilter::All, "", 0, 10)).unwrap();
+        assert_eq!(page.events.len(), 4, "两处文件共 4 条完整记录");
         assert_eq!(
-            evs[0].level,
+            page.events[0].level,
             ActivityLevel::Error,
             "最新在前：新 live 的 503 为错误"
         );
-        assert!(evs[0].detail.contains("503"), "{}", evs[0].detail);
+        assert!(page.events[0].detail.contains("503"), "{}", page.events[0].detail);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -654,7 +626,7 @@ mod tests {
         let live = dir.join("relay-diagnostics.jsonl");
         let rotated = rotated_path_of(&live);
         write_file(&live, &format!("{L_STARTED}\n"));
-        let mut reader = TailReader::new(live.clone(), 20);
+        let mut reader = TailReader::new(live.clone());
         assert_eq!(reader.poll().unwrap(), 1);
         append_file(&live, &format!("{L_ITEM_ERR}\n"));
         fs::rename(&live, &rotated).unwrap();
@@ -662,12 +634,8 @@ mod tests {
         assert!(file_len(&live) >= reader.byte_offset());
         assert_eq!(reader.poll().unwrap(), 3, "文件身份已变：旧尾1条 + 新档2条");
         assert_eq!(reader.poll().unwrap(), 0, "重复通知不能重放旧档");
-        let titles: Vec<_> = reader
-            .recent_newest_first()
-            .into_iter()
-            .map(|e| e.title)
-            .collect();
-        assert_eq!(titles.len(), 4);
+        let page = query_activity_in(&live, &rotated, &query(LevelFilter::All, "", 0, 10)).unwrap();
+        assert_eq!(page.events.len(), 4, "历史不重放：两处文件共 4 条完整记录");
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -677,7 +645,7 @@ mod tests {
         let live = dir.join("relay-diagnostics.jsonl");
         let rotated = rotated_path_of(&live);
         write_file(&live, &format!("{L_STARTED}\n"));
-        let mut reader = TailReader::new(live.clone(), 20);
+        let mut reader = TailReader::new(live.clone());
         reader.snapshot().unwrap();
         append_file(&live, &format!("{L_ITEM_ERR}\n"));
         fs::rename(&live, &rotated).unwrap();
@@ -687,7 +655,8 @@ mod tests {
         write_file(&live, &format!("{L_FIN_503}\n"));
         assert_eq!(reader.poll().unwrap(), 3, "旧句柄尾部 + 中间.1 + 当前文件");
         assert_eq!(reader.poll().unwrap(), 0);
-        assert_eq!(reader.recent_newest_first().len(), 4);
+        let page = query_activity_in(&live, &rotated, &query(LevelFilter::All, "", 0, 10)).unwrap();
+        assert_eq!(page.events.len(), 4, "两处文件共 4 条完整记录");
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -697,7 +666,7 @@ mod tests {
         let live = dir.join("relay-diagnostics.jsonl");
         let rotated = rotated_path_of(&live);
         write_file(&live, &format!("{L_STARTED}\n"));
-        let mut reader = TailReader::new(live.clone(), 10);
+        let mut reader = TailReader::new(live.clone());
         reader.snapshot().unwrap();
         append_file(&live, &format!("{L_ITEM_ERR}\n"));
         fs::rename(&live, &rotated).unwrap();
@@ -720,7 +689,7 @@ mod tests {
         let rotated = rotated_path_of(&live);
         write_file(&rotated, &format!("{L_FIN_200}\n"));
         write_file(&live, &format!("{L_STARTED}\n{L_RECEIVED}\n"));
-        let mut reader = TailReader::new(live.clone(), 20);
+        let mut reader = TailReader::new(live.clone());
         reader.snapshot().unwrap();
         write_file(&live, "");
         assert_eq!(reader.poll().unwrap(), 0, "截断不能把更早的.1错当新活动");
@@ -766,7 +735,7 @@ mod tests {
         let dir = temp_dir("truncate");
         let live = dir.join("relay-diagnostics.jsonl");
         write_file(&live, &format!("{L_STARTED}\n{L_RECEIVED}\n"));
-        let mut reader = TailReader::new(live.clone(), 10);
+        let mut reader = TailReader::new(live.clone());
         assert_eq!(reader.poll().unwrap(), 2);
         // 截断为空（无 .1）
         write_file(&live, "");
@@ -893,45 +862,21 @@ mod tests {
         write_file(&live, &content);
 
         // 读取器接缝
-        let mut reader = TailReader::new(live.clone(), 50);
+        let mut reader = TailReader::new(live.clone());
         let n = reader.poll().unwrap();
         assert_eq!(
             n, 3,
             "仅 started/mystery(回退)/finished-200 可本地化，其余诚实跳过，实际 {n}"
-        );
-        let evs = reader.recent_newest_first();
-        assert!(
-            evs.iter().any(|e| e.title.contains("mystery_future_code")),
-            "未知码应原样回退显示标题"
         );
 
         // 查询接缝（同一文件）：同样 3 条，最新在前（finished-200）
         let page = query_activity_in(&live, &rotated, &query(LevelFilter::All, "", 0, 50)).unwrap();
         assert_eq!(page.events.len(), 3);
         assert_eq!(page.events[0].title, "请求结束", "最新在前");
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn 有界缓冲_只保留最近容量条_最新在前() {
-        let dir = temp_dir("bounded");
-        let live = dir.join("relay-diagnostics.jsonl");
-        let mut content = String::new();
-        for i in 0..10 {
-            content.push_str(&received_line(&format!("t{i}"), &format!("/req/{i}")));
-            content.push('\n');
-        }
-        write_file(&live, &content);
-        let mut reader = TailReader::new(live.clone(), 3); // 容量 3
-        reader.poll().unwrap();
-        let evs = reader.recent_newest_first();
-        assert_eq!(evs.len(), 3, "有界：只留最近 3 条");
         assert!(
-            evs[0].detail.contains("/req/9"),
-            "最新在前：{}",
-            evs[0].detail
+            page.events.iter().any(|e| e.title.contains("mystery_future_code")),
+            "未知码应原样回退显示标题"
         );
-        assert!(evs[2].detail.contains("/req/7"));
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -942,7 +887,7 @@ mod tests {
         let rotated = rotated_path_of(&live);
         write_file(&rotated, &format!("{L_STARTED}\n"));
         write_file(&live, &format!("{L_RECEIVED}\n{L_FIN_200}"));
-        let mut reader = TailReader::new(live.clone(), 50);
+        let mut reader = TailReader::new(live.clone());
         let snapshot = reader.snapshot().unwrap();
         assert_eq!(snapshot.len(), 2, "首次快照包含两个文件的完整行");
         assert_eq!(reader.poll().unwrap(), 0, "已有记录不能产生有新事件通知");
@@ -959,7 +904,7 @@ mod tests {
         let rotated = rotated_path_of(&live);
         write_file(&rotated, &format!("{L_STARTED}\n"));
         write_file(&live, &format!("{L_RECEIVED}\n{L_FIN_200}"));
-        let mut reader = TailReader::new(live.clone(), 50);
+        let mut reader = TailReader::new(live.clone());
         let recent = reader.snapshot().unwrap();
         let page = query_activity_in(&live, &rotated, &query(LevelFilter::All, "", 0, 50)).unwrap();
         assert_eq!(
