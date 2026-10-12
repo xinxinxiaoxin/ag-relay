@@ -1,7 +1,5 @@
-//! 应用退出路径（T5）：× 关窗 / 托盘「退出」/ 面板「退出」按钮三条路收敛为一条——
-//! 先把退出来源记入壳侧日志（内容仅「UTC 时间 + 白名单枚举值」），再 app.exit(0)；
-//! 三条路都汇入 RunEvent::Exit 的既有钩子（shutdown_blocking_on_exit）优雅停网关。
-//! 关窗路径不调 exit：默认链放行（CloseRequested → ExitRequested(None) → Exit），只记日志。
+//! 应用退出来源日志。窗口/托盘/面板三条路径都经更新互斥模块，安全排空后才允许退出。
+//! 排空失败保留窗口与受管句柄；Exit 事件不再执行第二次停机。
 
 use crate::bounded_log::{append_record, LogPolicy};
 
@@ -120,11 +118,10 @@ pub fn append_shell_record_in(app_data: &std::path::Path, line: &str) -> std::io
     )
 }
 
-/// 统一退出入口：记来源日志 → app.exit(0)。
-/// app.exit 与关窗殊途同归：都会触发 RunEvent::Exit → 优雅停网关钩子。
+/// 统一退出入口：先记录来源，由更新/退出互斥模块排空，安全停机成功才 app.exit。
 pub fn request_exit(app: &AppHandle, source: ExitSource) {
     log_exit_source(app, source);
-    app.exit(0);
+    crate::update_commands::request_exit(app);
 }
 
 /// 面板「退出」按钮命令（与 UI 同一命令路径）；行为与点 × 完全一致。

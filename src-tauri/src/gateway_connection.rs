@@ -191,13 +191,4 @@ impl GatewayConnection {
         self.start()?;
         Ok(true)
     }
-
-    /// 旧退出流程的兼容入口；更新不可使用，#25 将统一退出 gate 后移除调用。
-    pub fn shutdown_on_exit(&mut self) {
-        if let Some(mut child) = self.managed.take() {
-            gateway_process::stop_managed(&mut child, gateway_process::STOP_TIMEOUT);
-        } else if let Ok(port) = self.port() {
-            gateway_process::stop_external_gateway(port, gateway_process::STOP_TIMEOUT);
-        }
-    }
 }
