@@ -56,7 +56,7 @@ node scripts/release.mjs test-build --out C:\Temp\ag-relay-test-artifacts
 1. **在本仓演进**：直接修改本仓核心，保留现有能力与测试；配置、控制协议或诊断事件变化时，同步修改桌面面板适配及契约测试。文件职责、测试入口与安全边界见[网关核心维护说明](docs/gateway-core-maintenance.md)。
 2. **配套验证**：保留环境装配、诊断字典覆盖打包脚本事件码、诊断读取、状态与重启受理等契约；先跑维护说明中的隔离测试。旧全量测试及旧版 `scripts/smoke.ps1` 可能触碰固定端口或真实系统状态，不能在现用网关所在环境直接执行。真实起停、重启与诊断展示验收需独立隔离环境，不能用 HTTP mock 通过代替。
 3. **作为一个产品构建发布**：验证后按构建流程将核心与桌面面板一并打包，使用同一 AG Relay 版本发布；不提供独立追踪外部源码的「仅更新核心」。不得覆盖正在运行的网关文件。
-4. **记录可追溯快照**：实际完成构建后，记录本仓构建提交、核心三个 `.mjs` 与 `gateway-config.bat` 的 SHA-256、成品哈希及构建时间。外部改进按需审查、择取补丁，记录来源提交并保留版权与许可要求，不再整体覆盖脚本；详见维护说明。
+4. **记录可追溯快照**：实际完成构建后，记录本仓构建提交、核心四个 `.mjs`（`relay-retry-proxy.mjs`、`relay-supervisor.mjs`、`relay-start-check.mjs`、`bounded-file-log.mjs`）与 `gateway-config.bat` 的 SHA-256、成品哈希及构建时间。四个 `.mjs` 与配置文件一样逐份纳入发布快照，任一改动后重打包都刷新对应哈希。外部改进按需审查、择取补丁，记录来源提交并保留版权与许可要求，不再整体覆盖脚本；详见维护说明。
 
 ## 当前打包快照
 
@@ -93,6 +93,6 @@ AG Relay 的自有代码（桌面面板、纳入本仓库自主维护的网关�
 
 - `src/`：前端（原生 HTML/CSS/JS，无框架）
 - `src-tauri/`：Tauri 2 壳（Rust）
-- `src-tauri/resources/gateway/`：本仓自主维护的网关核心三脚本 + `gateway-config.bat` 默认配置契约（见[维护说明](docs/gateway-core-maintenance.md)）
+- `src-tauri/resources/gateway/`：本仓自主维护的网关核心四脚本（`relay-retry-proxy.mjs`、`relay-supervisor.mjs`、`relay-start-check.mjs`、`bounded-file-log.mjs`）+ `gateway-config.bat` 默认配置契约（见[维护说明](docs/gateway-core-maintenance.md)）
 - `scripts/make-icons.ps1`：重新生成应用图标（AG 字样，PNG + ICO）
 - `scripts/smoke.ps1`：构建冒烟检查
