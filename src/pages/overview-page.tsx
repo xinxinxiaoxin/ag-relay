@@ -37,9 +37,7 @@ import { Input } from '@/components/ui/input'
 import { Item, ItemContent, ItemDescription, ItemGroup, ItemMedia, ItemTitle } from '@/components/ui/item'
 import { Separator } from '@/components/ui/separator'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import { ENDPOINT, formatEventTime, type GatewayErrorInfo, type GatewayState, type PageProps } from '@/lib/types'
-
-const endpoint = new URL(ENDPOINT)
+import { formatEventTime, type GatewayErrorInfo, type GatewayState, type PageProps } from '@/lib/types'
 
 const stateCopy: Record<GatewayState, { title: string; description: string }> = {
   running: { title: '运行中', description: '网关已就绪，可以连接本地客户端。' },
@@ -72,7 +70,8 @@ function controlNoteFor(
   return '仅管理当前窗口启动的网关，不会终止其他进程。'
 }
 
-export function OverviewPage({ snapshot, events, onAction, onNavigate, appVersion, gatewayError, onDismissError }: PageProps & { appVersion: string; gatewayError: GatewayErrorInfo | null; onDismissError: () => void }) {
+export function OverviewPage({ endpoint: connectionEndpoint, snapshot, events, onAction, onNavigate, appVersion, gatewayError, onDismissError }: PageProps & { appVersion: string; gatewayError: GatewayErrorInfo | null; onDismissError: () => void }) {
+  const endpoint = new URL(connectionEndpoint)
   const { state } = snapshot
   const copy = stateCopy[state]
   const metricsAvailable = state === 'running' || state === 'external' || state === 'draining'
@@ -185,7 +184,7 @@ export function OverviewPage({ snapshot, events, onAction, onNavigate, appVersio
               <div className="flex min-w-0 items-center gap-2">
                 <Input
                   aria-labelledby="gateway-endpoint-label"
-                  value={ENDPOINT}
+                  value={connectionEndpoint}
                   readOnly
                   spellCheck={false}
                   className="h-10 min-w-0 flex-1 bg-muted/50 font-mono text-sm"
