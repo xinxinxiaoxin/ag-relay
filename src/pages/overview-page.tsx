@@ -37,9 +37,7 @@ import { Input } from '@/components/ui/input'
 import { Item, ItemContent, ItemDescription, ItemGroup, ItemMedia, ItemTitle } from '@/components/ui/item'
 import { Separator } from '@/components/ui/separator'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import { ENDPOINT, formatEventTime, type GatewayErrorInfo, type GatewayState, type PageProps } from '@/lib/types'
-
-const endpoint = new URL(ENDPOINT)
+import { formatEventTime, type GatewayErrorInfo, type GatewayState, type PageProps } from '@/lib/types'
 
 const stateCopy: Record<GatewayState, { title: string; description: string }> = {
   running: { title: '运行中', description: '网关已就绪，可以连接本地客户端。' },
@@ -72,7 +70,8 @@ function controlNoteFor(
   return '仅管理当前窗口启动的网关，不会终止其他进程。'
 }
 
-export function OverviewPage({ snapshot, events, onAction, onNavigate, appVersion, gatewayError, onDismissError }: PageProps & { appVersion: string; gatewayError: GatewayErrorInfo | null; onDismissError: () => void }) {
+export function OverviewPage({ endpoint: connectionEndpoint, snapshot, events, activity, onAction, onNavigate, appVersion, gatewayError, onDismissError }: PageProps & { appVersion: string; gatewayError: GatewayErrorInfo | null; onDismissError: () => void }) {
+  const endpoint = new URL(connectionEndpoint)
   const { state } = snapshot
   const copy = stateCopy[state]
   const metricsAvailable = state === 'running' || state === 'external' || state === 'draining'
@@ -100,6 +99,7 @@ export function OverviewPage({ snapshot, events, onAction, onNavigate, appVersio
     </span>
   )
   const recentEvents = events.slice(0, 4)
+  const activityError = activity.error ?? (activity.status === 'error' ? activity.message : null)
   const primaryLabel = isPending
     ? state === 'starting' ? '正在启动' : '正在排空'
     : canStopOrRestart ? '停止网关' : '启动网关'
@@ -185,7 +185,7 @@ export function OverviewPage({ snapshot, events, onAction, onNavigate, appVersio
               <div className="flex min-w-0 items-center gap-2">
                 <Input
                   aria-labelledby="gateway-endpoint-label"
-                  value={ENDPOINT}
+                  value={connectionEndpoint}
                   readOnly
                   spellCheck={false}
                   className="h-10 min-w-0 flex-1 bg-muted/50 font-mono text-sm"
@@ -291,6 +291,14 @@ export function OverviewPage({ snapshot, events, onAction, onNavigate, appVersio
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <p className="text-sm text-muted-foreground">最近的网关事件</p>
                 </div>
+                {activityError && (
+                  <div role="alert" className="rounded-lg border border-destructive/30 p-3 text-sm text-destructive">
+                    <p>活动事件读取失败：{activityError}</p>
+                    {events.length > 0 && <p className="mt-1 text-xs">以下为上次成功读取的内容。</p>}
+                    <Button variant="outline" size="sm" className="mt-2" onClick={activity.retry}>重新读取</Button>
+                  </div>
+                )}
+                {activity.message && activity.status !== 'error' && <p role="status" className="text-xs leading-5 text-muted-foreground">{activity.message}</p>}
                 {recentEvents.length > 0 ? (
                   <ItemGroup className="gap-0">
                     {recentEvents.map((event, index) => (
@@ -315,13 +323,13 @@ export function OverviewPage({ snapshot, events, onAction, onNavigate, appVersio
                   <Item className="px-0 py-6">
                     <ItemMedia><FileText className="size-5 text-muted-foreground" aria-hidden="true" /></ItemMedia>
                     <ItemContent>
-                      <ItemTitle className="text-sm">暂无活动</ItemTitle>
-                      <ItemDescription className="text-sm">网关事件会显示在这里，也可前往日志页面查看。</ItemDescription>
+                      <ItemTitle className="text-sm">{activityError ? '未能读取活动事件' : activity.loading ? '正在加载活动事件…' : '暂无活动'}</ItemTitle>
+                      <ItemDescription className="text-sm">{activityError ? '请重试读取，不能据此判断没有记录。' : '网关事件会显示在这里，也可前往日志页面查看。'}</ItemDescription>
                     </ItemContent>
                   </Item>
                 )}
                 <Separator />
-                <p className="pt-1 text-xs leading-5 text-muted-foreground">显示最近 {recentEvents.length} 条，共 {events.length} 条事件</p>
+                <p className="pt-1 text-xs leading-5 text-muted-foreground">{activityError ? '读取失败，未确认最新记录数' : `显示最近 ${recentEvents.length} 条；最多加载最近 50 条事件`}</p>
               </TabsContent>
               <TabsContent value="runtime" className="mt-0 space-y-5">
                 <div className="space-y-1">

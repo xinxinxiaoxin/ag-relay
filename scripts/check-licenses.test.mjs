@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -67,4 +67,33 @@ test('发布调用者提供的实测 Rust 版本必须与标准库许可快照�
   const matched = run(root, ['--rust-version', '1.99.0']);
   assert.equal(matched.status, 0, matched.stderr);
   assert.match(matched.stdout, /许可校验通过/);
+});
+
+test('正式构建必须同时保有 NSIS 和 WiX 运行时的非空许可材料', async (t) => {
+  const root = await fixture(t);
+  await writeFile(join(root, 'licenses/fixture-LICENSE'), '原始许可\n');
+  const inventoryPath = join(root, 'licenses/inventory.json');
+  const inventory = JSON.parse(await readFile(inventoryPath, 'utf8'));
+  const installers = ['NSIS installer runtime', 'WiX installer runtime'].map((name) => ({
+    name, ecosystem: 'installer-runtime', version: '1.0.0', license: 'MIT', source: 'https://example.org/installer/1.0.0',
+    materials: [{ path: 'licenses/fixture-LICENSE', sha256: hash('原始许可\n') }],
+  }));
+  assert.equal(run(root).status, 0, '普通文件检查不依赖尚未探测的安装器');
+  const missingBoth = run(root, ['--installer-runtime']);
+  assert.notEqual(missingBoth.status, 0);
+  assert.match(missingBoth.stderr, /缺少安装器运行时许可.*NSIS installer runtime.*WiX installer runtime/);
+  inventory.components.push(installers[0]);
+  await writeFile(inventoryPath, JSON.stringify(inventory));
+  const missingWix = run(root, ['--installer-runtime']);
+  assert.notEqual(missingWix.status, 0);
+  assert.match(missingWix.stderr, /缺少安装器运行时许可.*WiX installer runtime/);
+  inventory.components.push(installers[1]);
+  await writeFile(inventoryPath, JSON.stringify(inventory));
+  const complete = run(root, ['--installer-runtime', '--rust-version', '1.99.0']);
+  assert.equal(complete.status, 0, complete.stderr);
+  installers[0].materials = [];
+  await writeFile(inventoryPath, JSON.stringify(inventory));
+  const empty = run(root, ['--installer-runtime']);
+  assert.notEqual(empty.status, 0);
+  assert.match(empty.stderr, /缺少安装器运行时许可.*NSIS installer runtime/);
 });
