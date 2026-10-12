@@ -16,28 +16,36 @@ AG Relay —— relay-retry-proxy 网关的 Tauri 桌面封装。
 - **日志位置**：`%APPDATA%\ag-relay\logs\`（网关诊断 `relay-diagnostics.jsonl` + 壳侧退出来源 `shell-exit.log`）。
 - **开机自启**：注册的是软件本身（HKCU Run 键 `ag-relay` → 当前 exe），开机后由软件再拉起网关；exe 挪位置后下次启动自动改写自启项指向新路径。
 
-## 构建（一条命令打包 exe）
+## Windows 安装与签名构建
 
-前置：Node.js + npm、Rust（cargo）、WebView2 运行时。
+用户分发采用 **NSIS（优先）或 MSI**，两者都自带 `node.exe` 与 `resources/gateway/`，不依赖宿主机安装 Node。保留 `identifier=ag-relay` 和 MSI UpgradeCode，安装位置变化不改变 `%APPDATA%\ag-relay\` 下的设置与日志。旧 ZIP 版需先在安全停止网关后手动安装一次具备更新能力的版本；后续升级保持原安装器类型。
 
-PowerShell：
+开发前置：Windows x64、Node/npm、Rust/MSVC、WebView2；`npm ci` 安装锁定依赖。构建工具可以下载 WiX、NSIS/WebView2 bootstrapper，**构建不等于运行安装器**。未配置生产公钥时，默认 `pubkey=""`、`endpoints=[]`，应用更新禁用；普通 Tauri 打包若缺少签名私钥会失败，不会降级为无签名发布。
 
 ```powershell
-$env:CARGO_TARGET_DIR='D:\zcode项目\ag-relay-build\target'; npm install; npm run tauri build
+# 只编译面板和程序，不生成安装包、不启动应用
+$env:CARGO_BUILD_JOBS='2'
+npm run tauri -- build --no-bundle -- --locked -j 2
+
+# 独立临时测试密钥构建：仅用于验签，不可发布、不执行安装
+node scripts/release.mjs test-build --out C:\Temp\ag-relay-test-artifacts
 ```
 
-说明：
+可设置 `CARGO_TARGET_DIR` 复用隔离构建缓存；不要指向现用程序目录。共享 target 的构建必须串行排队，cargo 采用 `-j 2`，不要在另一个打包任务进行时重用其 `release/bundle`。测试构建在临时目录产生并销毁私钥，仅输出测试配置、公钥、签名产物及醒目标记。
 
-- `CARGO_TARGET_DIR` 指向仓库外的共享增量缓存目录（跨工单复用，首次编译约 10–30 分钟，之后增量很快）。
-- **并行构建风险**：多个人/多个 agent 同时用同一个共享 target 构建时，`target\release\ag-relay.exe` 会被最后构建的一方覆盖，且 cargo 排队等锁期间产物归属不可辨。并行场景请各自用隔离 target（见下），或在启动 exe 验收前先核对 mtime。
-- 隔离 target 写法（本仓库验收工单采用，产物路径后缀随工单号变）：
+### 正式发布门槛（目前未满足，不代表已发布）
 
-  ```powershell
-  $env:CARGO_TARGET_DIR='D:\zcode项目\ag-relay-build\target-t7'; npm install; npm run tauri build
-  ```
+1. 维护者在可信离线环境生成并备份正式 Tauri 签名密钥，只把**公钥内容**提交到 `src-tauri/tauri.conf.json` 的 `plugins.updater.pubkey`。不要把私钥、密码或 `.env` 提交/随包分发。
+2. 将 `endpoints` 设置为 `https://github.com/xinxinxiaoxin/ag-relay/releases/latest/download/latest.json`，保留 `requireSignedVersion=true`，不得打开不安全 TLS 或允许降级。公钥变更需设计旧版本信任迁移，不能随意换钥。
+3. GitHub Environment `release-signing` 保存 `TAURI_SIGNING_PRIVATE_KEY`、`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` secrets（密码变量可为空）；`release-publish` 设置人工必需审批与允许的发布 tag。仓库及 Release 必须能被用户匿名读取；私有仓库的 404 不能伪装成“没有更新”，不向客户端嵌入 GitHub token。
+4. 同步 `package.json`、`package-lock.json`、`Cargo.toml`、`tauri.conf.json` 版本并创建新的稳定 `vX.Y.Z` tag；补齐所有 `LICENSE`、`THIRD_PARTY_NOTICES.md`、`licenses/**`。发布前完成源码/历史/资产敏感信息复核。
+5. 在独立 Windows Sandbox/VM 实测无系统 Node 安装启动、旧版升级、数据保留及安全排空更新。**本机尚未执行干净机器安装验收，不运行安装包，也未触碰现用网关。**
 
-- 产物：裸 exe 在 `%CARGO_TARGET_DIR%\release\ag-relay.exe`（旁边自动落 `node.exe` 与 `resources\gateway\`），安装包在同级 `bundle\`（msi + nsis）。
-- Git Bash 等价写法：`CARGO_TARGET_DIR='D:/zcode项目/ag-relay-build/target' npx tauri build`。
+隔离验收使用独立 Windows 用户、AppData、安装目录和端口，不连接现用上游服务。至少验证：检查更新显示版本/说明但未确认不下载；独立测试签名新版升级；超过排空预算的合成长请求不断流、提示稍后再试且不安装；篡改字节验签失败且不停机；更新前运行/停止两种状态重开后分别恢复；设置和日志保留；UAC 拒绝、取消安装或旧版重开不得误报成功；窗口/托盘退出不能绕过更新事务的安全排空。此人工验收清单不由只读 smoke 自动完成。
+
+手动触发 `.github/workflows/release.yml`：默认只构建并上传 Actions 产物，勾选发布后仍须通过 `release-publish` 审批才创建 GitHub Release；不覆盖已有 tag/Release。也可先本地执行 `node scripts/release.mjs preflight`，通过后运行 `node scripts/release.mjs build --out <新空目录> --notes <UTF-8更新说明文件>`。私钥仅通过当前进程环境/CI secrets 提供，脚本不读 `.env`、不回显密钥。
+
+发布资产包括 NSIS `.exe`、MSI `.msi`、各自 `.sig`、UTF-8 可读 `latest.json` 与 `SHA256SUMS`。清单使用 `windows-x86_64-nsis` / `windows-x86_64-msi`，嵌入签名内容而非签名路径；应用按原安装器选择。Tauri updater 签名与 Windows Authenticode 是两件事：此流程未配置 Authenticode 证书，不能承诺“已验证发布者”或无 SmartScreen 警告。
 
 ## 网关上游更新后如何重打包
 
@@ -74,10 +82,10 @@ $env:CARGO_TARGET_DIR='D:\zcode项目\ag-relay-build\target'; npm install; npm r
 ## 冒烟自检
 
 ```powershell
-npm run smoke
+npm run smoke -- -Artifacts C:\Temp\ag-relay-test-artifacts -Config C:\Temp\ag-relay-test-artifacts\tauri.test.json
 ```
 
-检查构建产物存在、启动后主窗口标题含「AG Relay」并能正常退出。
+只读检查 `latest.json` 与两种安装器签名，**不启动应用、不执行安装、不访问/停止网关**；不传产物目录直接拒绝。正式产物省略 `-Config`，使用仓库生产公钥。此检查不能代替独立虚拟机上的安装/升级验收。发布工具回归测试：`node --test --test-concurrency=1 scripts/release.test.mjs`（临时密钥自动销毁，Cargo `-j 2`）。
 
 ## 目录结构
 
