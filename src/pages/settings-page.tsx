@@ -13,7 +13,8 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Separator } from '@/components/ui/separator'
 import { Switch } from '@/components/ui/switch'
-import { DISPLAY_ENDPOINT, type SettingsPageProps } from '@/lib/types'
+import { type SettingsPageProps } from '@/lib/types'
+import { DEFAULT_CONNECTION, getConnectionSettings, saveConnectionSettings, type ConnectionSettingsView } from '@/lib/connection-settings'
 import {
   FALLBACK_APP_VERSION,
   getAppVersion,
@@ -24,6 +25,52 @@ import {
 export function SettingsPage(props: SettingsPageProps) {
   const id = useId()
   const { onAction } = props
+  const [connection, setConnection] = useState<ConnectionSettingsView | null>(null)
+  const [upstream, setUpstream] = useState(DEFAULT_CONNECTION.upstream)
+  const [port, setPort] = useState(String(DEFAULT_CONNECTION.port))
+  const [connectionBusy, setConnectionBusy] = useState(false)
+  const [connectionError, setConnectionError] = useState('')
+  const [savedNotice, setSavedNotice] = useState(false)
+  const gatewayBusy = props.snapshot.state === 'starting' || props.snapshot.state === 'draining'
+
+  useEffect(() => {
+    let active = true
+    void getConnectionSettings().then(view => {
+      if (!active) return
+      setConnection(view)
+      setUpstream(view.saved.upstream)
+      setPort(String(view.saved.port))
+    }).catch(() => { if (active) setConnectionError('无法读取连接设置。请检查设置文件，或重新填写并保存。') })
+    return () => { active = false }
+  }, [])
+
+  // 重启完成只刷新生效信息，不覆盖尚未保存的编辑内容。
+  useEffect(() => {
+    let active = true
+    if (!gatewayBusy) void getConnectionSettings().then(view => {
+      if (active) setConnection(view)
+    }).catch(() => {})
+    return () => { active = false }
+  }, [gatewayBusy])
+
+  const saveConnection = async () => {
+    setConnectionError('')
+    setSavedNotice(false)
+    if (!/^\d+$/.test(port) || Number(port) < 1 || Number(port) > 65535) {
+      setConnectionError('本机端口须为 1 到 65535 的整数')
+      return
+    }
+    setConnectionBusy(true)
+    try {
+      const view = await saveConnectionSettings({ upstream, port: Number(port) })
+      setConnection(view)
+      setUpstream(view.saved.upstream)
+      setPort(String(view.saved.port))
+      setSavedNotice(true)
+    } catch (error) {
+      setConnectionError(typeof error === 'string' ? error : '保存失败，请检查上游地址和端口，或确认设置目录可写。')
+    } finally { setConnectionBusy(false) }
+  }
 
   // 开机自启：挂载读 get_autostart 实况；切换写 set_autostart_enabled 后回读，往返与注册表一致（失败回弹）。
   const [autostart, setAutostart] = useState(false)
@@ -83,6 +130,36 @@ export function SettingsPage(props: SettingsPageProps) {
         </div>
       </header>
 
+      <Card className="min-w-0 rounded-[24px] ring-border [--card-spacing:1.25rem]">
+        <CardHeader>
+          <CardTitle><h2>网关连接设置</h2></CardTitle>
+          <CardDescription>仅监听本机 127.0.0.1。密钥由客户端提供，本软件不保存账号或密钥。</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <form className="space-y-4" onSubmit={event => { event.preventDefault(); void saveConnection() }}>
+            <div className="space-y-2">
+              <Label htmlFor={`${id}-upstream`}>上游服务地址</Label>
+              <Input id={`${id}-upstream`} type="url" required value={upstream} onChange={event => setUpstream(event.target.value)} disabled={connectionBusy || gatewayBusy} spellCheck={false} autoComplete="off" aria-describedby={`${id}-connection-hint`} />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor={`${id}-port`}>本机监听端口</Label>
+              <Input id={`${id}-port`} inputMode="numeric" required value={port} onChange={event => setPort(event.target.value)} disabled={connectionBusy || gatewayBusy} className="max-w-52" />
+            </div>
+            <p id={`${id}-connection-hint`} className="text-xs leading-5 text-muted-foreground">上游地址支持 HTTP(S) 和路径前缀，不接受账号、查询参数或片段。保存只写入设置，不会自动重启或中断请求。</p>
+            {connectionError && <p role="alert" className="text-sm text-destructive">{connectionError}</p>}
+            <div role="status" className="space-y-2 text-sm">
+              {connection?.restartRequired ? <p>连接设置已保存，需重启网关才生效；网关未运行时将在下次启动时应用。优雅排空最多等待 10 秒，超时不强杀，请稍后重试。</p> : savedNotice && <p>连接设置已保存，将在网关下次启动时使用。</p>}
+              {connection?.restartRequired && <p className="text-xs text-muted-foreground">当前连接地址：{connection.endpoint}；应用后：http://127.0.0.1:{connection.saved.port}</p>}
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <Button type="submit" disabled={connectionBusy || gatewayBusy}>{connectionBusy ? '正在保存…' : '保存连接设置'}</Button>
+              <Button type="button" variant="outline" disabled={connectionBusy || gatewayBusy} onClick={() => { setUpstream(DEFAULT_CONNECTION.upstream); setPort(String(DEFAULT_CONNECTION.port)) }}>填入出厂默认值</Button>
+              {connection?.restartRequired && <Button type="button" variant="outline" disabled={connectionBusy || gatewayBusy || !['running', 'external'].includes(props.snapshot.state)} onClick={() => onAction('restart')}>安全重启并应用</Button>}
+            </div>
+          </form>
+        </CardContent>
+      </Card>
+
       <div className="grid min-w-0 grid-cols-[repeat(auto-fit,minmax(min(100%,20rem),1fr))] items-stretch gap-4">
         <Card className="min-w-0 rounded-[24px] ring-border [--card-spacing:1.25rem]">
           <CardHeader>
@@ -140,7 +217,7 @@ export function SettingsPage(props: SettingsPageProps) {
                 <Input
                   id={`${id}-endpoint`}
                   type="text"
-                  value={DISPLAY_ENDPOINT}
+                  value={props.endpoint}
                   readOnly
                   spellCheck={false}
                   className="min-w-0 flex-1 text-sm tabular-nums"
