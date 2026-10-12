@@ -25,6 +25,9 @@ type InvokeFn = <T>(cmd: string, args?: Record<string, unknown>) => Promise<T>
 interface TauriGlobal {
   core?: { invoke?: InvokeFn }
   app?: { getVersion?: () => Promise<string> }
+  event?: {
+    listen: <T>(name: string, handler: (event: { payload: T }) => void) => Promise<() => void>
+  }
 }
 
 function tauriGlobal(): TauriGlobal | null {
@@ -242,33 +245,54 @@ export interface ActivityPage {
 
 const DEFAULT_PAGE_SIZE = 50
 
-/**
- * 最近活动事件（供总览「最近活动」）：Tauri 内走真实 get_recent_activity（最新在前，最多 50 条），
- * 浏览器回退 MOCK_EVENTS。命令虽为 Result（IO/路径错误返回 Ok([]) 即「暂无活动」），仍兜 promise
- * 失败 → 空列表，绝不以 mock 混入真机。
- */
+/** 最近活动与历史分页使用同一读取服务；失败交给界面展示，不伪装成空列表。 */
 export async function getRecentActivity(): Promise<ActivityEvent[]> {
   if (!isTauri()) return MOCK_EVENTS
-  try {
-    return await invoke<ActivityEvent[]>('get_recent_activity')
-  } catch {
-    return []
-  }
+  return invoke<ActivityEvent[]>('get_recent_activity')
 }
 
-/**
- * 分页查询活动事件（供诊断日志页）：Tauri 内走真实 query_activity_events（级别筛选 + 关键词 + 分页），
- * 浏览器回退对 MOCK_EVENTS 做等价的过滤/分页。失败兜底空页（保留请求的 page/pageSize）。
- */
+/** 分页懒读：保留调用方筛选、页码；Tauri 内不以 mock 或空页掩盖失败。 */
 export async function queryActivityEvents(query: ActivityQuery = {}): Promise<ActivityPage> {
   const page = query.page ?? 0
   const pageSize = query.pageSize ?? DEFAULT_PAGE_SIZE
   if (!isTauri()) return mockQueryActivityEvents(query, page, pageSize)
-  try {
-    return await invoke<ActivityPage>('query_activity_events', { query })
-  } catch {
-    return { events: [], page, pageSize, hasMore: false }
+  return invoke<ActivityPage>('query_activity_events', { query })
+}
+
+export interface ActivityNotice {
+  revision: number
+  status: 'watching' | 'unavailable' | 'error'
+  message: string | null
+}
+
+/** 先建立事件通道再取服务端快照；注销亦涵盖异步注册尚未完成的 StrictMode 卸载。 */
+export function watchActivity(onNotice: (notice: ActivityNotice) => void): () => void {
+  if (!isTauri()) {
+    onNotice({ revision: 0, status: 'unavailable', message: '浏览器演示数据，不代表真实诊断文件。' })
+    return () => {}
   }
+  const subscription = crypto.randomUUID()
+  let disposed = false
+  let received = false
+  let unlisten: (() => void) | undefined
+  const stop = () => { void invoke('stop_activity_watch', { subscription }).catch(() => {}) }
+  void (async () => {
+    const listen = tauriGlobal()?.event?.listen
+    if (!listen) throw new Error('活动事件通知通道不可用，请重试。')
+    unlisten = await listen<ActivityNotice & { subscription: string }>('activity-changed', ({ payload }) => {
+      if (!disposed && payload.subscription === subscription) {
+        received = true
+        onNotice(payload)
+      }
+    })
+    if (disposed) { unlisten(); return }
+    const initial = await invoke<ActivityNotice>('watch_activity_events', { subscription })
+    if (disposed) stop()
+    else if (!received) onNotice(initial) // 通知已到达时，迟到的首响应不能回滚错误/恢复状态。
+  })().catch(error => {
+    if (!disposed) onNotice({ revision: 0, status: 'error', message: String(error) })
+  })
+  return () => { disposed = true; unlisten?.(); stop() }
 }
 
 // 浏览器回退：对 MOCK_EVENTS 按级别 + 关键词过滤，再按 page/pageSize 切片（仅供开发渲染/截图）。

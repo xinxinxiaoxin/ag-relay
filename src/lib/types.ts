@@ -39,10 +39,20 @@ export function formatEventTime(raw: string): string {
   if (sameDay) return `${hh}:${mm}:${pad(date.getSeconds())}`
   return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${hh}:${mm}`
 }
+export interface ActivityFeed {
+  revision: number
+  refreshVersion: number
+  status: 'connecting' | 'watching' | 'unavailable' | 'error'
+  message: string | null
+  error: string | null
+  loading: boolean
+  retry: () => void
+}
 export interface PageProps {
   endpoint: string
   snapshot: GatewaySnapshot
   events: ActivityEvent[]
+  activity: ActivityFeed
   onAction: (action: GatewayAction) => void
   onNavigate: (page: PageId) => void
 }

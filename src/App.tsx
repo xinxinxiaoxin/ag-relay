@@ -31,10 +31,11 @@ import { Toaster } from '@/components/ui/sonner'
 import { OverviewPage } from '@/pages/overview-page'
 import { LogsPage } from '@/pages/logs-page'
 import { SettingsPage } from '@/pages/settings-page'
+import { useActivity } from '@/hooks/use-activity'
 import { ENDPOINT, stateNames } from '@/lib/types'
-import type { ActivityEvent, GatewayAction, GatewayErrorInfo, GatewaySnapshot, PageId } from '@/lib/types'
+import type { GatewayAction, GatewayErrorInfo, GatewaySnapshot, PageId } from '@/lib/types'
 import {
-  getStatus, deriveSnapshot, getRecentActivity, getAppVersion, FALLBACK_APP_VERSION,
+  getStatus, deriveSnapshot, getAppVersion, FALLBACK_APP_VERSION,
   startGateway, stopGateway, restartGateway, openLogsDir, quitApp, STATUS_POLL_MS,
 } from '@/lib/gateway'
 
@@ -131,7 +132,7 @@ export default function App() {
     return () => { active = false }
   }, [])
   const [snapshot, setSnapshot] = useState<GatewaySnapshot>({ state: 'stopped', inflight: null, uptime: null, version: null, owner: 'none' })
-  const [events, setEvents] = useState<ActivityEvent[]>([])
+  const { events, activity } = useActivity(snapshot.owner)
   const [commandOpen, setCommandOpen] = useState(false)
   const [copyFallbackOpen, setCopyFallbackOpen] = useState(false)
   // 破坏性操作二次确认（T8：集中到壳层，使命令面板 / 页面按钮 / 侧栏菜单共用同一组守卫）。
@@ -157,8 +158,7 @@ export default function App() {
   }, [refreshConnection])
 
   // 状态轮询：挂载即首刷，此后每 STATUS_POLL_MS 刷新（8787 上有网关即接管显示）。
-  // 「最近活动」随同一轮询并行拉取（与 getStatus 各自独立更新、互不阻塞）：启动后新产生的
-  // 事件无需重启面板即可点亮；读取层只读、失败兜空，不改变 status 的轮询节奏。
+  // 活动事件由 useActivity 的文件通知独立刷新，不随状态定时轮询。
   useEffect(() => {
     let active = true
     const tick = () => {
@@ -167,9 +167,6 @@ export default function App() {
         setSnapshot(deriveSnapshot(status))
         // 端口冲突态在网关恢复可达后自动消解（其余错误条保留到用户重试或忽略）。
         if (status.available) setGatewayError(prev => (prev?.portConflict ? null : prev))
-      })
-      void getRecentActivity().then(list => {
-        if (active) setEvents(list)
       })
     }
     tick()
@@ -309,7 +306,7 @@ export default function App() {
   // 命令面板动作可用性（与总览页按钮同源）：启动仅「未启动」可用；停止/重启 = 受管运行中 或 外部实例。
   const canStart = view.state === 'stopped'
   const canStopOrRestart = (view.state === 'running' && view.owner === 'window') || view.state === 'external'
-  const common = { endpoint, snapshot: view, events, onAction: act, onNavigate: navigate }
+  const common = { endpoint, activity, snapshot: view, events, onAction: act, onNavigate: navigate }
   return (
     <TooltipProvider delayDuration={200}>
       <SidebarProvider defaultOpen style={{ '--sidebar-width': '15rem', '--sidebar-width-icon': '4rem' } as React.CSSProperties}>
