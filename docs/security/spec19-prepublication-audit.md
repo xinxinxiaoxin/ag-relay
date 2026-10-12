@@ -67,3 +67,25 @@
 - 未覆盖：不可达对象与 reflog、无法取得的远端历史、任意加密/混淆内容、前端压缩资源的语义逆向、在线 Authenticode 信任链、真实安装运行行为。
 - 未对随包二进制（`ag-relay.exe`、`node.exe`）做深度逆向审计——这一点本就写在规格的 Out of Scope 中。
 - 「未发现」不等于「不存在」；本报告只声明在上述范围内未发现高可信泄露。
+
+## 8. 最终增量复核（集成 tip `0585425`，本轮补充）
+
+对最终交付状态做了第二轮增量复核，基线为上一轮的 `e92e8d4`（33 个提交之后，共 41 个提交、70 个文件）。
+
+**源码与历史增量**：全跟踪树、全 refs 可达的 775 个 blob、以及 108 个新增 blob 均已扫描。
+
+- 私钥材料：**0**（RSA/EC/OPENSSH/DSA/PGP 及加密变体全为 0）。
+- 本机用户路径：当前树无真实用户路径；4 处命中全部是合成占位（`\Users\Administrator\…`、`\Users\x\…`），构建账户名在跟踪文本中零命中。历史增量里唯一一处是本轮某个中间态 README 的占位路径，tip 已不含该内容，历史未改写。
+- 凭据类正则命中均为误报或合成：Windows 清单的公开 `publicKeyToken`、测试结构体的中文测试值、`node.exe` 内官方二进制自带的字符串，以及显式标注的合成测试凭据。
+- 配置 fail-closed：updater 的 `pubkey` 与 `endpoints` 为空，未提交任何生产公钥/端点；CI 只用 `secrets.` 上下文；测试签名样本注明私钥已销毁。
+
+**最终 TEST-ONLY 安装包**（`installers-0.3.0-test-final`）：
+
+- `SHA256SUMS` 逐项核对通过；两份 `.sig`、`latest.json` 与 `TEST-ONLY-NOT-FOR-RELEASE` 齐备；更新端点为测试用 `example.invalid`，公钥为测试公钥。
+- 许可材料：MSI 解出 436 个文件，其中 `licenses/` **429 份，与仓库当前材料逐字节一致（0 处不符）**；NSIS 固实流解包后 429 份材料**全部存在**。
+- **路径重映射生效**：包内 `ag-relay.exe` 中本机构建前缀（`C:\Users\…`、`.cargo`、`.rustup`、工作树路径）由上一轮同类产物的约 **660 处降为 0**；仅剩的中性虚拟前缀（如 `/cargo`）是重映射后的产物，不泄露主机信息。
+- 签名私钥：两份容器与包内二进制均无私钥材料；外层 “secret key” 类命中全部可归因为公开的 minisign 签名注释标签。
+
+**可见性现状**：复核结束时 `xinxinxiaoxin/ag-relay` 与 `xinxinxiaoxin/relay-retry-proxy` **均为私有，本轮未改动**。
+
+**本轮未覆盖**：未重新对两份 `.sig` 做密码学验签（构建时 `release.mjs verify` 已验，本轮只做格式与解码确认）；不可达对象与 reflog、远端历史、在线 Authenticode 信任链、真实安装运行行为、前端压缩资源语义逆向、随包二进制深度逆向均不在覆盖内（后者本就属于规格 Out of Scope）。
