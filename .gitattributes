@@ -5,3 +5,6 @@ src-tauri/resources/gateway/*.bat -text
 *.exe binary
 # 第三方许可原文与清单指纹一致，保留上游换行符、空白和全部字节
 licenses/** -text -whitespace
+# 第三方材料不计入 GitHub 语言统计：Rust 标准库版权 HTML 等是随包声明，不是本项目源码
+licenses/** linguist-vendored
+docs/assets/** linguist-documentation
