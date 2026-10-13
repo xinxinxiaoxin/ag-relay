@@ -45,7 +45,9 @@ node scripts/release.mjs test-build --out C:\Temp\ag-relay-test-artifacts
 
 ### 正式发布门槛
 
-当前状态（2026-10-12）：生产签名密钥已生成并保存在仓库之外，公钥与更新端点已提交，`v0.3.0`/`v0.3.1` 已按本文流程发布，仓库已公开，安装、启动、网关托管、连接设置持久化与实时活动刷新已在本机实测通过。**仍待完成的是独立 Windows Sandbox/VM 中的干净机器安装与升级验收**，以及可选的 Authenticode 代码签名（见本小节末）。
+逐步操作手册见 **[发布一个版本的完整流程](docs/release-runbook.md)**（改版本号、刷许可指纹、预检、打 tag、云端构建、发布审批各一步）；本小节说明门槛本身。
+
+当前状态（2026-10-13）：生产签名密钥已生成并保存在仓库之外，公钥与更新端点已提交，`v0.3.0`／`v0.3.1`／`v0.3.2` 已按本文流程发布（v0.3.2 起由 GitHub Actions 用仓库 secret 完成签名构建），仓库已公开。安装、启动、网关托管、连接设置持久化、实时活动刷新与应用内升级已在本机实测通过。**仍待完成的是独立 Windows Sandbox/VM 中的干净机器安装与升级验收**，以及可选的 Authenticode 代码签名（见本小节末）。
 
 发布前逐项确认：
 
@@ -74,7 +76,27 @@ node scripts/release.mjs test-build --out C:\Temp\ag-relay-test-artifacts
 
 以下按时间倒序记录每次实际构建的快照，用于追溯「哪个提交、哪些核心脚本、产出哪个成品」。**没有实际重打包就不新增记录，也不更新日期来伪装新产物。**
 
-### v0.3.1（当前）
+注：四个 `.mjs` 已由 `.gitattributes` 固定为不做换行符转换，因此任何机器上哈希一致；`gateway-config.bat` 没有固定，仓库内容为 LF、Windows 检出为 CRLF，两者哈希不同。v0.2.0/v0.3.1 条目记录的是当时**磁盘检出**（CRLF）的值 `102865c8…`，从 v0.3.2 起统一记录**仓库内容**的值 `9a8a483e…`。
+
+### v0.3.2（当前）
+
+| 项 | 值 |
+| --- | --- |
+| 打包日期 | 2026-10-13 12:56（UTC+8） |
+| 本仓构建提交 | `5e76d98`（tag `v0.3.2`：自绘窗口标题栏、品牌图标、托盘图标独立、文档校订） |
+| 构建方式 | GitHub Actions，用仓库 `release-signing` 环境的签名 secret（非维护者本机） |
+| `relay-retry-proxy.mjs` sha256 | `9f2c196d2a2077fda192e41bb903222f3f8d87bb8d5c3b571f6159db01a299b8` |
+| `relay-supervisor.mjs` sha256 | `f2f030b46999f84afc77f7f92643075c1d1f1ddf7ad3c327fbd92f5593dff77c` |
+| `relay-start-check.mjs` sha256 | `bb54cc7255b4f570ba1bdcfda255f19f0ca0a70fa6d028d0ed4e44f8146037c4` |
+| `bounded-file-log.mjs` sha256 | `3841b877ce76e6ff37497bfbcd65e3dd4f478442dc7fff9eaf4b39612b25c205` |
+| `gateway-config.bat` sha256 | `9a8a483ec40f34fc59ef34284304c938f4a00b6813aa7486c2df501c7caf80ab` |
+| NSIS `ag-relay_0.3.2_x64-setup.exe` sha256 | `1653320b4144a457e1a454f1ecb44f2301380f0b28739482b92859f639d5e07d` |
+| MSI `ag-relay_0.3.2_x64_zh-CN.msi` sha256 | `2879333d642a5b84819751f6fae2971cd8a2f8ea4067e7d628c13eb4fbc7117b` |
+| Release | [v0.3.2](https://github.com/xinxinxiaoxin/ag-relay/releases/tag/v0.3.2)（NSIS + MSI + 各自 `.sig` + `latest.json` + `SHA256SUMS`） |
+
+四个 `.mjs` 与 v0.3.0/v0.3.1 完全一致——本次只改窗口外观与文档，网关核心未动。
+
+### v0.3.1（历史）
 
 | 项 | 值 |
 | --- | --- |
