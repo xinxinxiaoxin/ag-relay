@@ -1,15 +1,98 @@
-//! 应用退出来源日志。窗口/托盘/面板三条路径都经更新互斥模块，安全排空后才允许退出。
-//! 排空失败保留窗口与受管句柄；Exit 事件不再执行第二次停机。
+//! 关闭选择与应用退出接线。关窗先保留请求供面板选择，不停止网关。
+//! 真正退出统一经过更新互斥模块；排空失败保留窗口与受管句柄。
 
 use crate::bounded_log::{append_record, LogPolicy};
+use crate::exit_requests::{CloseRequests, CloseWindow, ExitRequests};
 
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::gateway_control::logs_dir;
 use crate::timeutil::{civil_from_days, now_unix_secs};
 
 /// 壳侧退出来源日志文件名（与网关诊断日志同目录，便于一并查看）。
 pub const EXIT_LOG_FILE: &str = "shell-exit.log";
+pub const WINDOW_CLOSE_REQUESTED: &str = "window-close-requested";
+pub const APP_EXIT_FAILED: &str = "app-exit-failed";
+
+#[derive(Default)]
+pub struct AppExitState {
+    close: CloseRequests,
+    pub(crate) exits: ExitRequests,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloseRequest {
+    pub id: u64,
+    pub tray_available: bool,
+}
+
+#[derive(Debug, Clone, Copy, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CloseAction {
+    Cancel,
+    Tray,
+    Quit,
+}
+
+struct MainWindow<'a>(&'a AppHandle);
+
+impl CloseWindow for MainWindow<'_> {
+    fn tray_available(&self) -> bool {
+        self.0.tray_by_id(crate::tray::TRAY_ID).is_some()
+    }
+
+    fn hide(&self) -> Result<(), String> {
+        self.0
+            .get_webview_window("main")
+            .ok_or("主窗口不可用，未隐藏面板。")?
+            .hide()
+            .map_err(|_| "无法隐藏面板，请重试或选择取消。".into())
+    }
+}
+
+fn close_request(app: &AppHandle, id: u64) -> CloseRequest {
+    CloseRequest {
+        id,
+        tray_available: MainWindow(app).tray_available(),
+    }
+}
+
+/// CloseRequested 已 prevent_close 后调用；先保存再通知，监听尚未建立也不丢请求。
+pub fn request_window_close(app: &AppHandle) {
+    let (id, is_new) = app.state::<AppExitState>().close.request();
+    crate::tray::show_main_window(app);
+    if is_new {
+        let _ = app.emit(WINDOW_CLOSE_REQUESTED, close_request(app, id));
+    }
+}
+
+#[tauri::command]
+pub fn get_close_request(app: AppHandle) -> Option<CloseRequest> {
+    app.state::<AppExitState>()
+        .close
+        .get()
+        .map(|id| close_request(&app, id))
+}
+
+#[tauri::command]
+pub async fn respond_to_close(
+    app: AppHandle,
+    request_id: u64,
+    action: CloseAction,
+) -> Result<(), String> {
+    let state = app.state::<AppExitState>();
+    match action {
+        CloseAction::Cancel => state.close.cancel(request_id),
+        CloseAction::Tray => state.close.send_to_tray(request_id, &MainWindow(&app)),
+        CloseAction::Quit => {
+            state
+                .close
+                .quit(request_id, || request_exit(&app, ExitSource::WindowClose))
+                .await
+        }
+    }
+}
 
 /// 退出来源白名单：日志只允许出现这三个枚举值，不写任何其他内容。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,21 +201,83 @@ pub fn append_shell_record_in(app_data: &std::path::Path, line: &str) -> std::io
     )
 }
 
-/// 统一退出入口：先记录来源，由更新/退出互斥模块排空，安全停机成功才 app.exit。
-pub fn request_exit(app: &AppHandle, source: ExitSource) {
+/// 统一退出入口：同步抢占退出资格，调用方必须等待返回值，不能把排空失败当成成功。
+pub fn request_exit(
+    app: &AppHandle,
+    source: ExitSource,
+) -> impl std::future::Future<Output = Result<(), String>> + Send + 'static {
+    let exit = crate::update_commands::request_exit(app);
     log_exit_source(app, source);
-    crate::update_commands::request_exit(app);
+    exit
 }
 
-/// 面板「退出」按钮命令（与 UI 同一命令路径）；行为与点 × 完全一致。
+#[derive(Clone, serde::Serialize)]
+struct ExitFailure {
+    detail: String,
+}
+
+/// 系统与托盘回调不能 await；先同步抢占，再等待同一结果并把失败呈现在主窗口。
+/// None 仅供没有可审计用户来源的 RunEvent::ExitRequested 使用。
+pub fn request_exit_from_event(app: &AppHandle, source: Option<ExitSource>) {
+    let exit = crate::update_commands::request_exit(app);
+    if let Some(source) = source {
+        log_exit_source(app, source);
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(detail) = exit.await {
+            crate::tray::show_main_window(&app);
+            let _ = app.emit(APP_EXIT_FAILED, ExitFailure { detail });
+        }
+    });
+}
+
+/// 面板「退出」命令等待真实安全停机结果；不同于关窗，不再次询问关闭方式。
 #[tauri::command]
-pub fn quit_app(app: AppHandle) {
-    request_exit(&app, ExitSource::PanelButton);
+pub async fn quit_app(app: AppHandle) -> Result<(), String> {
+    request_exit(&app, ExitSource::PanelButton).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn 关闭请求与退出失败事件字段遵循前端契约() {
+        assert_eq!(
+            serde_json::to_value(CloseRequest {
+                id: 7,
+                tray_available: true
+            })
+            .unwrap(),
+            serde_json::json!({ "id": 7, "trayAvailable": true })
+        );
+        assert_eq!(
+            serde_json::to_value(ExitFailure {
+                detail: "排空超时".into()
+            })
+            .unwrap(),
+            serde_json::json!({ "detail": "排空超时" })
+        );
+    }
+
+    #[test]
+    fn 关闭选择只接受约定的三个小写动作() {
+        assert!(matches!(
+            serde_json::from_str::<CloseAction>("\"cancel\""),
+            Ok(CloseAction::Cancel)
+        ));
+        assert!(matches!(
+            serde_json::from_str::<CloseAction>("\"tray\""),
+            Ok(CloseAction::Tray)
+        ));
+        assert!(matches!(
+            serde_json::from_str::<CloseAction>("\"quit\""),
+            Ok(CloseAction::Quit)
+        ));
+        assert!(serde_json::from_str::<CloseAction>("\"Quit\"").is_err());
+        assert!(serde_json::from_str::<CloseAction>("\"force\"").is_err());
+    }
 
     #[test]
     fn 壳侧退出日志_应用入口有界且重开后保留此前记录() {

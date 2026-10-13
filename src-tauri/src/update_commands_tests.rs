@@ -137,10 +137,31 @@ fn 插件真实下载_完整签名可读_篡改与版本冒充在完成回调后
             .unwrap()
             .unwrap();
         if version == "0.3.1" && !tampered {
+            let downloaded = std::sync::atomic::AtomicUsize::new(0);
+            let announced_total = std::sync::atomic::AtomicU64::new(0);
+            let finished = AtomicBool::new(false);
             assert_eq!(
-                tauri::async_runtime::block_on(provider.download(&candidate)).unwrap(),
+                tauri::async_runtime::block_on(provider.download(
+                    &candidate,
+                    |event| match event {
+                        DownloadEvent::Chunk { len, total } => {
+                            downloaded.fetch_add(len, Ordering::Relaxed);
+                            announced_total.store(total.unwrap(), Ordering::Relaxed);
+                        }
+                        DownloadEvent::Finished => {
+                            finished.store(true, Ordering::Release);
+                        }
+                    }
+                ))
+                .unwrap(),
                 payload
             );
+            assert_eq!(downloaded.load(Ordering::Relaxed), payload.len());
+            assert_eq!(
+                announced_total.load(Ordering::Relaxed),
+                payload.len() as u64
+            );
+            assert!(finished.load(Ordering::Acquire));
         } else {
             let finished = AtomicBool::new(false);
             assert!(tauri::async_runtime::block_on(candidate.download(
@@ -164,8 +185,12 @@ fn 插件真实下载_完整签名可读_篡改与版本冒充在完成回调后
                         candidate: self.candidate.clone(),
                     }))
                 }
-                async fn download(&self, candidate: &Update) -> Result<Vec<u8>, String> {
-                    self.provider.download(candidate).await
+                async fn download(
+                    &self,
+                    candidate: &Update,
+                    progress: impl Fn(DownloadEvent) + Send + Sync,
+                ) -> Result<Vec<u8>, String> {
+                    self.provider.download(candidate, progress).await
                 }
                 fn install(&self, _: &Update, _: &[u8]) -> Result<(), String> {
                     panic!("测试绝不安装")

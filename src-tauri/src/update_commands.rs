@@ -5,7 +5,7 @@ use tauri_plugin_updater::{Update, UpdaterExt};
 
 use crate::{
     app_update::{
-        BootPlan, GatewayHost, GatewayIdentity, Release, ShutdownFailure, UpdateGateway,
+        BootPlan, DownloadEvent, GatewayHost, GatewayIdentity, Release, ShutdownFailure, UpdateGateway,
         UpdateProvider, UpdateService, UpdateView,
     },
     gateway_commands::with_connection,
@@ -52,10 +52,17 @@ impl<R: tauri::Runtime> UpdateProvider for InstalledRelease<R> {
             })
             .map_err(|_| "无法检查更新，请检查网络或稍后重试。".into())
     }
-    async fn download(&self, candidate: &Update) -> Result<Vec<u8>, String> {
+    async fn download(
+        &self,
+        candidate: &Update,
+        progress: impl Fn(DownloadEvent) + Send + Sync,
+    ) -> Result<Vec<u8>, String> {
         // finish 回调在验签前发生！不得在回调中排空，只有这个 await 成功才返回字节。
         candidate
-            .download(|_, _| {}, || {})
+            .download(
+                |len, total| progress(DownloadEvent::Chunk { len, total }),
+                || progress(DownloadEvent::Finished),
+            )
             .await
             .map_err(|_| "更新下载或签名校验失败。".into())
     }
@@ -182,17 +189,43 @@ pub fn exit_authorized(app: &AppHandle) -> bool {
         .is_some_and(|state| state.exit_authorized())
 }
 
-/// 关闭窗口、托盘和面板退出均先走此入口；拒绝时保持窗口与进程句柄，不排队重试。
-pub fn request_exit(app: &AppHandle) {
-    let app = app.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let Some(updates) = app.try_state::<Updates>() else {
-            return;
-        };
-        if updates.prepare_exit(&ConnectedGateway(app.clone())).is_ok() {
-            app.exit(0);
+/// 所有真正退出复用此等待型入口。同步抢占后才排入阻塞线程池，拒绝的请求不会稍后重试。
+pub fn request_exit(
+    app: &AppHandle,
+) -> impl std::future::Future<Output = Result<(), String>> + Send + 'static {
+    let admitted = (|| {
+        let state = app
+            .try_state::<crate::app_exit::AppExitState>()
+            .ok_or("退出模块尚未就绪，请稍后重试。")?;
+        let attempt = state.exits.try_begin()?;
+        let updates = app
+            .try_state::<Updates>()
+            .ok_or("更新模块尚未就绪，暂不能安全退出。")?;
+        if updates.controls_blocked() {
+            return Err("更新或退出正在进行，请等待当前操作完成。".to_string());
         }
-    });
+        Ok(attempt)
+    })();
+    let app = app.clone();
+    async move {
+        let attempt = admitted?;
+        tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+            // 资格由实际排空任务持有，等待命令被取消也不能提前放行下一次退出。
+            let _attempt = attempt;
+            let updates = app
+                .try_state::<Updates>()
+                .ok_or("更新模块尚未就绪，暂不能安全退出。")?;
+            // 仍以 UpdateService 的原子互斥门裁决与更新之间的竞态，不依赖上面的快照。
+            updates.prepare_exit(&ConnectedGateway(app.clone()))?;
+            if !updates.exit_authorized() {
+                return Err("退出未获安全授权，已保留当前窗口。".into());
+            }
+            app.exit(0);
+            Ok(())
+        })
+        .await
+        .map_err(|_| "退出任务失败，已保留当前窗口，请重试。".to_string())?
+    }
 }
 
 #[tauri::command]

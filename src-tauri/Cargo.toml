@@ -41,3 +41,6 @@ minisign-verify = "0.3"
 
 [profile.release]
 strip = true
+lto = true
+codegen-units = 1
+opt-level = "z"

@@ -1,8 +1,8 @@
 //! 系统托盘（T5）：常驻图标 + 左键单击显示/隐藏面板 + 右键菜单「打开面板 / 安全重启 / 退出」。
 //! 菜单 id 与动作的映射是纯函数（单测锁定，构建菜单与分发共用同一真值）；
 //! 「安全重启」直接调用 T4 命令层 restart_gateway 同一函数（与面板按钮完全同一代码路径）；
-//! 「退出」走 app_exit::request_exit（TrayMenu）——与点 × / 面板退出殊途同归，
-//! 都汇入 RunEvent::Exit 的优雅停网关钩子。不做「关窗最小化到托盘」。
+//! 「退出」走统一等待型安全退出（TrayMenu），失败显示面板并通知用户。
+//! 关窗选择「后台运行」只隐藏面板，托盘与受管网关继续保留。
 
 use tauri::{
     menu::{Menu, MenuItem},
@@ -79,7 +79,7 @@ pub fn handle_tray_action(app: &AppHandle, action: TrayAction) {
                 let _result = crate::gateway_commands::restart_gateway(app).await;
             });
         }
-        TrayAction::Quit => app_exit::request_exit(app, ExitSource::TrayMenu),
+        TrayAction::Quit => app_exit::request_exit_from_event(app, Some(ExitSource::TrayMenu)),
     }
 }
 
@@ -141,11 +141,20 @@ mod tests {
 
     #[test]
     fn 每个菜单id都有动作映射_分发不丢项() {
-        assert_eq!(resolve_tray_action(MENU_OPEN_PANEL), Some(TrayAction::OpenPanel));
-        assert_eq!(resolve_tray_action(MENU_RESTART_GATEWAY), Some(TrayAction::RestartGateway));
+        assert_eq!(
+            resolve_tray_action(MENU_OPEN_PANEL),
+            Some(TrayAction::OpenPanel)
+        );
+        assert_eq!(
+            resolve_tray_action(MENU_RESTART_GATEWAY),
+            Some(TrayAction::RestartGateway)
+        );
         assert_eq!(resolve_tray_action(MENU_QUIT), Some(TrayAction::Quit));
         for (id, _) in tray_menu_items() {
-            assert!(resolve_tray_action(id).is_some(), "菜单项 {id} 缺少动作映射");
+            assert!(
+                resolve_tray_action(id).is_some(),
+                "菜单项 {id} 缺少动作映射"
+            );
         }
     }
 

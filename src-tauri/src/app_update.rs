@@ -39,6 +39,11 @@ pub struct Release<C> {
     pub notes: String,
 }
 
+pub enum DownloadEvent {
+    Chunk { len: usize, total: Option<u64> },
+    Finished,
+}
+
 /// 发布端点/签名下载/安装器交接的 adapter。download 只能在完整验签成功后返回字节。
 pub trait UpdateProvider {
     type Candidate: Clone + Send + Sync;
@@ -48,6 +53,7 @@ pub trait UpdateProvider {
     fn download(
         &self,
         candidate: &Self::Candidate,
+        progress: impl Fn(DownloadEvent) + Send + Sync,
     ) -> impl Future<Output = Result<Vec<u8>, String>> + Send;
     fn install(&self, candidate: &Self::Candidate, bytes: &[u8]) -> Result<(), String>;
 }
@@ -60,6 +66,7 @@ pub enum UpdatePhase {
     Checking,
     Available,
     Downloading,
+    Verifying,
     Verified,
     Quiescing,
     InstallPending,
@@ -76,12 +83,20 @@ pub struct ReleaseInfo {
     pub notes: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DownloadProgress {
+    pub downloaded_bytes: u64,
+    pub total_bytes: Option<u64>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateView {
     pub phase: UpdatePhase,
     pub current_version: String,
     pub release: Option<ReleaseInfo>,
+    pub download: Option<DownloadProgress>,
     pub detail: String,
     pub recovery: Option<String>,
 }
@@ -164,6 +179,7 @@ impl<C: Clone + Send + Sync> UpdateService<C> {
                     },
                     current_version,
                     release: None,
+                    download: None,
                     detail: if enabled {
                         "尚未检查更新。"
                     } else {
@@ -340,11 +356,33 @@ impl<C: Clone + Send + Sync> UpdateService<C> {
             )
         };
         let original = host.with_gateway(|g| g.identity())??;
-        self.set_phase(
-            UpdatePhase::Downloading,
-            "正在下载并校验发布方签名；网关保持原状。",
-        );
-        let bytes = match provider.download(&candidate).await {
+        {
+            let mut state = self.state.lock().unwrap();
+            state.view.phase = UpdatePhase::Downloading;
+            state.view.detail = "正在下载更新包；网关保持原状。".into();
+            state.view.download = Some(DownloadProgress {
+                downloaded_bytes: 0,
+                total_bytes: None,
+            });
+        }
+        let bytes = match provider
+            .download(&candidate, |event| {
+                let mut state = self.state.lock().unwrap();
+                match event {
+                    DownloadEvent::Chunk { len, total } => {
+                        let progress = state.view.download.as_mut().unwrap();
+                        progress.downloaded_bytes += len as u64;
+                        progress.total_bytes =
+                            total.filter(|bytes| *bytes > 0 && *bytes >= progress.downloaded_bytes);
+                    }
+                    DownloadEvent::Finished => {
+                        state.view.phase = UpdatePhase::Verifying;
+                        state.view.detail = "下载完成，正在校验更新包签名；网关保持原状。".into();
+                    }
+                }
+            })
+            .await
+        {
             Ok(bytes) => bytes,
             Err(_) => {
                 let view = self.set_phase(
@@ -450,6 +488,7 @@ impl<C: Clone + Send + Sync> UpdateService<C> {
             let mut state = self.state.lock().unwrap();
             state.candidate = None;
             state.view.release = None;
+            state.view.download = None;
         }
         let result = match provider.check().await {
             Ok(result) => result,
@@ -495,7 +534,11 @@ mod tests {
                 notes: "安全更新说明".into(),
             }))
         }
-        async fn download(&self, _: &()) -> Result<Vec<u8>, String> {
+        async fn download(
+            &self,
+            _: &(),
+            _: impl Fn(DownloadEvent) + Send + Sync,
+        ) -> Result<Vec<u8>, String> {
             self.downloads.fetch_add(1, Ordering::SeqCst);
             Ok(vec![1, 2, 3])
         }
@@ -533,6 +576,139 @@ mod tests {
     }
 
     #[test]
+    fn 下载进度来自分块字节_下载完成只进入验签且不停止网关() {
+        struct Observed<'a> {
+            updates: &'a UpdateService<()>,
+            host: &'a Sandbox,
+        }
+        impl UpdateProvider for Observed<'_> {
+            type Candidate = ();
+            async fn check(&self) -> Result<Option<Release<()>>, String> {
+                ReleaseServer {
+                    downloads: AtomicUsize::new(0),
+                }
+                .check()
+                .await
+            }
+            async fn download(
+                &self,
+                _: &(),
+                progress: impl Fn(DownloadEvent) + Send + Sync,
+            ) -> Result<Vec<u8>, String> {
+                assert_eq!(self.updates.view().download.unwrap().downloaded_bytes, 0);
+                progress(DownloadEvent::Chunk {
+                    len: 25,
+                    total: Some(100),
+                });
+                progress(DownloadEvent::Chunk {
+                    len: 15,
+                    total: Some(100),
+                });
+                let view = self.updates.view();
+                assert_eq!(view.phase, UpdatePhase::Downloading);
+                assert_eq!(
+                    view.download,
+                    Some(DownloadProgress {
+                        downloaded_bytes: 40,
+                        total_bytes: Some(100)
+                    })
+                );
+                progress(DownloadEvent::Chunk {
+                    len: 60,
+                    total: Some(100),
+                });
+                progress(DownloadEvent::Finished);
+                let view = self.updates.view();
+                assert_eq!(view.phase, UpdatePhase::Verifying);
+                assert_eq!(view.download.unwrap().downloaded_bytes, 100);
+                assert!(self.host.0.lock().unwrap().running);
+                Err("隔离测试：验签失败".into())
+            }
+            fn install(&self, _: &(), _: &[u8]) -> Result<(), String> {
+                panic!("验签失败不能安装")
+            }
+        }
+        let updates = UpdateService::new(true, "0.3.3".into());
+        let host = Sandbox(Mutex::new(SandboxGateway { running: true }));
+        let provider = Observed {
+            updates: &updates,
+            host: &host,
+        };
+        let view = tauri::async_runtime::block_on(updates.check(&provider)).unwrap();
+        assert!(tauri::async_runtime::block_on(updates.confirm(
+            &provider,
+            &host,
+            &view.release.unwrap().id
+        ))
+        .is_err());
+        assert_eq!(updates.view().phase, UpdatePhase::Failed);
+        assert!(host.0.lock().unwrap().running);
+    }
+
+    #[test]
+    fn 未知与不可信总量不提供比例_重查和重试清空旧进度() {
+        struct Unknown<'a> {
+            updates: &'a UpdateService<()>,
+            total: Option<u64>,
+        }
+        impl UpdateProvider for Unknown<'_> {
+            type Candidate = ();
+            async fn check(&self) -> Result<Option<Release<()>>, String> {
+                ReleaseServer {
+                    downloads: AtomicUsize::new(0),
+                }
+                .check()
+                .await
+            }
+            async fn download(
+                &self,
+                _: &(),
+                progress: impl Fn(DownloadEvent) + Send + Sync,
+            ) -> Result<Vec<u8>, String> {
+                assert_eq!(
+                    self.updates.view().download,
+                    Some(DownloadProgress {
+                        downloaded_bytes: 0,
+                        total_bytes: None
+                    })
+                );
+                progress(DownloadEvent::Chunk {
+                    len: 3,
+                    total: self.total,
+                });
+                assert_eq!(
+                    self.updates.view().download,
+                    Some(DownloadProgress {
+                        downloaded_bytes: 3,
+                        total_bytes: None
+                    })
+                );
+                Err("隔离测试：下载中断".into())
+            }
+            fn install(&self, _: &(), _: &[u8]) -> Result<(), String> {
+                panic!("下载中断不能安装")
+            }
+        }
+        let updates = UpdateService::new(true, "0.3.3".into());
+        let host = Sandbox(Mutex::new(SandboxGateway { running: true }));
+        for total in [None, Some(0), Some(2)] {
+            let provider = Unknown {
+                updates: &updates,
+                total,
+            };
+            let view = tauri::async_runtime::block_on(updates.check(&provider)).unwrap();
+            assert!(view.download.is_none());
+            assert!(tauri::async_runtime::block_on(updates.confirm(
+                &provider,
+                &host,
+                &view.release.unwrap().id
+            ))
+            .is_err());
+            assert!(host.0.lock().unwrap().running);
+        }
+    }
+
+    #[test]
     fn 用户确认后完整验签再停机_安装前持久化恢复运行态() {
         struct Installer;
         impl UpdateProvider for Installer {
@@ -544,7 +720,11 @@ mod tests {
                 .check()
                 .await
             }
-            async fn download(&self, _: &()) -> Result<Vec<u8>, String> {
+            async fn download(
+                &self,
+                _: &(),
+                _: impl Fn(DownloadEvent) + Send + Sync,
+            ) -> Result<Vec<u8>, String> {
                 Ok(vec![1, 2, 3])
             }
             fn install(&self, _: &(), bytes: &[u8]) -> Result<(), String> {
@@ -593,7 +773,11 @@ mod tests {
                 .check()
                 .await
             }
-            async fn download(&self, _: &()) -> Result<Vec<u8>, String> {
+            async fn download(
+                &self,
+                _: &(),
+                _: impl Fn(DownloadEvent) + Send + Sync,
+            ) -> Result<Vec<u8>, String> {
                 // 与插件时序一致：下载完成通知并不代表验签成功。
                 Err("签名校验失败".into())
             }
@@ -670,7 +854,11 @@ mod tests {
                 .check()
                 .await
             }
-            async fn download(&self, _: &()) -> Result<Vec<u8>, String> {
+            async fn download(
+                &self,
+                _: &(),
+                _: impl Fn(DownloadEvent) + Send + Sync,
+            ) -> Result<Vec<u8>, String> {
                 Ok(vec![1, 2, 3])
             }
             fn install(&self, _: &(), _: &[u8]) -> Result<(), String> {
@@ -790,7 +978,11 @@ mod tests {
                 .check()
                 .await
             }
-            async fn download(&self, _: &()) -> Result<Vec<u8>, String> {
+            async fn download(
+                &self,
+                _: &(),
+                _: impl Fn(DownloadEvent) + Send + Sync,
+            ) -> Result<Vec<u8>, String> {
                 self.started.send(()).unwrap();
                 self.resume
                     .lock()
@@ -848,7 +1040,11 @@ mod tests {
             .check()
             .await
         }
-        async fn download(&self, _: &()) -> Result<Vec<u8>, String> {
+        async fn download(
+            &self,
+            _: &(),
+            _: impl Fn(DownloadEvent) + Send + Sync,
+        ) -> Result<Vec<u8>, String> {
             Ok(vec![1, 2, 3])
         }
         fn install(&self, _: &(), _: &[u8]) -> Result<(), String> {
@@ -964,7 +1160,11 @@ mod tests {
                     Ok(None)
                 }
             }
-            async fn download(&self, _: &()) -> Result<Vec<u8>, String> {
+            async fn download(
+                &self,
+                _: &(),
+                _: impl Fn(DownloadEvent) + Send + Sync,
+            ) -> Result<Vec<u8>, String> {
                 panic!("检查不可下载")
             }
             fn install(&self, _: &(), _: &[u8]) -> Result<(), String> {

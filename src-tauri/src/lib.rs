@@ -1,6 +1,7 @@
 use tauri::Manager;
 
 pub mod app_exit;
+mod exit_requests;
 pub mod app_update;
 mod update_commands;
 mod update_journal;
@@ -30,6 +31,7 @@ pub fn run() {
         .manage(gateway_commands::GatewayState::default())
         .manage(autostart_commands::AutostartUiState::default())
         .manage(gateway_activity::ActivityState::default())
+        .manage(app_exit::AppExitState::default())
         .setup(|app| {
             // T6：应用启动即幂等编排开机自启（建立/改写自启项 + 清理确认属于本网关的旧快捷方式）
             autostart_commands::sync_on_launch(app.handle());
@@ -45,9 +47,9 @@ pub fn run() {
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 if window.label() == "main" {
-                    // 必须在窗口销毁前拒绝默认退出，否则排空失败时已无面板可供重试。
+                    // 保留窗口与受管句柄，先让用户选择取消、隐藏到托盘或安全退出。
                     api.prevent_close();
-                    app_exit::request_exit(window.app_handle(), app_exit::ExitSource::WindowClose);
+                    app_exit::request_window_close(window.app_handle());
                 }
             }
         })
@@ -64,6 +66,8 @@ pub fn run() {
             gateway_commands::open_logs_dir,
             autostart_commands::get_autostart,
             autostart_commands::set_autostart_enabled,
+            app_exit::get_close_request,
+            app_exit::respond_to_close,
             app_exit::quit_app,
             // T5：诊断读取（只读消费者）——取最近活动事件 + 分页查询（级别筛选 + 搜索）
             gateway_diagnostics_reader::get_recent_activity,
@@ -77,7 +81,7 @@ pub fn run() {
             if let tauri::RunEvent::ExitRequested { api, .. } = event {
                 if !update_commands::exit_authorized(app) {
                     api.prevent_exit();
-                    update_commands::request_exit(app);
+                    app_exit::request_exit_from_event(app, None);
                 }
             }
             // Exit 不再二次扫描端口/强杀：安全停机已在授权退出前完成，不能误停新外部实例。
