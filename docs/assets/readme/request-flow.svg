@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100%" viewBox="0 0 1000 300" preserveAspectRatio="xMidYMid meet" role="img" aria-labelledby="rf-title rf-desc" xml:lang="zh-CN" style="display:block;max-width:1000px;height:auto">
+  <title id="rf-title">客户端照常工作，恢复逻辑留在本地</title>
+  <desc id="rf-desc">请求从你的客户端经过本地 AG Relay 发往 Agent Router，响应沿反方向返回。客户端照常发起请求；AG Relay 识别异常并按条件进行有限重试；Agent Router 是上游服务。机制示意，不代表每次失败都能恢复。</desc>
+  <defs>
+    <marker id="rf-request-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse" orient="auto">
+      <path d="M1 1 L7 4 L1 7" fill="none" stroke="#1f2328" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="rf-response-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse" orient="auto">
+      <path d="M1 1 L7 4 L1 7" fill="none" stroke="#656d76" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+  <rect width="1000" height="300" fill="#ffffff"/>
+  <g font-family="'Microsoft YaHei', 'PingFang SC', 'Hiragino Sans GB', sans-serif" fill="#1f2328">
+    <text x="32" y="40" font-size="24" font-weight="600">客户端照常工作，恢复逻辑留在本地</text>
+    <path d="M32 61 H968" fill="none" stroke="#d1d9e0"/>
+
+    <!-- 客户端：终端窗，而非通用卡片。 -->
+    <g stroke-linecap="round" stroke-linejoin="round">
+      <rect x="76" y="90" width="168" height="104" rx="6" fill="#ffffff" stroke="#1f2328" stroke-width="2"/>
+      <path d="M82 91 H238 Q243 91 243 96 V114 H77 V96 Q77 91 82 91 Z" fill="#f6f8fa"/>
+      <path d="M77 114 H243" fill="none" stroke="#d1d9e0"/>
+      <g fill="#656d76">
+        <circle cx="91" cy="102" r="2"/>
+        <circle cx="101" cy="102" r="2"/>
+        <circle cx="111" cy="102" r="2"/>
+      </g>
+      <path d="M217 102 H230" fill="none" stroke="#656d76" stroke-width="1.5"/>
+      <path d="M97 134 L106 142 L97 150 M119 150 H143" fill="none" stroke="#1f2328" stroke-width="2"/>
+      <path d="M96 171 H155 M167 171 H191" fill="none" stroke="#d1d9e0" stroke-width="2"/>
+    </g>
+
+    <!-- 两段链路均明确区分请求与响应方向。 -->
+    <g fill="none" stroke-width="2" stroke-linecap="round">
+      <path d="M264 123 H416" stroke="#1f2328" marker-end="url(#rf-request-arrow)"/>
+      <path d="M416 166 H264" stroke="#656d76" marker-end="url(#rf-response-arrow)"/>
+      <path d="M584 123 H748" stroke="#1f2328" marker-end="url(#rf-request-arrow)"/>
+      <path d="M748 166 H584" stroke="#656d76" marker-end="url(#rf-response-arrow)"/>
+    </g>
+    <g text-anchor="middle" font-size="14">
+      <text x="340" y="110">请求</text>
+      <text x="340" y="189" fill="#656d76">响应</text>
+      <text x="666" y="110">请求</text>
+      <text x="666" y="189" fill="#656d76">响应</text>
+    </g>
+
+    <!-- 本地处理器：循环留在节点内部，文字限定重试边界。 -->
+    <g stroke="#1f2328" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M460 78 V90 M484 78 V90 M516 78 V90 M540 78 V90 M460 186 V198 M484 186 V198 M516 186 V198 M540 186 V198 M430 106 H442 M430 130 H442 M430 154 H442 M430 178 H442 M558 106 H570 M558 130 H570 M558 154 H570 M558 178 H570" fill="none"/>
+      <rect x="442" y="90" width="116" height="96" rx="8" fill="#f6f8fa"/>
+      <path d="M511 110 A19 19 0 1 0 518 132" fill="none" marker-end="url(#rf-request-arrow)"/>
+    </g>
+    <text x="500" y="170" text-anchor="middle" font-size="13">有限重试</text>
+
+    <!-- 上游服务：三层机架，不用成功状态灯暗示恢复结果。 -->
+    <g stroke-linecap="round" stroke-linejoin="round">
+      <path d="M785 119 V127 M895 119 V127 M785 156 V164 M895 156 V164" fill="none" stroke="#d1d9e0" stroke-width="2"/>
+      <g fill="#ffffff" stroke="#1f2328" stroke-width="2">
+        <rect x="775" y="90" width="130" height="29" rx="4"/>
+        <rect x="775" y="127" width="130" height="29" rx="4"/>
+        <rect x="775" y="164" width="130" height="29" rx="4"/>
+      </g>
+      <g fill="#1f2328">
+        <circle cx="794" cy="104.5" r="3"/>
+        <circle cx="794" cy="141.5" r="3"/>
+        <circle cx="794" cy="178.5" r="3"/>
+      </g>
+      <path d="M814 104.5 H846 M866 104.5 H885 M814 141.5 H846 M866 141.5 H885 M814 178.5 H846 M866 178.5 H885" fill="none" stroke="#656d76" stroke-width="1.5"/>
+    </g>
+
+    <g text-anchor="middle" font-size="20" font-weight="600">
+      <text x="160" y="226">你的客户端</text>
+      <text x="500" y="226">AG Relay</text>
+      <text x="840" y="226">Agent Router</text>
+    </g>
+    <g text-anchor="middle" font-size="15" fill="#656d76">
+      <text x="160" y="252">照常发起请求</text>
+      <text x="500" y="252">识别异常 · 按条件恢复</text>
+      <text x="840" y="252">上游服务</text>
+    </g>
+    <text x="32" y="286" font-size="13" fill="#656d76">机制示意，不代表每次失败都能恢复。</text>
+  </g>
+</svg>

@@ -1,16 +1,123 @@
-# ag-relay
+<p align="center">
+  <img src="docs/assets/readme/hero.png" alt="AG Relay — 少打一次「继续」，让任务接着跑。为 Agent Router 的 Astra 场景优化。" width="100%">
+</p>
 
-AG Relay 是由**网关核心**与 **Tauri 桌面面板**组成的本地网关软件。核心在本仓自主维护，与面板配套开发、测试和发布。
+<h3 align="center">Astra 高峰 PVP，不必再拼手速。</h3>
 
-规范与工单见仓库 [Issues](https://github.com/xinxinxiaoxin/ag-relay/issues)。面向 agent 的 issue 操作约定见 [docs/agents/issue-tracker.md](docs/agents/issue-tracker.md)，领域术语见 [GLOSSARY.md](GLOSSARY.md)。
+<p align="center">
+  专为 Agent Router 优化的本地重试网关。<br>
+  遇到可恢复的 limit 或空回，秒级接续尝试，少一次手动「继续」。
+</p>
 
-## 安装
+<p align="center">
+  <code>Windows x64</code> · <code>本地运行</code> · <a href="LICENSE"><code>开源 MIT</code></a>
+</p>
 
-到 [Releases](https://github.com/xinxinxiaoxin/ag-relay/releases) 下载最新版的 Windows 安装程序（`ag-relay_x.y.z_x64-setup.exe`，或 `.msi`），双击安装即可。安装包自带运行所需的 Node，**不要求机器上预装 Node**；安装位置与数据位置分离，`%APPDATA%\ag-relay\` 下的连接设置与日志在安装和升级中都保留。
+<p align="center">
+  <a href="https://github.com/xinxinxiaoxin/ag-relay/releases"><strong>下载 Windows 版</strong></a> ·
+  <a href="#快速开始">快速开始</a> ·
+  <a href="#它具体处理哪些报错">支持处理的报错</a> ·
+  <a href="https://github.com/xinxinxiaoxin/ag-relay/issues">反馈问题</a>
+</p>
 
-装好之后不需要再手动找新版本：软件会检查更新，发现新版时显示更新说明，**由你确认后**才下载安装；安装前会先排空在途请求，若一次请求还没结束就等到超时并提示稍后再试，不会强行掐断。更新包经过签名校验，被篡改的包会被拒绝。
+## 高峰期难等，就别再慢在手动重试上。
 
-从旧的 ZIP 版本迁移：ZIP 版没有更新能力，需要**先手动安装一次本版本**，之后才能在应用内升级。
+Astra 的高峰「PVP」，消耗的不只是等待时间：一次 `limit`，一次空回，任务又停在那里。你看到报错、切回窗口、补上一句「继续」，才开始下一轮尝试。
+
+**把这段反复操作，留给 AG Relay。** 识别到可恢复失败后，网关在内部按秒级间隔自动重试，不必等你亲自回来重发。拿到有效响应，再交给客户端，让当前任务尽量接着跑。
+
+AG Relay 致力于把所有可消化的错误留在网关内部处理，加速获得上游资源。
+
+**我们的目标：永不报错，永不「继续」！**
+
+<p align="center">
+  <img src="docs/assets/readme/recovery-strip.svg" alt="未接入时，limit 或空回可能需要手动输入继续；接入后由 AG Relay 在预算内重试可恢复失败，获得有效响应后交给客户端。" width="100%">
+</p>
+
+## 它具体处理哪些报错？
+
+重点是限流与空回：能重试的先在网关里处理，不能恢复的明确返回，而不是让你一直猜。
+
+| 你遇到的问题 | AG Relay 会怎么做 |
+| --- | --- |
+| **限流、过载与连接抖动**<br>429 / 408 / 可恢复的 5xx | 使用新连接，在次数与时间预算内按策略重试；识别到确定性错误时停止无效尝试。 |
+| **返回 200，内容却是错误**<br>JSON 错误体 / 流内早期错误 | 继续检查响应内容，识别被成功状态码包裹的失败，再按错误类型决定重试或返回。 |
+| **空响应，或还没输出就断开**<br>正常内容下发之前 | 在条件允许时重新尝试，不让一次空响应立即结束请求；已经下发的内容不会被自动重放。 |
+| **特定请求格式不兼容**<br>`input.status` / 部分历史引用错误 | 命中规则并满足安全条件时尝试定向修正，而不是无差别删除参数或反复发送同一份失败请求。 |
+| **不知道请求卡在了哪里**<br>等待响应 / 等待首段 / 输出停滞 | 记录处理阶段、重试与修复事件，在面板中查看活动与诊断，保留排查线索。 |
+
+恢复能力受错误类型、请求状态和时间预算限制，不等于所有失败都能自动解决。
+
+<p align="center">
+  <img src="docs/assets/readme/request-flow.svg" alt="请求从客户端经过本地 AG Relay 发往 Agent Router，响应原路返回；网关在本地识别异常并按条件有限重试。" width="100%">
+</p>
+
+## 快速开始
+
+### 1. 安装并启动 AG Relay
+
+从 [Releases](https://github.com/xinxinxiaoxin/ag-relay/releases) 下载 Windows 安装程序，优先选择 `ag-relay_x.y.z_x64-setup.exe`，也可使用 `.msi`。
+
+运行环境已随包提供，**不需要额外安装 Node**。连接设置与日志保存在 `%APPDATA%\ag-relay\`，与安装位置分离，安装和升级时保留。
+
+### 2. 把客户端指向本地网关
+
+在客户端或 CC Switch 中修改 API Base URL。**原有 Agent Router Key 仍保留在客户端。**
+
+```text
+http://127.0.0.1:8787
+```
+
+部分客户端需要填写 `http://127.0.0.1:8787/v1`，以客户端要求为准。默认上游为 Agent Router，本地端口和上游地址可在连接设置中调整。
+
+### 3. 照常工作，必要时查看处理过程
+
+发起一次请求，在 AG Relay 面板查看网关状态与请求活动；遇到问题时再打开诊断，不必一直守着终端。
+
+桌面面板还提供网关启动、停止、安全重启、托盘操作与开机自启。应用支持检查更新，**由你确认后**才下载安装，更新包经过签名校验。
+
+## 哪些情况，还是需要你处理？
+
+> 重试有次数和时间预算，不保证任务永远不中断。余额不足、无效密钥或持续不可用的上游，仍然需要你处理。已经下发内容的请求，也不会被自动重放。
+
+<details>
+<summary><strong>它是在替我自动输入「继续」吗？</strong></summary>
+
+不是。它不会操控客户端，而是尽量在失败交给客户端之前，在网关内部处理可恢复的限流与空回，减少任务停下来等你手动续跑的情况。
+
+</details>
+
+<details>
+<summary><strong>已经开始输出后，会自动重放请求吗？</strong></summary>
+
+不会。内容下发前的恢复与下发后的异常处理是两回事，不能把已经交付的流式内容重新播放给客户端。
+
+</details>
+
+<details>
+<summary><strong>兼容修复会不会改动历史内容？</strong></summary>
+
+部分修复会移除特定元数据、历史引用或推理项，并可能影响推理连续性。只有命中规则且满足安全条件才尝试，无法安全处理时会明确失败。
+
+</details>
+
+<details>
+<summary><strong>旧 ZIP 版如何迁移？</strong></summary>
+
+旧 ZIP 版没有应用内更新能力，需要先安全停止网关，手动安装一次具备更新能力的版本，之后才能在应用内升级。
+
+</details>
+
+## 文档与许可
+
+- [网关核心维护](docs/gateway-core-maintenance.md) · [发布操作手册](docs/release-runbook.md) · [Windows 验收清单](docs/windows-acceptance-checklist.md)
+- [领域术语](GLOSSARY.md) · [Agent 工单约定](docs/agents/issue-tracker.md) · [问题与建议](https://github.com/xinxinxiaoxin/ag-relay/issues)
+- 自有代码采用 [MIT 许可](LICENSE)；第三方材料遵循各自许可，见 [第三方声明](THIRD_PARTY_NOTICES.md)与[许可材料索引](licenses/COMPONENTS.md)。
+
+<details>
+<summary><strong>开发、发布与历史构建记录（维护者）</strong></summary>
+
+以下保留此前 README 的维护资料与构建记录，用于开发和追溯；其中的日期与版本状态按原记录保留，最新版本以 [Releases](https://github.com/xinxinxiaoxin/ag-relay/releases) 为准。日常使用无需阅读本节。
 
 ## 便携使用（ZIP / 裸目录）
 
@@ -153,3 +260,5 @@ AG Relay 的自有代码（桌面面板、纳入本仓库自主维护的网关�
 - `src-tauri/resources/gateway/`：本仓自主维护的网关核心四脚本（`relay-retry-proxy.mjs`、`relay-supervisor.mjs`、`relay-start-check.mjs`、`bounded-file-log.mjs`）+ `gateway-config.bat` 默认配置契约（见[维护说明](docs/gateway-core-maintenance.md)）
 - `scripts/make-icons.ps1`：重新生成应用图标（AG 字样，PNG + ICO）
 - `scripts/smoke.ps1`：构建冒烟检查
+
+</details>
