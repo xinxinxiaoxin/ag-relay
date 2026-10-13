@@ -57,3 +57,22 @@
   !insertmacro RestartManager_EndSession $R0
   !undef AGRelayCheckID
 !macroend
+
+; 安装完成后通知外壳重建图标缓存。Tauri 的 NSIS 模板只定义了 UPDATEFILEASSOC，
+; 从不调用它；覆盖安装时 exe 即使换了图标，桌面/开始菜单仍会画缓存里的旧图，
+; 直到用户手动刷新。这里显式调用一次，不改动任何文件与进程。
+; 常量自带兜底定义，不依赖 fileassoc.nsh 的 include 顺序。
+!ifndef SHCNE_ASSOCCHANGED
+  !define SHCNE_ASSOCCHANGED 0x08000000
+!endif
+!ifndef SHCNF_FLUSH
+  !define SHCNF_FLUSH 0x1000
+!endif
+
+!macro AG_RELAY_REFRESH_ICON_CACHE
+  System::Call 'shell32::SHChangeNotify(i, i, i, i) (${SHCNE_ASSOCCHANGED}, ${SHCNF_FLUSH}, 0, 0)'
+!macroend
+
+!macro NSIS_HOOK_POSTINSTALL
+  !insertmacro AG_RELAY_REFRESH_ICON_CACHE
+!macroend
