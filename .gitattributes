@@ -1,5 +1,7 @@
 # 网关脚本必须字节一致：loadedVersion = 脚本自身 sha256，换行符转换会改变版本指纹
 src-tauri/resources/gateway/*.mjs -text
+# .bat 同样按字节入库：打包快照记录它的 sha256，检出转换会让哈希对不上
+src-tauri/resources/gateway/*.bat -text
 *.exe binary
 # 第三方许可原文与清单指纹一致，保留上游换行符、空白和全部字节
 licenses/** -text -whitespace

@@ -6,7 +6,7 @@
 ## 0. 先记住三件事
 
 1. **签名私钥只有一把**，决定「用户能不能应用内更新」。丢了就再也推不了自动更新，只能让用户手动重装；泄露了别人就能伪造更新包推给你的用户。
-   - 本项目当前私钥存放位置（维护者本机，仓库外）：`C:\Users\94376\.ag-relay-signing\ag-relay.key`（未设密码）
+   - 本项目私钥存放在**维护者本机、仓库之外的专用路径**（未设密码）。具体位置以维护者自己的密钥备份记录为准，**不写进本仓库、本手册或任何在线文档**。
    - 公钥已经写在 [src-tauri/tauri.conf.json](../src-tauri/tauri.conf.json) 的 `plugins.updater.pubkey`，公开无妨。
    - **绝不要**把私钥内容贴进聊天、Issue、提交或任何在线文档。
 2. **一次发版只需要一次人工点击**：构建阶段自动跑，只有「是否把版本公开」需要人在 GitHub 上点一下。
@@ -91,10 +91,10 @@ gh workflow run release.yml --ref v0.3.3 -f publish=true -f notes="## AG Relay 0
 
 ## 3. 备选：在维护者本机构建
 
-需要本机持有私钥（即上面第 0 节的路径）。适合调试发布流程本身，或 CI 不可用时。
+需要本机持有私钥（即第 0 节所说维护者本机那份）。适合调试发布流程本身，或 CI 不可用时。
 
 ```bash
-export TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.ag-relay-signing/ag-relay.key)"   # 注意不要回显
+export TAURI_SIGNING_PRIVATE_KEY="$(cat <维护者本机的私钥文件路径>)"   # 注意不要回显
 node scripts/release.mjs preflight
 node scripts/release.mjs build --out <一个尚不存在的新目录> --notes <UTF-8 更新说明文件>
 gh release create v0.3.3 --target main --title "AG Relay 0.3.3" --notes-file <说明文件> <目录里的全部资产>
