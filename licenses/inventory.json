@@ -6,22 +6,22 @@
   "inputs": [
     {
       "path": "package.json",
-      "sha256": "c2b29218bfeb9cf6a823f23571f9896d3dce2f7d610d263edb427c32fa2258ac",
+      "sha256": "48f800f02e8ce9e95e9d9703996e6eed98761286c70dfe2eb60960c2f0587138",
       "normalizeLf": true
     },
     {
       "path": "package-lock.json",
-      "sha256": "d98842a74c5c3c889ddbe8d38cb7b581dc7d54ce02afd641e8738b62542329e6",
+      "sha256": "ac794857b3c7e8318a0745fb902068abffbc4d01eeefea5fa235711aaf3feeca",
       "normalizeLf": true
     },
     {
       "path": "src-tauri/Cargo.lock",
-      "sha256": "e6c727f825c19b9776860fa773deb3e763bb8c45a8d476c3b5733f383b515058",
+      "sha256": "deb38f11de906b9e5a46270b6e212d53daf35ab6ed524a0f93e9c76d80f63d9c",
       "normalizeLf": true
     },
     {
       "path": "src-tauri/Cargo.toml",
-      "sha256": "0f92494eddeb899392681eb997705d7d325f20ebb3c70059c7c6c3ba2b727604",
+      "sha256": "45526c97bed17302b29cef2ebe0ba47ced1c5881984cc461d234535c347a92e7",
       "normalizeLf": true
     },
     {
