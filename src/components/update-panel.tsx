@@ -1,58 +1,55 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { Download, RefreshCw } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import { Progress } from '@/components/ui/progress'
 import {
   AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
   AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
-import { checkForUpdate, confirmUpdate, getUpdateView, type UpdateView } from '@/lib/update'
+import { downloadProgress, updateControls, type UpdateState, type UpdateView } from '@/lib/update'
 
-const busyPhases = new Set<UpdateView['phase']>(['checking', 'downloading', 'verified', 'quiescing', 'install_pending'])
+export interface UpdatePanelProps {
+  state: UpdateState
+  onCheck: () => Promise<void>
+  onConfirm: (candidateId: string) => Promise<void>
+}
 
-/** 所有页面共用更新提示；版本说明按纯文本展示，不执行远端 HTML。 */
-export function UpdatePanel() {
-  const [view, setView] = useState<UpdateView | null>(null)
-  const [error, setError] = useState<string | null>(null)
-  const [working, setWorking] = useState(false)
+const stageText: Partial<Record<UpdateView['phase'], string>> = {
+  verifying: '正在校验更新包签名，尚未开始安装。',
+  verified: '签名校验通过，准备优雅排空网关。',
+  quiescing: '正在优雅排空在途请求，超时会取消安装并恢复接单，不强杀。',
+  install_pending: '已交给原生安装器，请在安装器中继续；本面板无法确认安装结果。',
+}
+
+/** 受控更新卡只由设置页渲染；候选说明永远作为纯文本。 */
+export function UpdatePanel({ state, onCheck, onConfirm }: UpdatePanelProps) {
+  const { view, error } = state
+  const { busy, canCheck, canConfirm } = updateControls(state)
   const [confirmation, setConfirmation] = useState<UpdateView['release']>(null)
-
-  useEffect(() => {
-    let active = true
-    // 这里只轮询 Rust 内存状态；不轮询发布端点、不触碰网关控制端点。
-    const refresh = () => void getUpdateView().then(next => {
-      if (active) setView(next)
-    }).catch(() => { if (active) setError('暂时无法读取更新状态，请稍后重试。') })
-    refresh()
-    const timer = setInterval(refresh, 1000)
-    return () => { active = false; clearInterval(timer) }
-  }, [])
-
-  const run = async (action: () => Promise<UpdateView>) => {
-    setWorking(true)
-    setError(null)
-    try { setView(await action()) }
-    catch (reason) { setError(String(reason)) }
-    finally { setWorking(false) }
-  }
-  const busy = working || (view !== null && busyPhases.has(view.phase))
-  const canConfirm = view?.release && ['available', 'deferred'].includes(view.phase)
+  const confirmationCurrent = canConfirm && confirmation?.id === view?.release?.id
+  const download = view?.phase === 'downloading' ? downloadProgress(view.download) : null
+  const stage = view ? stageText[view.phase] : null
 
   return (
-    <section aria-label="AG Relay 更新" className="mb-6 rounded-2xl border border-border bg-card px-5 py-4 text-sm">
+    <section aria-label="AG Relay 更新" data-testid="update-panel" className="rounded-2xl border border-border bg-card px-5 py-4 text-sm">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="min-w-0 space-y-1">
           <h2 className="font-medium">AG Relay 更新{view?.release ? ` · v${view.release.version}` : ''}</h2>
           <p role="status" className="text-xs leading-5 text-muted-foreground">{view?.detail ?? '正在读取更新状态…'}</p>
         </div>
-        <div className="flex shrink-0 gap-2">
-          <Button variant="outline" size="sm" disabled={busy || !view || view.phase === 'disabled'} onClick={() => void run(checkForUpdate)}>
-            <RefreshCw className={busy ? 'animate-spin' : ''} aria-hidden="true" />检查更新
+        <div className="flex flex-wrap gap-2">
+          <Button variant="outline" size="sm" disabled={!canCheck} onClick={() => void onCheck()}>
+            <RefreshCw className={view?.phase === 'checking' ? 'animate-spin motion-reduce:animate-none' : ''} aria-hidden="true" />检查更新
           </Button>
-          {canConfirm && <Button size="sm" disabled={busy} onClick={() => setConfirmation(view.release)}>
-            <Download aria-hidden="true" />{view.phase === 'deferred' ? '稍后重试更新' : '查看并更新'}
+          {canConfirm && <Button size="sm" onClick={() => setConfirmation(view!.release)}>
+            <Download aria-hidden="true" />{view?.phase === 'deferred' ? '稍后重试更新' : '查看并更新'}
           </Button>}
         </div>
       </div>
+      {(download || stage) && <div className="mt-3 space-y-2" role="status" aria-atomic="true">
+        <p className="text-xs leading-5 tabular-nums">{download?.text ?? stage}</p>
+        <Progress value={download?.value ?? null} aria-label={download ? '更新包下载进度' : '更新处理进度'} aria-valuetext={download?.text ?? stage ?? undefined} />
+      </div>}
       {view?.recovery && <p className="mt-2 text-xs leading-5">{view.recovery}</p>}
       {error && <p role="alert" className="mt-2 text-xs leading-5 text-destructive">{error}</p>}
       {view?.release && <details className="mt-3 text-xs leading-5" open={canConfirm ? true : undefined}>
@@ -69,12 +66,14 @@ export function UpdatePanel() {
           </AlertDialogHeader>
           <p className="max-h-48 overflow-auto whitespace-pre-wrap break-words text-xs leading-5 text-muted-foreground">{confirmation?.notes || '此版本未提供更新说明。'}</p>
           <p className="text-xs leading-5 text-muted-foreground">只更新本次安装；外部网关不在更新管理范围。连接设置和日志不会被清空。首次使用旧 ZIP 版需先手动安装一次具备更新能力的版本。</p>
+          {!confirmationCurrent && <p role="alert" className="text-xs text-destructive">候选版本已变化或操作正在进行，请取消后重新检查更新。</p>}
           <AlertDialogFooter>
             <AlertDialogCancel>暂不更新</AlertDialogCancel>
-            <AlertDialogAction disabled={busy} onClick={() => {
-              const id = confirmation?.id
+            <AlertDialogAction disabled={busy || !confirmationCurrent} onClick={() => {
+              if (!confirmationCurrent || !confirmation) return
+              const id = confirmation.id
               setConfirmation(null)
-              if (id) void run(() => confirmUpdate(id))
+              void onConfirm(id)
             }}>确认下载并安装</AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

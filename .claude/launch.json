@@ -6,6 +6,12 @@
       "runtimeExecutable": "npm",
       "runtimeArgs": ["run", "dev", "--", "--host", "127.0.0.1"],
       "port": 4318
+    },
+    {
+      "name": "ag-relay-ui-verification",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev", "--", "--host", "127.0.0.1", "--port", "4319"],
+      "port": 4319
     }
   ]
 }

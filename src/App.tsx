@@ -27,7 +27,8 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { Input } from '@/components/ui/input'
-import { UpdatePanel } from '@/components/update-panel'
+import { useUpdate } from '@/hooks/use-update'
+import { respondToClose, watchWindowLifecycle, type CloseAction, type CloseRequest } from '@/lib/window'
 import { WindowControls } from '@/components/window-controls'
 import brandIcon from '@/assets/brand-small.png'
 import { Toaster } from '@/components/ui/sonner'
@@ -60,9 +61,9 @@ const navigation = [
   { id: 'settings' as const, name: '偏好设置', icon: Settings2Icon },
 ]
 
-function AppSidebar({ page, onNavigate, onSearch, onAction, appVersion }: {
+function AppSidebar({ page, onNavigate, onSearch, onAction, appVersion, updateNotice }: {
   page: PageId; onNavigate: (page: PageId) => void; onSearch: () => void;
-  onAction: (action: GatewayAction) => void; appVersion: string;
+  onAction: (action: GatewayAction) => void; appVersion: string; updateNotice: string | null;
 }) {
   const { isMobile, setOpenMobile } = useSidebar()
   const navigate = (next: PageId) => { onNavigate(next); if (isMobile) setOpenMobile(false) }
@@ -71,9 +72,9 @@ function AppSidebar({ page, onNavigate, onSearch, onAction, appVersion }: {
       <SidebarHeader className="gap-5 px-4 pb-5 pt-7 group-data-[collapsible=icon]:px-2">
         <SidebarMenu>
           <SidebarMenuItem>
-            <SidebarMenuButton size="lg" onClick={() => navigate('overview')} className="gap-3 rounded-[18px] hover:bg-transparent" tooltip="AG Relay · 本地网关">
+            <SidebarMenuButton size="lg" onClick={() => navigate('overview')} className="gap-3 rounded-[18px] hover:bg-transparent" tooltip="AG Relay · Agent Router专属网关">
               <img src={brandIcon} alt="" className="size-10 shrink-0 group-data-[collapsible=icon]:size-8" draggable={false} />
-              <div className="grid gap-0.5 text-left"><span className="text-lg font-semibold tracking-tight">AG Relay</span><span className="text-xs text-muted-foreground">本地网关工作空间</span></div>
+              <div className="grid gap-0.5 text-left"><span className="text-lg font-semibold tracking-tight">AG Relay</span><span className="text-xs text-muted-foreground">Agent Router专属网关</span></div>
             </SidebarMenuButton>
           </SidebarMenuItem>
         </SidebarMenu>
@@ -87,8 +88,9 @@ function AppSidebar({ page, onNavigate, onSearch, onAction, appVersion }: {
           <SidebarGroupLabel className="mb-1 text-xs font-normal">工作空间</SidebarGroupLabel>
           <SidebarGroupContent><SidebarMenu className="gap-1.5">
             {navigation.map(item => <SidebarMenuItem key={item.id}>
-              <SidebarMenuButton onClick={() => navigate(item.id)} isActive={page === item.id} tooltip={item.name} className="h-11 gap-3 px-3 text-sm" aria-current={page === item.id ? 'page' : undefined}>
+              <SidebarMenuButton onClick={() => navigate(item.id)} isActive={page === item.id} tooltip={item.id === 'settings' && updateNotice ? `${item.name} · ${updateNotice}` : item.name} className="relative h-11 gap-3 px-3 text-sm" aria-label={item.id === 'settings' && updateNotice ? `${item.name}，${updateNotice}` : item.name} aria-current={page === item.id ? 'page' : undefined}>
                 <item.icon className="size-4" strokeWidth={1.7} /><span>{item.name}</span>
+                {item.id === 'settings' && updateNotice && <span data-testid="settings-update-dot" aria-hidden="true" className="absolute right-3 top-2 size-2 rounded-full bg-destructive group-data-[collapsible=icon]:right-1 group-data-[collapsible=icon]:top-1" />}
               </SidebarMenuButton>
             </SidebarMenuItem>)}
           </SidebarMenu></SidebarGroupContent>
@@ -112,7 +114,7 @@ function AppSidebar({ page, onNavigate, onSearch, onAction, appVersion }: {
           </SidebarMenuButton></DropdownMenuTrigger>
             <DropdownMenuContent side="top" align="start" className="w-56">
               <DropdownMenuLabel>本地工作空间</DropdownMenuLabel><DropdownMenuSeparator />
-              <DropdownMenuItem onSelect={() => navigate('settings')}><Settings2Icon />偏好设置</DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => navigate('settings')}><Settings2Icon />偏好设置{updateNotice && <><span aria-hidden="true" className="ml-auto size-2 rounded-full bg-destructive" /><span className="sr-only">{updateNotice}</span></>}</DropdownMenuItem>
               <DropdownMenuSeparator /><DropdownMenuItem onSelect={() => onAction('exit')}><SquareIcon />退出应用</DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
@@ -125,6 +127,16 @@ function AppSidebar({ page, onNavigate, onSearch, onAction, appVersion }: {
 
 export default function App() {
   const [page, setPage] = useState<PageId>('overview')
+  const update = useUpdate()
+  const updateNotice = update.state.view?.phase === 'needs_attention' ? '更新需要处理' : update.state.hasUpdate ? '有可用更新' : null
+  const attentionShown = useRef<string | null>(null)
+  useEffect(() => {
+    if (update.state.view?.phase !== 'needs_attention') { attentionShown.current = null; return }
+    const detail = update.state.view.detail
+    if (attentionShown.current === detail) return
+    attentionShown.current = detail
+    toast.info('更新需要处理', { description: detail, action: { label: '前往设置', onClick: () => setPage('settings') } })
+  }, [update.state.view?.phase, update.state.view?.detail])
   const [endpoint, setEndpoint] = useState(ENDPOINT)
   const refreshConnection = useCallback(async () => {
     try { setEndpoint((await getConnectionSettings()).endpoint) } catch { /* 读取失败由设置页明确展示 */ }
@@ -144,7 +156,38 @@ export default function App() {
   //  - confirmExit：退出应用确认（受管/外部语义不同，退出前优雅停网关）。
   const [confirmRestart, setConfirmRestart] = useState(false)
   const [externalConfirm, setExternalConfirm] = useState<null | 'stop' | 'restart'>(null)
-  const [confirmExit, setConfirmExit] = useState(false)
+  const [confirmExit, setConfirmExit] = useState<{ kind: 'menu' } | { kind: 'window'; request: CloseRequest } | null>(null)
+  const [exitBusy, setExitBusy] = useState<CloseAction | null>(null)
+  const [exitError, setExitError] = useState<string | null>(null)
+  const exitWorking = useRef(false)
+  useEffect(() => watchWindowLifecycle({
+    onClose: request => {
+      setConfirmExit({ kind: 'window', request })
+      if (!exitWorking.current) setExitError(null)
+    },
+    onExitFailed: detail => {
+      setConfirmExit(current => current ?? { kind: 'menu' })
+      setExitError(detail)
+    },
+    onError: error => toast.error('无法接收窗口关闭请求', { description: String(error) }),
+  }), [])
+
+  const runExit = async (action: CloseAction) => {
+    if (!confirmExit || exitWorking.current) return
+    exitWorking.current = true
+    setExitBusy(action)
+    setExitError(null)
+    try {
+      if (confirmExit.kind === 'window') await respondToClose(confirmExit.request.id, action)
+      else if (action === 'quit') await quitApp()
+      setConfirmExit(current => current === confirmExit ? null : current)
+    } catch (error) {
+      setExitError(error instanceof Error ? error.message : String(error))
+    } finally {
+      exitWorking.current = false
+      setExitBusy(null)
+    }
+  }
   // 变更型命令进行中的瞬态（受管启停/重启期间覆盖状态为 starting/draining，禁用控制并显示进度）。
   const [busy, setBusy] = useState<null | 'starting' | 'draining'>(null)
   // 网关生命周期错误态（T7，ADR-0003）：由变更型命令的真实失败结果驱动，在总览上持久、可操作地呈现。
@@ -296,7 +339,7 @@ export default function App() {
         else setConfirmRestart(true)
         break
       case 'open-logs': void runOpenLogs(); break
-      case 'exit': setConfirmExit(true); break
+      case 'exit': setExitError(null); setConfirmExit(current => current ?? { kind: 'menu' }); break
     }
   }
 
@@ -313,23 +356,22 @@ export default function App() {
   return (
     <TooltipProvider delayDuration={200}>
       <SidebarProvider defaultOpen style={{ '--sidebar-width': '15rem', '--sidebar-width-icon': '4rem' } as React.CSSProperties}>
-        <AppSidebar page={page} onNavigate={navigate} onSearch={() => setCommandOpen(true)} onAction={act} appVersion={appVersion} />
+        <AppSidebar page={page} onNavigate={navigate} onSearch={() => setCommandOpen(true)} onAction={act} appVersion={appVersion} updateNotice={updateNotice} />
         <SidebarInset className="min-w-0 bg-background">
           <header data-tauri-drag-region="deep" className="app-header flex h-[72px] shrink-0 items-center justify-between gap-3 border-b border-border bg-white pl-5 lg:pl-8">
-            <div className="flex min-w-0 items-center gap-3"><SidebarTrigger className="-ml-1 size-8 shrink-0" aria-label="展开或收起侧栏" /><Separator orientation="vertical" className="!h-4" />
+            <div className="flex min-w-0 items-center gap-3"><span className="relative inline-flex shrink-0"><SidebarTrigger className="-ml-1 size-8 shrink-0" aria-label={updateNotice ? `展开或收起侧栏，${updateNotice}` : '展开或收起侧栏'} />{updateNotice && <span aria-hidden="true" data-testid="mobile-update-dot" className="pointer-events-none absolute right-0 top-0 size-2 rounded-full bg-destructive md:hidden" />}</span><Separator orientation="vertical" className="!h-4" />
               <Breadcrumb><BreadcrumbList className="text-sm"><BreadcrumbItem className="hidden sm:block">工作空间</BreadcrumbItem><BreadcrumbSeparator className="hidden sm:block" /><BreadcrumbItem><BreadcrumbPage>本地网关</BreadcrumbPage></BreadcrumbItem></BreadcrumbList></Breadcrumb>
             </div>
             <WindowControls />
           </header>
           <main ref={mainRef} className="app-main min-w-0 flex-1 px-5 pb-7 pt-7 sm:px-6 lg:px-8 lg:pt-8" id="main-content">
             <div className="mx-auto w-full max-w-[1280px]">
-              <UpdatePanel />
               {page === 'overview' && <OverviewPage {...common} appVersion={appVersion} gatewayError={gatewayError} onDismissError={() => setGatewayError(null)} />}
               {page === 'logs' && <LogsPage {...common} />}
-              {page === 'settings' && <SettingsPage {...common} />}
+              {page === 'settings' && <SettingsPage {...common} update={update} />}
             </div>
           </main>
-          <footer className="flex flex-wrap items-center justify-between gap-2 border-t border-border bg-white/60 px-6 py-3.5 text-xs text-muted-foreground lg:px-8"><span>AG Relay · 本地网关工作空间</span><span className="tabular-nums">v{appVersion}</span></footer>
+          <footer className="flex flex-wrap items-center justify-between gap-2 border-t border-border bg-white/60 px-6 py-3.5 text-xs text-muted-foreground lg:px-8"><span>AG Relay · Agent Router专属网关</span><span className="tabular-nums">v{appVersion}</span></footer>
         </SidebarInset>
       </SidebarProvider>
       <CommandDialog open={commandOpen} onOpenChange={setCommandOpen} title="搜索页面与快捷操作" description="搜索页面和可用操作。">
@@ -395,34 +437,39 @@ export default function App() {
         </AlertDialogContent>
       </AlertDialog>
 
-      {/* 退出应用确认（T3 语义，受管/外部网关退出不同）。侧栏菜单与偏好设置页的退出按钮共用。 */}
-      <AlertDialog open={confirmExit} onOpenChange={setConfirmExit}>
-        <AlertDialogContent>
+      {/* 窗口关闭三选与明确退出共用确认框；操作完成前不关闭，失败留在原地。 */}
+      <AlertDialog open={confirmExit !== null} onOpenChange={open => { if (!open && !exitWorking.current) void runExit('cancel') }}>
+        <AlertDialogContent onEscapeKeyDown={event => { if (exitWorking.current) event.preventDefault() }}>
           <AlertDialogHeader>
             <AlertDialogMedia>
               <LogOutIcon aria-hidden="true" />
             </AlertDialogMedia>
-            <AlertDialogTitle>退出 AG Relay？</AlertDialogTitle>
+            <AlertDialogTitle>{confirmExit?.kind === 'window' ? '关闭 AG Relay 窗口？' : '退出 AG Relay？'}</AlertDialogTitle>
             <AlertDialogDescription>
-              退出前会先优雅排空在途请求（最多等待 10 秒），再停止网关并退出应用。
+              {confirmExit?.kind === 'window' ? '可保留在托盘继续运行网关，或彻底退出。' : ''}
+              彻底退出前会先优雅排空在途请求（最多等待 10 秒）；排空超时会取消退出并恢复接单，不强杀。
             </AlertDialogDescription>
           </AlertDialogHeader>
           <div className="space-y-2 text-xs leading-5 text-muted-foreground">
             <p>
               <span className="font-medium text-foreground">受管网关</span>
-              （本窗口拉起）：会被优雅停止，超时则强制结束其进程树。
+              （本窗口拉起）：排空完成后才会停止；超时保持运行。
               {view.owner === 'window' ? '当前实例由本窗口管理。' : ''}
             </p>
             <p>
               <span className="font-medium text-foreground">外部网关</span>
-              （外部实例）：仅在核实其父进程后一并优雅停止，否则保持不动（宁可不杀，不可误杀）。
+              （外部实例）：仅在核实归属且支持安全停机时才会优雅停止，否则取消退出，不强杀。
               {view.owner === 'external' ? '当前监听端口上为外部实例。' : ''}
             </p>
+            {confirmExit?.kind === 'window' && !confirmExit.request.trayAvailable && <p id="tray-unavailable">系统托盘当前不可用，无法保留在托盘；请选择取消或彻底退出。</p>}
           </div>
-          <AlertDialogFooter>
-            <AlertDialogCancel>取消</AlertDialogCancel>
-            <AlertDialogAction variant="destructive" onClick={() => void quitApp()}>
-              退出应用
+          {exitError && <p role="alert" className="text-sm text-destructive">{exitError}</p>}
+          {exitBusy && <p role="status" className="text-xs text-muted-foreground">{exitBusy === 'quit' ? '正在安全退出，请等待排空结果…' : '正在处理窗口操作…'}</p>}
+          <AlertDialogFooter className="sm:flex-wrap">
+            <AlertDialogCancel disabled={exitBusy !== null} onClick={event => { event.preventDefault(); void runExit('cancel') }}>取消</AlertDialogCancel>
+            {confirmExit?.kind === 'window' && <Button variant="outline" disabled={exitBusy !== null || !confirmExit.request.trayAvailable} aria-describedby={!confirmExit.request.trayAvailable ? 'tray-unavailable' : undefined} onClick={() => void runExit('tray')}>保留在托盘</Button>}
+            <AlertDialogAction variant="destructive" disabled={exitBusy !== null} onClick={event => { event.preventDefault(); void runExit('quit') }}>
+              {confirmExit?.kind === 'window' ? '彻底退出' : '退出应用'}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

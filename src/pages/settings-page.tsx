@@ -13,6 +13,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Separator } from '@/components/ui/separator'
 import { Switch } from '@/components/ui/switch'
+import { UpdatePanel, type UpdatePanelProps } from '@/components/update-panel'
 import { type SettingsPageProps } from '@/lib/types'
 import { connectionSettingsError, DEFAULT_CONNECTION, getConnectionSettings, saveConnectionSettings, type ConnectionSettingsView } from '@/lib/connection-settings'
 import {
@@ -22,7 +23,7 @@ import {
   setAutostartEnabled,
 } from '@/lib/gateway'
 
-export function SettingsPage(props: SettingsPageProps) {
+export function SettingsPage(props: SettingsPageProps & { update: UpdatePanelProps }) {
   const id = useId()
   const { onAction } = props
   const [connection, setConnection] = useState<ConnectionSettingsView | null>(null)
@@ -132,6 +133,8 @@ export function SettingsPage(props: SettingsPageProps) {
         </div>
       </header>
 
+      <UpdatePanel {...props.update} />
+
       <Card className="min-w-0 rounded-[24px] ring-border [--card-spacing:1.25rem]">
         <CardHeader>
           <CardTitle><h2>网关连接设置</h2></CardTitle>
@@ -196,9 +199,9 @@ export function SettingsPage(props: SettingsPageProps) {
 
             <div className="space-y-2">
               <h3 className="text-sm font-medium leading-5">关闭行为</h3>
-              <p className="text-sm leading-6">先排空自有网关，再退出</p>
+              <p className="text-sm leading-6">关闭窗口时选择保留在托盘或彻底退出</p>
               <p className="text-xs leading-5 text-muted-foreground">
-                排空等待预算为 10 秒，不代表整个退出流程的耗时上限。
+                保留在托盘不停止网关。彻底退出先排空在途请求，最多等待 10 秒，超时取消退出、不强杀；托盘不可用时不能隐藏窗口。
               </p>
             </div>
           </CardContent>

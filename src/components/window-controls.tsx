@@ -42,7 +42,7 @@ export function WindowControls() {
       <button type="button" className="window-control" aria-label={maximized ? '还原窗口' : '最大化窗口'} title={maximized ? '还原' : '最大化'} onClick={() => void run('toggleMaximize')}>
         {maximized ? <CopyIcon aria-hidden="true" /> : <SquareIcon aria-hidden="true" />}
       </button>
-      <button type="button" className="window-control window-control-close" aria-label="关闭窗口并安全退出" title="关闭并安全退出" onClick={() => void run('close')}><XIcon aria-hidden="true" /></button>
+      <button type="button" className="window-control window-control-close" aria-label="关闭窗口" title="关闭窗口" onClick={() => void run('close')}><XIcon aria-hidden="true" /></button>
     </div>
   )
 }

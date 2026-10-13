@@ -353,15 +353,8 @@ export async function setAutostartEnabled(
 }
 // getAppVersion / FALLBACK_APP_VERSION 已与 T2 版本去重（见上方 getAppVersion 定义）。
 
-/**
- * 面板退出：调用现有 quit_app（触发 RunEvent::Exit 优雅停网关 ≤10s——
- * 受管网关与经核实的外部网关一视同仁，再退出）。浏览器回退为空操作。
- */
+/** 显式退出：排空超时取消退出；错误交给确认框原地展示，不吞掉 IPC 失败。 */
 export async function quitApp(): Promise<void> {
-  if (!isTauri()) return
-  try {
-    await invoke<void>('quit_app')
-  } catch {
-    // 退出收尾时 IPC 可能断开，静默即可。
-  }
+  if (!isTauri()) throw new Error('退出操作仅在桌面应用中可用。')
+  await invoke<void>('quit_app')
 }

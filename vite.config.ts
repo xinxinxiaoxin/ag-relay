@@ -7,6 +7,9 @@ export default defineConfig({
   plugins: [react(), tailwindcss()],
   resolve: { alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) } },
   base: './',
-  server: { host: '127.0.0.1', port: 4318, strictPort: true },
+  server: {
+    host: '127.0.0.1', port: 4318, strictPort: true,
+    watch: { ignored: ['**/src-tauri/**', '**/release-artifacts/**'] },
+  },
   preview: { host: '127.0.0.1', port: 4318, strictPort: true },
 })
