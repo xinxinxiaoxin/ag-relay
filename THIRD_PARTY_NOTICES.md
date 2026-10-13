@@ -8,7 +8,7 @@ AG Relay 自有代码采用根目录 `LICENSE` 中的 MIT 许可证。依据 ADR
 
 ## 材料入口与随包布局
 
-源码目录的 `licenses/` 包含完整材料；安装后它整体位于安装目录的 `licenses/third-party/`。以下路径相对于这个材料根目录，在源码和安装包中保持一致：
+源码目录及本项目每次发布的同版 `third-party-sources.tar.gz` 附件均包含完整 `licenses/` 取证库。安装目录的 `licenses/third-party/` 保留全部许可、版权原文及其他小型源码包，仅不安装 `inventory.json`、`COMPONENTS.md` 与 NSIS/WiX 两套完整源码归档。以下路径相对于源码/附件的 `licenses/`；未迁出的文件在安装目录中保持相同相对路径：
 
 | 路径 | 内容 |
 | --- | --- |
@@ -24,7 +24,7 @@ AG Relay 自有代码采用根目录 `LICENSE` 中的 MIT 许可证。依据 ADR
 | `installer/wix/` | WiX 3.14.1.8722 的 MS-RL 原文与 `wix3141rtm` 固定提交的完整对应源码 |
 | `installer/nsis/tauri-utils/` | 官方插件 0.5.3 的根许可、固定源码及 Chromium 移植版权；`reference-licenses/` 只是明确标注的声明依赖许可参照，不能证明旧 DLL 实际编译版本 |
 
-项目 MIT 和本声明分别映射为安装目录的 `licenses/LICENSE` 与 `licenses/THIRD_PARTY_NOTICES.md`。分发安装包或裸目录时须一并保留这两个文件和整个 `licenses/third-party/`，包括源码包，不能只附链接、仅附根 MIT 或只带主程序。
+项目 MIT 和本声明分别安装为 `licenses/LICENSE` 与 `licenses/THIRD_PARTY_NOTICES.md`。分发安装包或裸目录时须保留这两个文件、生成的 `licenses/来源.txt` 及精简后的完整 `licenses/third-party/`，并同时提供本项目同版 `third-party-sources.tar.gz`，不能只附根 MIT 或只带主程序。`来源.txt` 指向 `https://github.com/xinxinxiaoxin/ag-relay/releases/download/v<产品版本>/third-party-sources.tar.gz`，不使用会漂移的 latest 地址；取得源码不收额外费用。附件保留原始完整源码归档、所有许可原文、完整清单、已核验的文本构建输入和含产品版本/逐文件摘要的 `manifest.json`；Node 二进制仅记录摘要，不重复放进源码附件。源码包内部的文件级许可与构建材料均不裁剪。
 
 ## 主要组件
 
@@ -52,8 +52,8 @@ Lightning CSS 的 npm 原生包用于 Tailwind/Vite 构建，本项目只分发�
 
 实际构建工具为 NSIS **3.11**（`makensis v3.11`）与 WiX **3.14.1.8722**（`candle 3.14.1.8722`）。版本以只读版本查询及实际生成的安装输入核实，并记录工具摘要；没有运行生成的安装器。安装模板本身带有本机构建路径，不复制进许可材料或公开资产。
 
-- **NSIS**：COPYING 列明其主体及通常插件使用 zlib/libpng，bzip2 模块使用自身条款，LZMA 模块使用 **CPL-1.0 并附 NSIS 专用 linking 例外**。实际生成脚本使用 LZMA 压缩、Modern UI 2 及 NSISdl，故全部保留原文和原版权。`installer/nsis/nsis-3.11-source.tar.gz` 为固定版本完整、未修改源码，包含 LZMA 模块及原始文件级许可；源码可直接从随包材料取得，无需付额外费用。linking 例外不将 AG Relay 自有代码改为 CPL，但不免除对应模块的许可义务。对该模块及其所有贡献者的保证、条件与赔偿责任排除依原 CPL 条款执行；任何超出原条款的承诺仅由作出承诺的分发者负责，不代表其他贡献者。
-- **WiX**：保留 .NET Foundation and contributors 的版权和 **Microsoft Reciprocal License (MS-RL)** 全文。`installer/wix/wix-3.14.1-source.tar.gz` 为 `wix3141rtm` 对应固定提交的完整、未修改源码，供接收方取得 MSI 中 WiX 标准 UI / 支持代码的对应源码。含 WiX 代码的部分仍受 MS-RL 约束；AG Relay 根 MIT 不能替换其许可或限制接收方的源码权利。
+- **NSIS**：COPYING 列明其主体及通常插件使用 zlib/libpng，bzip2 模块使用自身条款，LZMA 模块使用 **CPL-1.0 并附 NSIS 专用 linking 例外**。实际生成脚本使用 LZMA 压缩、Modern UI 2 及 NSISdl，故全部保留原文和原版权。`installer/nsis/nsis-3.11-source.tar.gz` 为固定版本完整、未修改源码，包含 LZMA 模块及原始文件级许可；源码由本项目同版 `third-party-sources.tar.gz` 附件提供，获取地址见安装目录的 `licenses/来源.txt`，无需付额外费用。linking 例外不将 AG Relay 自有代码改为 CPL，但不免除对应模块的许可义务。对该模块及其所有贡献者的保证、条件与赔偿责任排除依原 CPL 条款执行；任何超出原条款的承诺仅由作出承诺的分发者负责，不代表其他贡献者。
+- **WiX**：保留 .NET Foundation and contributors 的版权和 **Microsoft Reciprocal License (MS-RL)** 全文。`installer/wix/wix-3.14.1-source.tar.gz` 为 `wix3141rtm` 对应固定提交的完整、未修改源码，由本项目同版来源附件免费提供，供接收方取得 MSI 中 WiX 标准 UI / 支持代码的对应源码；获取地址见 `licenses/来源.txt`。含 WiX 代码的部分仍受 MS-RL 约束；AG Relay 根 MIT 不能替换其许可或限制接收方的源码权利。
 - **实际内嵌闭包**：对 TEST-ONLY 候选包静态提取后确认，NSIS 内有 `System.dll`、`nsDialogs.dll`、`StartMenu.dll`、`LangDLL.dll`、`NSISdl.dll`、`nsis_tauri_utils.dll`；五个标准插件均匹配 3.11 工具缓存，源码与完整 COPYING 已包含，NSISdl 所含 JNetLib 的 Nullsoft 原版权另行保留。MSI 的 `WixUIWixca` 是 `uica.dll` 3.14.1.8722，对应的 `src/ext/UIExtension/ca` 及支持源码包含在完整 WiX 源档中。提取摘要记录在清单的 `embeddedArtifacts`；这不替代最终重构建包的再次比对。
 - **Tauri NSIS 插件**：官方 `nsis_tauri_utils v0.5.3` DLL（34,304 字节）与下载常量、官方资产、工具缓存及候选包提取字节一致，SHA-256 为 `5ba143b5db4a87d32d6e7802e033330aae56cbceabe0d1e3ba41948385ad4709`。固定源码为 `13d9edd27b69310e108d6fbd49f90992f8a05390`，自有代码采用 MIT OR Apache-2.0。`run_as_user` 明示移植 Chromium 的 `elevation_util.cc`，因此另附固定来源的 **BSD-3-Clause** 原文及 **Copyright 2024 The Chromium Authors**，没有用插件根许可替换它。
 - **预编译插件来源限制（已由维护者决定接受，限制仍然存在）**：该官方插件不提交 Cargo.lock、不固定 Rust 工具链，历史构建日志已不可取得，DLL 也无可用于还原版本的记录。只能核实源码声明的 semver / windows-sys 等兼容范围，不能把它们当成实际解析的 patch 版本。`no_std` 仍会使用 alloc/core 及可能的 Unicode / compiler-builtins 内容；附带的固定版本许可参照**不是旧 DLL 编译器或静态依赖版本的证明**。这是来源和可重复性限制，不是已发现凭据泄漏或恶意代码。**2026-10-12 维护者决定接受官方预编译来源及上述限制**，理由是该 DLL 与官方发布资产逐字节一致、其声明的依赖许可材料与 Chromium 移植原版权已随包提供；决定记录在 `inventory.json` 的 `releaseBlockers[].decision`。正式检查据此放行，但仍要求该项保留决定记录——未记录决定的未决项继续拒绝放行，也不能只删除记录或填入一个猜测版本。若将来需要完全可复现的来源，可另行受控重建固定源码并核验新产物后替换。
@@ -69,7 +69,9 @@ Lightning CSS 的 npm 原生包用于 Tailwind/Vite 构建，本项目只分发�
 4. Node 使用对应版本标签的完整 LICENSE，二进制比对 nodejs.org 官方 SHASUMS；WebView2 SDK 来源为精确版本的官方 NuGet 包并核对 loader；Rust 标准库来自实际工具链附带的标准库版权声明。
 5. 清单记录了 `package.json`、`package-lock.json`、`Cargo.toml`、`Cargo.lock` 和随包 Node 的指纹。运行 `node scripts/check-licenses.mjs` 进行**离线、只读**校验；缺失材料、许可原文被删节或依赖/二进制变化均非零退出。文本输入允许 CRLF/LF 差异，许可原文自身按原始字节核对。发布校验还须从实际 `rustc --version` 提取版本号，以 `node scripts/check-licenses.mjs --rust-version <实测版本号>` 传入并比对标准库材料；不能硬编码一个期望值代替实测。省略参数只做文件校验，不表示已核验构建工具链。
 
-6. 正式安装包构建必须同时传入 `--rust-version <实测版本号> --installer-runtime`。后者要求清单含 `installer-runtime` 类别的 `NSIS installer runtime` 和 `WiX installer runtime` 两项及其非空材料，并拒绝尚有 `releaseBlockers` 的快照，随后继续校验所有原文指纹。安装器原文固定存放于 `installer/nsis/` 与 `installer/wix/`。首轮仅用于探测实际工具版本、明确标记为 TEST-ONLY 的构建可不要求尚未取得的安装器材料，但不能将这种探测产物当成已通过正式分发许可验收。
+6. 正式安装包构建必须同时传入 `--rust-version <实测版本号> --installer-runtime`。后者要求清单含 `installer-runtime` 类别的 `NSIS installer runtime` 和 `WiX installer runtime` 两项及其非空材料，并拒绝 `releaseBlockers` 中未记录完整维护者接受决定的项目，随后继续校验所有原文指纹。安装器原文固定存放于 `installer/nsis/` 与 `installer/wix/`。首轮仅用于探测实际工具版本、明确标记为 TEST-ONLY 的构建可不要求尚未取得的安装器材料，但不能将这种探测产物当成已通过正式分发许可验收。
+
+7. `node scripts/prepare-distribution.mjs` 离线重建专用许可暂存目录及可复现来源附件；Tauri `beforeBuildCommand` 和 Cargo `build.rs` 每次实际构建都会执行，避免旧源档混入安装包；已生成目录如有人工追加或修改则拒绝替换并保留，不能以清空目录绕过检查。可用 `node scripts/check-licenses.mjs --distribution src-tauri/generated/license-distribution` 逐项检查暂存原文、附件内容、产品版本和清单，正式发布另将附件纳入资产白名单与 `SHA256SUMS`。读取附件不解压到磁盘，仅接受有界的普通文件 USTAR，拒绝路径穿越、链接、重复/大小写冲突、遗漏和额外条目；不是只比对外层压缩包摘要。
 
 升级依赖、改变目标平台、替换 Node、更新 Rust 工具链或新增发行包中嵌入的工具/二进制后，应重新执行上述核验、补齐原文和适用源码、更新 `inventory.json` / `COMPONENTS.md` 并重跑检查，不能只改指纹让旧清单通过。完整性校验不是版权权属审核或法律结论，也不能替代对安装包实际资源的检查。
 

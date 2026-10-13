@@ -152,23 +152,23 @@ node scripts/release.mjs test-build --out C:\Temp\ag-relay-test-artifacts
 
 ### 正式发布门槛
 
-逐步操作手册见 **[发布一个版本的完整流程](docs/release-runbook.md)**（改版本号、刷许可指纹、预检、打 tag、云端构建、发布审批各一步）；本小节说明门槛本身。
+逐步操作手册见 **[发布一个版本的完整流程](docs/release-runbook.md)**（改版本号、刷许可指纹、预检、本机构建、上传发布各一步）；本小节说明门槛本身。
 
-当前状态（2026-10-13）：生产签名密钥已生成并保存在仓库之外，公钥与更新端点已提交，`v0.3.0`／`v0.3.1`／`v0.3.2` 已按本文流程发布（v0.3.2 起由 GitHub Actions 用仓库 secret 完成签名构建），仓库已公开。安装、启动、网关托管、连接设置持久化、实时活动刷新与应用内升级已在本机实测通过。**仍待完成的是独立 Windows Sandbox/VM 中的干净机器安装与升级验收**，以及可选的 Authenticode 代码签名（见本小节末）。
+当前状态（2026-10-13）：生产签名密钥已生成并保存在维护者本机、仓库之外，公钥与更新端点已提交，`v0.3.0`／`v0.3.1`／`v0.3.2` 已按本文流程发布，仓库已公开。**发布只在维护者本机用私钥构建**，不经云端流水线。安装、启动、网关托管、连接设置持久化、实时活动刷新与应用内升级已在本机实测通过。**仍待完成的是独立 Windows Sandbox/VM 中的干净机器安装与升级验收**，以及可选的 Authenticode 代码签名（见本小节末）。
 
 发布前逐项确认：
 
 1. 维护者在可信离线环境生成并备份正式 Tauri 签名密钥，只把**公钥内容**提交到 `src-tauri/tauri.conf.json` 的 `plugins.updater.pubkey`。不要把私钥、密码或 `.env` 提交/随包分发。私钥是后续所有更新的信任根：**丢失后无法再通过应用内更新升级，只能让用户手动重装**，务必备份到仓库之外的安全位置。
 2. 将 `endpoints` 设置为 `https://github.com/xinxinxiaoxin/ag-relay/releases/latest/download/latest.json`，保留 `requireSignedVersion=true`，不得打开不安全 TLS 或允许降级。公钥变更需设计旧版本信任迁移，不能随意换钥。
-3. GitHub Environment `release-signing` 保存 `TAURI_SIGNING_PRIVATE_KEY` secret（本项目的密钥未设密码，因此不需要 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`；若密钥带密码则须一并配置），仓库及 Release 必须能被用户匿名读取——私有仓库的 404 不能伪装成“没有更新”，也不向客户端嵌入 GitHub token。**人工审批只保留在发布前的 `release-publish` 环境**：签名构建直接跑，是否把版本公开给人点一下决定（两个环境都只允许从 `v*` 稳定版本 tag 部署）。
-4. 同步 `package.json`、`package-lock.json`、`Cargo.toml`、`tauri.conf.json` 版本并创建新的稳定 `vX.Y.Z` tag；补齐所有 `LICENSE`、`THIRD_PARTY_NOTICES.md`、`licenses/**`（含实际 NSIS/WiX 及插件运行时材料）；正式预检强制按实际 Rust 版本及 `--installer-runtime` 核对许可。发布前完成源码/历史/资产敏感信息复核，结论记在[公开前敏感信息复核报告](docs/security/spec19-prepublication-audit.md)。
+3. 发布构建必须在维护者本机用私钥完成：私钥经环境变量 `TAURI_SIGNING_PRIVATE_KEY` 提供给当前进程，脚本不读 `.env`、不回显密钥，也不使用云端 secret。仓库及 Release 必须能被用户匿名读取——私有仓库的 404 不能伪装成“没有更新”，也不向客户端嵌入 GitHub token。**是否把版本公开由维护者在 Release 创建这一步决定。**
+4. 同步 `package.json`、`package-lock.json`、`Cargo.toml`、`Cargo.lock`、`tauri.conf.json` 版本；补齐所有 `LICENSE`、`THIRD_PARTY_NOTICES.md`、`licenses/**`（含实际 NSIS/WiX 及插件运行时材料）；正式预检强制按实际 Rust 版本及 `--installer-runtime` 核对许可。发布前完成源码/历史/资产敏感信息复核，结论记在[公开前敏感信息复核报告](docs/security/spec19-prepublication-audit.md)。
 5. 在独立 Windows Sandbox/VM 实测无系统 Node 安装启动、旧版升级、数据保留及安全排空更新。本机已实测「安装 → 启动 → 网关托管 → 设置持久化 → 实时活动刷新」，但**干净机器与完整升级链路仍须在隔离环境中逐条确认**。逐条步骤、判定标准与证据留存见[真实 Windows 成品验收清单](docs/windows-acceptance-checklist.md)。
 
 隔离验收使用独立 Windows 用户、AppData、安装目录和端口，不连接现用上游服务。至少验证：检查更新显示版本/说明但未确认不下载；独立测试签名新版升级；超过排空预算的合成长请求不断流、提示稍后再试且不安装；篡改字节验签失败且不停机；更新前运行/停止两种状态重开后分别恢复；设置和日志保留；UAC 拒绝、取消安装或旧版重开不得误报成功；窗口/托盘退出不能绕过更新事务的安全排空。上述每条的可执行步骤、判定标准与证据位置见[真实 Windows 成品验收清单](docs/windows-acceptance-checklist.md)；此人工验收不由只读 smoke 自动完成。
 
-从新的稳定版本 tag 手动触发 `.github/workflows/release.yml`：默认只构建并上传 Actions 产物，勾选发布后仍须通过 `release-publish` 审批，先完整上传到草稿再公开 GitHub Release；不覆盖已有 tag/Release。也可先本地执行 `node scripts/release.mjs preflight`，通过后运行 `node scripts/release.mjs build --out <新空目录> --notes <UTF-8更新说明文件>`。私钥仅通过当前进程环境/CI secrets 提供，脚本不读 `.env`、不回显密钥。
+发布流程在维护者本机完成：先执行 `node scripts/release.mjs preflight`，通过后运行 `node scripts/release.mjs build --out <新空目录> --notes <UTF-8更新说明文件>`；私钥仅通过当前进程环境提供，不读 `.env`、不回显密钥、不上传云端。随后用 `gh release create` 新建 Release 上传全部资产（不要覆盖已有 tag/Release）。
 
-发布资产包括 NSIS `.exe`、MSI `.msi`、各自 `.sig`、UTF-8 可读 `latest.json` 与 `SHA256SUMS`。清单使用 `windows-x86_64-nsis` / `windows-x86_64-msi`，嵌入签名内容而非签名路径；应用按原安装器选择。Tauri updater 签名与 Windows Authenticode 是两件事：此流程未配置 Authenticode 证书，不能承诺“已验证发布者”或无 SmartScreen 警告。
+发布资产包括 NSIS `.exe`、MSI `.msi`、各自 `.sig`、UTF-8 可读 `latest.json`、同版 `third-party-sources.tar.gz` 与 `SHA256SUMS`。来源附件由本项目每次发布提供，包含完整许可取证库和固定第三方源码；正式复核会拒绝缺失、错版、内部篡改或额外文件。清单使用 `windows-x86_64-nsis` / `windows-x86_64-msi`，嵌入签名内容而非签名路径；应用按原安装器选择。Tauri updater 签名与 Windows Authenticode 是两件事：此流程未配置 Authenticode 证书，不能承诺“已验证发布者”或无 SmartScreen 警告。
 
 ## 网关核心如何维护与重打包
 
@@ -191,7 +191,7 @@ node scripts/release.mjs test-build --out C:\Temp\ag-relay-test-artifacts
 | --- | --- |
 | 打包日期 | 2026-10-13 12:56（UTC+8） |
 | 本仓构建提交 | `5e76d98`（tag `v0.3.2`：自绘窗口标题栏、品牌图标、托盘图标独立、文档校订） |
-| 构建方式 | GitHub Actions，用仓库 `release-signing` 环境的签名 secret（非维护者本机） |
+| 构建方式 | 维护者本机，用仓库之外的签名私钥（环境变量提供，不上云端） |
 | `relay-retry-proxy.mjs` sha256 | `9f2c196d2a2077fda192e41bb903222f3f8d87bb8d5c3b571f6159db01a299b8` |
 | `relay-supervisor.mjs` sha256 | `f2f030b46999f84afc77f7f92643075c1d1f1ddf7ad3c327fbd92f5593dff77c` |
 | `relay-start-check.mjs` sha256 | `bb54cc7255b4f570ba1bdcfda255f19f0ca0a70fa6d028d0ed4e44f8146037c4` |
@@ -249,7 +249,9 @@ AG Relay 的自有代码（桌面面板、纳入本仓库自主维护的网关�
 
 第三方代码、图标、字体和随包二进制不因本项目采用 MIT 或使用 AI 辅助开发而改换许可证。完整说明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)，逐项版本、原文及来源见 [许可材料索引](licenses/COMPONENTS.md)。其中包括 Node 及其内含第三方的完整声明、Geist OFL、Lucide ISC / Feather MIT、React / Radix / shadcn / Tailwind、Rust 依赖和标准库，以及 WebView2Loader 的实际许可。
 
-安装分发应保留安装目录的 `licenses/LICENSE`、`licenses/THIRD_PARTY_NOTICES.md` 与整个 `licenses/third-party/`，不能只复制主程序或只附一份 MIT 文本。提交打包前运行 `node scripts/check-licenses.mjs` 可离线检查材料缺失、原文删节及依赖/Node 二进制变化；它不是法律审核或真实安装验收。
+安装分发应保留安装目录的 `licenses/LICENSE`、`licenses/THIRD_PARTY_NOTICES.md`、`licenses/来源.txt` 与生成的 `licenses/third-party/`。许可和版权原文全部保留；仅将 NSIS/WiX 的两套完整源码归档以及 `inventory.json` / `COMPONENTS.md` 移至本项目每次发布的同版 `third-party-sources.tar.gz`，不裁剪源码内部许可，也不因依赖仅用于开发而省略原文。安装目录的 `来源.txt` 给出固定产品版本的免费下载地址；再分发须同时提供该附件，不能只复制主程序或附一份 MIT 文本。新安装不再占用上述源档和索引空间；NSIS 应用内覆盖升级跳过旧卸载，因此旧版本已安装的这些文件可能保留。为避免目录链接竞态误删外部文件，本次不增加自动清理，升级后的磁盘占用不保证立即减少。
+
+`node scripts/prepare-distribution.mjs` 离线重建 `src-tauri/generated/license-distribution`；Tauri 打包前及 Cargo 的 `build.rs` 都会自动执行，直接 `cargo test` / 只安装 Node 的发布复核环境也会准备完整许可资源，不依赖 `node_modules`。准备器先验证输入，再在独立临时目录生成；只有旧目录的生成记录、完整文件集和摘要均匹配才替换，发现人工追加/修改文件会保留目录并拒绝构建。提交打包前运行 `node scripts/check-licenses.mjs --distribution src-tauri/generated/license-distribution` 可检查仓库材料、精简暂存与来源附件的逐项完整性、版本及依赖/Node 二进制变化；它不是法律审核或真实安装验收。纯 Node 分发回归测试为 `node --test scripts/license-distribution.test.mjs scripts/check-licenses.test.mjs`，不调用 Cargo 或生产密钥。
 
 本 README 的许可与可见性状态（2026-10-13）：`xinxinxiaoxin/ag-relay` **已公开**并已发布 `v0.3.0` / `v0.3.1`；`xinxinxiaoxin/relay-retry-proxy` 仍保持私有。公开前的敏感信息复核结论见[公开前复核报告](docs/security/spec19-prepublication-audit.md)。
 
