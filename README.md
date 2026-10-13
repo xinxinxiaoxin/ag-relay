@@ -2,7 +2,7 @@
 
 AG Relay 是由**网关核心**与 **Tauri 桌面面板**组成的本地网关软件。核心在本仓自主维护，与面板配套开发、测试和发布。
 
-规范与工单见仓库 Issues（规范 #1，骨架工单 #2，网关工单 #3）。
+规范与工单见仓库 [Issues](https://github.com/xinxinxiaoxin/ag-relay/issues)。面向 agent 的 issue 操作约定见 [docs/agents/issue-tracker.md](docs/agents/issue-tracker.md)，领域术语见 [GLOSSARY.md](GLOSSARY.md)。
 
 ## 安装
 
@@ -30,7 +30,7 @@ AG Relay 是由**网关核心**与 **Tauri 桌面面板**组成的本地网关�
 
 用户分发采用 **NSIS（优先）或 MSI**，两者都自带 `node.exe` 与 `resources/gateway/`，不依赖宿主机安装 Node。保留 `identifier=ag-relay` 和 MSI UpgradeCode，安装位置变化不改变 `%APPDATA%\ag-relay\` 下的设置与日志。旧 ZIP 版需先在安全停止网关后手动安装一次具备更新能力的版本；后续升级保持原安装器类型。
 
-开发前置：Windows x64、Node/npm、Rust/MSVC、WebView2；`npm ci` 安装锁定依赖。构建工具可能准备 WiX、NSIS；安装时若缺少 WebView2，将联网下载其 bootstrapper。**构建不等于运行安装器**。未配置生产公钥时，默认 `pubkey=""`、`endpoints=[]`，应用更新禁用；普通 Tauri 打包若缺少签名私钥会失败，不会降级为无签名发布。
+开发前置：Windows x64、Node/npm、Rust/MSVC、WebView2；`npm ci` 安装锁定依赖。构建工具可能准备 WiX、NSIS；安装时若缺少 WebView2，将联网下载其 bootstrapper。**构建不等于运行安装器**。生产更新公钥与端点现已配置（见 [tauri.conf.json](src-tauri/tauri.conf.json) 的 `plugins.updater`）；若某次构建未配置生产公钥，则为 `pubkey=""`、`endpoints=[]`，应用更新禁用。普通 Tauri 打包若缺少签名私钥会失败，不会降级为无签名发布。
 
 ```powershell
 # 只编译面板和程序，不生成安装包、不启动应用
@@ -70,20 +70,41 @@ node scripts/release.mjs test-build --out C:\Temp\ag-relay-test-artifacts
 3. **作为一个产品构建发布**：验证后按构建流程将核心与桌面面板一并打包，使用同一 AG Relay 版本发布；不提供独立追踪外部源码的「仅更新核心」。不得覆盖正在运行的网关文件。
 4. **记录可追溯快照**：实际完成构建后，记录本仓构建提交、核心四个 `.mjs`（`relay-retry-proxy.mjs`、`relay-supervisor.mjs`、`relay-start-check.mjs`、`bounded-file-log.mjs`）与 `gateway-config.bat` 的 SHA-256、成品哈希及构建时间。四个 `.mjs` 与配置文件一样逐份纳入发布快照，任一改动后重打包都刷新对应哈希。外部改进按需审查、择取补丁，记录来源提交并保留版权与许可要求，不再整体覆盖脚本；详见维护说明。
 
-## 当前打包快照
+## 打包快照
 
-以下保留已发布 **v0.2.0** 的构建记录与核心历史来源，不表示当前工作分支已经重打包；后续版本以本仓构建提交为基准记录快照。
+以下按时间倒序记录每次实际构建的快照，用于追溯「哪个提交、哪些核心脚本、产出哪个成品」。**没有实际重打包就不新增记录，也不更新日期来伪装新产物。**
+
+### v0.3.1（当前）
 
 | 项 | 值 |
 | --- | --- |
-| 打包日期 | 2026-10-12 07:22（UTC+8，**v0.2.0** 发布版重打包，构建自 `main`，React/shadcn UI 重构 spec #9 全量交付 + 审查修复） |
-| 核心历史来源提交 | `28b764d`（xinxinxiaoxin/relay-retry-proxy，fix: Codex 跨资源错误最多尝试 5 次后直接报错；此后由本仓自主维护） |
+| 打包日期 | 2026-10-12 22:38（UTC+8） |
+| 本仓构建提交 | `92a8104`（`main`，spec #19 全量交付，含安装器、应用内更新与日志有界） |
+| `relay-retry-proxy.mjs` sha256 | `9f2c196d2a2077fda192e41bb903222f3f8d87bb8d5c3b571f6159db01a299b8` |
+| `relay-supervisor.mjs` sha256 | `f2f030b46999f84afc77f7f92643075c1d1f1ddf7ad3c327fbd92f5593dff77c` |
+| `relay-start-check.mjs` sha256 | `bb54cc7255b4f570ba1bdcfda255f19f0ca0a70fa6d028d0ed4e44f8146037c4` |
+| `bounded-file-log.mjs` sha256 | `3841b877ce76e6ff37497bfbcd65e3dd4f478442dc7fff9eaf4b39612b25c205` |
+| `gateway-config.bat` sha256 | `102865c82e8785fcf1630260f25db32e2b9f4ba3a990c768bfc9fce3deaa1faa`（环境变量真值，无密钥） |
+| NSIS `ag-relay_0.3.1_x64-setup.exe` sha256 | `01b2c42a4e6cca05ab2c6946e49aca9319fd248e1b1e80a11db3716102cdff2d` |
+| MSI `ag-relay_0.3.1_x64_zh-CN.msi` sha256 | `748a7e96da3a239dafa9a62ed5d231b4fb05c1560c6be6952d6486eeeb1b4aea` |
+| Release | [v0.3.1](https://github.com/xinxinxiaoxin/ag-relay/releases/tag/v0.3.1)（NSIS + MSI + 各自 `.sig` + `latest.json` + `SHA256SUMS`） |
+
+### v0.2.0（历史）
+
+v0.2.0 早于 `bounded-file-log.mjs` 引入，此表按当时口径保留，不回填新脚本哈希。
+
+| 项 | 值 |
+| --- | --- |
+| 打包日期 | 2026-10-12 07:22（UTC+8，React/shadcn UI 重构 spec #9 全量交付 + 审查修复） |
+| 核心历史来源提交 | `28b764d`（xinxinxiaoxin/relay-retry-proxy；此后由本仓自主维护） |
 | `relay-retry-proxy.mjs` sha256 | `e8395e0f90fe46bf1059bfcbac77e65d887d09d4ed5057490f85847e5cde85dc` |
 | `relay-supervisor.mjs` sha256 | `f2f030b46999f84afc77f7f92643075c1d1f1ddf7ad3c327fbd92f5593dff77c` |
 | `relay-start-check.mjs` sha256 | `bb54cc7255b4f570ba1bdcfda255f19f0ca0a70fa6d028d0ed4e44f8146037c4` |
-| `gateway-config.bat` sha256 | `102865c82e8785fcf1630260f25db32e2b9f4ba3a990c768bfc9fce3deaa1faa`（环境变量真值，无密钥） |
-| `ag-relay.exe` sha256 | `fb6db99cbef94629cd135e42f51115c34b9d8c88f658e62beffc235e2d1092c8`（**v0.2.0**，`target-t1\release\ag-relay.exe`；GitHub Release 资产 `ag-relay-v0.2.0-win64.zip`；该发布版核心与上述历史来源快照一致） |
-| 本票验收证据 | `E:\codex项目\网关\ag-relay-notes\evidence\`（`t9-completion-report.md` 四闸门记录 + `t1`…`t8`/`review-fixes` 每页/每态渲染截图） |
+| `gateway-config.bat` sha256 | `102865c82e8785fcf1630260f25db32e2b9f4ba3a990c768bfc9fce3deaa1faa` |
+| `ag-relay.exe` sha256 | `fb6db99cbef94629cd135e42f51115c34b9d8c88f658e62beffc235e2d1092c8` |
+| Release | [v0.2.0](https://github.com/xinxinxiaoxin/ag-relay/releases/tag/v0.2.0)（资产 `ag-relay-v0.2.0-win64.zip`，ZIP 分发，无应用内更新） |
+
+验收证据与复核结论（不提交进仓库）：规格 #19 的敏感信息复核见[公开前复核报告](docs/security/spec19-prepublication-audit.md)，真机验收步骤与判定标准见[真实 Windows 成品验收清单](docs/windows-acceptance-checklist.md)。
 
 ## 冒烟自检
 
@@ -99,12 +120,14 @@ AG Relay 的自有代码（桌面面板、纳入本仓库自主维护的网关�
 
 第三方代码、图标、字体和随包二进制不因本项目采用 MIT 或使用 AI 辅助开发而改换许可证。完整说明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)，逐项版本、原文及来源见 [许可材料索引](licenses/COMPONENTS.md)。其中包括 Node 及其内含第三方的完整声明、Geist OFL、Lucide ISC / Feather MIT、React / Radix / shadcn / Tailwind、Rust 依赖和标准库，以及 WebView2Loader 的实际许可。
 
-安装分发应保留安装目录的 `licenses/LICENSE`、`licenses/THIRD_PARTY_NOTICES.md` 与整个 `licenses/third-party/`，不能只复制主程序或只附一份 MIT 文本。提交打包前运行 `node scripts/check-licenses.mjs` 可离线检查材料缺失、原文删节及依赖/Node 二进制变化；它不是法律审核或真实安装验收。本说明不变更任何仓库的可见性，也不表示已通过公开核查或已发布新版。
+安装分发应保留安装目录的 `licenses/LICENSE`、`licenses/THIRD_PARTY_NOTICES.md` 与整个 `licenses/third-party/`，不能只复制主程序或只附一份 MIT 文本。提交打包前运行 `node scripts/check-licenses.mjs` 可离线检查材料缺失、原文删节及依赖/Node 二进制变化；它不是法律审核或真实安装验收。
+
+本 README 的许可与可见性状态（2026-10-13）：`xinxinxiaoxin/ag-relay` **已公开**并已发布 `v0.3.0` / `v0.3.1`；`xinxinxiaoxin/relay-retry-proxy` 仍保持私有。公开前的敏感信息复核结论见[公开前复核报告](docs/security/spec19-prepublication-audit.md)。
 
 ## 目录结构
 
-- `src/`：前端（原生 HTML/CSS/JS，无框架）
-- `src-tauri/`：Tauri 2 壳（Rust）
+- `src/`：**桌面面板**前端（React 19 + Vite + Tailwind v4 + shadcn/ui，见 [ADR-0001](docs/adr/0001-react-frontend.md)）
+- `src-tauri/`：Tauri 2 桌面面板（Rust）
 - `src-tauri/resources/gateway/`：本仓自主维护的网关核心四脚本（`relay-retry-proxy.mjs`、`relay-supervisor.mjs`、`relay-start-check.mjs`、`bounded-file-log.mjs`）+ `gateway-config.bat` 默认配置契约（见[维护说明](docs/gateway-core-maintenance.md)）
 - `scripts/make-icons.ps1`：重新生成应用图标（AG 字样，PNG + ICO）
 - `scripts/smoke.ps1`：构建冒烟检查

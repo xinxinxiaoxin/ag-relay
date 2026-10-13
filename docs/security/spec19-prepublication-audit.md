@@ -57,10 +57,20 @@
 ## 6. 明确未执行的门槛（必须由维护者完成或决定）
 
 1. **仓库可见性未做任何更改**：复核结束时 `ag-relay` 与 `relay-retry-proxy` 仍为私有；把 `ag-relay` 设为公开属基本不可逆操作，本工单不执行。
+
+> **2026-10-13 补注**：上条记录的是本报告当时的复核结论。此后维护者已将 `xinxinxiaoxin/ag-relay` 设为公开并发布 `v0.3.0` / `v0.3.1`；`xinxinxiaoxin/relay-retry-proxy` 仍保持私有。本报告其余结论不因此改变，仅此条已不再是当前状态。
 2. **未发布任何 Release、未推送 tag、未覆盖旧资产**。
+
+> **2026-10-13 补注**：此后已按发布流程推送 tag 并发布 `v0.3.0` / `v0.3.1`（含 NSIS/MSI、各自 `.sig`、`latest.json`、`SHA256SUMS`），未覆盖旧资产。此条不再是当前状态。
+
 3. **未做真实安装/升级验收**：安装、应用内更新、无预装 Node 的干净机器运行等，均须在独立 Windows 沙箱或 VM 内人工执行（见 `docs/windows-acceptance-checklist.md`）。
 4. **正式签名的公钥/私钥仍是发布门槛**：仓库内不放生产公钥与端点，构建工具在缺少生产材料时 fail-closed。
+
+> **2026-10-13 补注**：生产公钥与更新端点已提交至 `src-tauri/tauri.conf.json` 的 `plugins.updater`（私钥仍只在仓库之外的 GitHub 环境 secrets）。此条所述「仓库内不放生产公钥」不再是当前状态；fail-closed 行为本身仍保留。
+
 5. **预编译安装器插件来源未闭合**：`nsis_tauri_utils` 官方 DLL 的上游仓库不提交 `Cargo.lock`、不固定 Rust 工具链、历史构建日志不可取得，因此只能核实其声明的兼容范围，不能还原实际解析版本与编译环境。`licenses/inventory.json` 的 `releaseBlockers` 保留此项，正式 `--installer-runtime` 检查会据此拒绝放行。这是**来源与可重复性限制，不是已发现凭据泄露或恶意代码**。维护者需二选一：明确接受该官方预编译来源并记录例外，或另行受控重建并重新核验。
+
+> **2026-10-13 补注**：维护者已于 2026-10-12 决定**接受该官方预编译来源**，理由与记录见 [THIRD_PARTY_NOTICES.md](../../THIRD_PARTY_NOTICES.md) 的「预编译插件来源限制（已由维护者决定接受，限制仍然存在）」，决定记录在 `licenses/inventory.json` 的 `releaseBlockers[].decision`。来源与可重复性限制本身仍然存在。
 
 ## 7. 覆盖限制（本报告不能证明的事）
 
@@ -86,6 +96,6 @@
 - **路径重映射生效**：包内 `ag-relay.exe` 中本机构建前缀（`C:\Users\…`、`.cargo`、`.rustup`、工作树路径）由上一轮同类产物的约 **660 处降为 0**；仅剩的中性虚拟前缀（如 `/cargo`）是重映射后的产物，不泄露主机信息。
 - 签名私钥：两份容器与包内二进制均无私钥材料；外层 “secret key” 类命中全部可归因为公开的 minisign 签名注释标签。
 
-**可见性现状**：复核结束时 `xinxinxiaoxin/ag-relay` 与 `xinxinxiaoxin/relay-retry-proxy` **均为私有，本轮未改动**。
+**可见性现状**：复核结束时 `xinxinxiaoxin/ag-relay` 与 `xinxinxiaoxin/relay-retry-proxy` **均为私有，本轮未改动**。（**2026-10-13 补注**：`ag-relay` 其后已由维护者设为公开，`relay-retry-proxy` 仍私有。见 §6 第 1 条补注。）
 
 **本轮未覆盖**：未重新对两份 `.sig` 做密码学验签（构建时 `release.mjs verify` 已验，本轮只做格式与解码确认）；不可达对象与 reflog、远端历史、在线 Authenticode 信任链、真实安装运行行为、前端压缩资源语义逆向、随包二进制深度逆向均不在覆盖内（后者本就属于规格 Out of Scope）。
