@@ -51,7 +51,7 @@ node scripts/release.mjs test-build --out C:\Temp\ag-relay-test-artifacts
 
 1. 维护者在可信离线环境生成并备份正式 Tauri 签名密钥，只把**公钥内容**提交到 `src-tauri/tauri.conf.json` 的 `plugins.updater.pubkey`。不要把私钥、密码或 `.env` 提交/随包分发。私钥是后续所有更新的信任根：**丢失后无法再通过应用内更新升级，只能让用户手动重装**，务必备份到仓库之外的安全位置。
 2. 将 `endpoints` 设置为 `https://github.com/xinxinxiaoxin/ag-relay/releases/latest/download/latest.json`，保留 `requireSignedVersion=true`，不得打开不安全 TLS 或允许降级。公钥变更需设计旧版本信任迁移，不能随意换钥。
-3. GitHub Environment `release-signing` 保存 `TAURI_SIGNING_PRIVATE_KEY`、`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` secrets（密码变量可为空）；`release-publish` 设置人工必需审批与允许的发布 tag。仓库及 Release 必须能被用户匿名读取；私有仓库的 404 不能伪装成“没有更新”，不向客户端嵌入 GitHub token。
+3. GitHub Environment `release-signing` 保存 `TAURI_SIGNING_PRIVATE_KEY` secret（本项目的密钥未设密码，因此不需要 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`；若密钥带密码则须一并配置），仓库及 Release 必须能被用户匿名读取——私有仓库的 404 不能伪装成“没有更新”，也不向客户端嵌入 GitHub token。**人工审批只保留在发布前的 `release-publish` 环境**：签名构建直接跑，是否把版本公开给人点一下决定（两个环境都只允许从 `v*` 稳定版本 tag 部署）。
 4. 同步 `package.json`、`package-lock.json`、`Cargo.toml`、`tauri.conf.json` 版本并创建新的稳定 `vX.Y.Z` tag；补齐所有 `LICENSE`、`THIRD_PARTY_NOTICES.md`、`licenses/**`（含实际 NSIS/WiX 及插件运行时材料）；正式预检强制按实际 Rust 版本及 `--installer-runtime` 核对许可。发布前完成源码/历史/资产敏感信息复核，结论记在[公开前敏感信息复核报告](docs/security/spec19-prepublication-audit.md)。
 5. 在独立 Windows Sandbox/VM 实测无系统 Node 安装启动、旧版升级、数据保留及安全排空更新。本机已实测「安装 → 启动 → 网关托管 → 设置持久化 → 实时活动刷新」，但**干净机器与完整升级链路仍须在隔离环境中逐条确认**。逐条步骤、判定标准与证据留存见[真实 Windows 成品验收清单](docs/windows-acceptance-checklist.md)。
 

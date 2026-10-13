@@ -24,7 +24,7 @@ concurrency:
 jobs:
   build:
     runs-on: windows-latest
-    # 必须预先配置 required reviewers 和允许的稳定版本 tags，密钥仅存此环境。
+    # 密钥仅存此环境，且只允许从稳定版本 tags 部署；人工审批只保留在发布前的 release-publish。
     environment: release-signing
     env:
       CARGO_BUILD_JOBS: '2'
