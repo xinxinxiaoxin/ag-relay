@@ -12,14 +12,7 @@ const isRecordedDecision = (decision) => Boolean(decision)
   && /^\d{4}-\d{2}-\d{2}$/.test(String(decision.decidedAt ?? ''))
   && typeof decision.rationale === 'string' && decision.rationale.trim().length > 0;
 
-try {
-  const { values } = parseArgs({
-    options: {
-      root: { type: 'string' },
-      'rust-version': { type: 'string' },
-      'installer-runtime': { type: 'boolean', default: false },
-    },
-  });
+export function checkLicenses(values = {}) {
   const root = resolve(values.root ?? resolve(dirname(fileURLToPath(import.meta.url)), '..'));
   const read = (path) => {
     try { return readFileSync(resolve(root, path)); }
@@ -73,8 +66,29 @@ try {
       if (actual !== material.sha256) throw new Error(`许可原文校验不符：${material.path}`);
     }
   }
-  console.log(`许可校验通过：${inventory.components.length} 个组件的材料齐全。`);
-} catch (error) {
-  console.error(`许可校验失败：${error.message}`);
-  process.exitCode = 1;
+  return inventory;
 }
+
+async function main() {
+  try {
+    const { values } = parseArgs({ options: {
+      root: { type: 'string' },
+      'rust-version': { type: 'string' },
+      'installer-runtime': { type: 'boolean', default: false },
+      distribution: { type: 'string' },
+      'test-only': { type: 'boolean', default: false },
+    } });
+    const inventory = checkLicenses(values);
+    if (values.distribution) {
+      const { verifyDistribution } = await import('./prepare-distribution.mjs');
+      verifyDistribution({ root: values.root ? resolve(values.root) : undefined,
+        out: resolve(values.distribution), testOnly: values['test-only'] });
+    }
+    console.log(`许可校验通过：${inventory.components.length} 个组件的材料齐全。`);
+  } catch (error) {
+    console.error(`许可校验失败：${error.message}`);
+    process.exitCode = 1;
+  }
+}
+
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main();

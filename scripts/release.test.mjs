@@ -6,6 +6,7 @@ import { after, before } from 'node:test';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
+import { prepareDistribution, sourceArchiveName } from './prepare-distribution.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const cli = path.join(root, 'scripts/release.mjs');
@@ -46,6 +47,8 @@ before(() => {
     };
   }
   fs.writeFileSync(path.join(artifacts, 'latest.json'), JSON.stringify(manifest, null, 2));
+  const distribution = prepareDistribution({ out: path.join(temp, 'license-distribution'), version: manifest.version, testOnly: true });
+  fs.copyFileSync(distribution.sourceArchive, path.join(artifacts, sourceArchiveName));
 });
 after(() => fs.rmSync(temp, { recursive: true, force: true }));
 
@@ -181,6 +184,7 @@ test('测试产物生成可读清单并明确标记不可发布，不把私钥�
   assert.match(text, /\n  "version"/);
   assert.ok(fs.existsSync(path.join(out, 'TEST-ONLY-NOT-FOR-RELEASE')));
   assert.ok(fs.existsSync(path.join(out, 'SHA256SUMS')));
+  assert.ok(fs.existsSync(path.join(out, sourceArchiveName)));
   assert.ok(!fs.readdirSync(out).some(name => name.endsWith('.key')));
 });
 

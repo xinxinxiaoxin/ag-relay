@@ -7,7 +7,7 @@
     "frontendDist": "../dist",
     "devUrl": "http://127.0.0.1:4318",
     "beforeDevCommand": "npm run dev",
-    "beforeBuildCommand": "npm run build"
+    "beforeBuildCommand": "node scripts/prepare-distribution.mjs && npm run build"
   },
   "app": {
     "withGlobalTauri": true,
@@ -71,9 +71,7 @@
     ],
     "resources": {
       "resources/gateway/": "resources/gateway/",
-      "../LICENSE": "licenses/LICENSE",
-      "../THIRD_PARTY_NOTICES.md": "licenses/THIRD_PARTY_NOTICES.md",
-      "../licenses/": "licenses/third-party/"
+      "generated/license-distribution/installer/": "licenses/"
     }
   },
   "plugins": {

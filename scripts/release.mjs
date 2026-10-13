@@ -6,6 +6,7 @@ import { spawnSync } from 'node:child_process';
 import { parseArgs } from 'node:util';
 import { createHash } from 'node:crypto';
 import os from 'node:os';
+import { distributionPath, prepareDistribution, sourceArchiveName, verifyDistribution, verifySourceArchive } from './prepare-distribution.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -26,14 +27,14 @@ function preflight(file = configPath, { signing = true, inputs = true } = {}) {
   return config;
 }
 
-function verify(config, artifacts, production = false) {
+export function verify(config, artifacts, production = false, { sourceRoot = root, verifySignatures = verifyUpdaterSignatures } = {}) {
   if (!config || !artifacts) throw new Error('verify 需要 --config 与 --artifacts');
+  const settings = JSON.parse(fs.readFileSync(config, 'utf8'));
   if (production && fs.existsSync(path.join(artifacts, 'TEST-ONLY-NOT-FOR-RELEASE'))) {
     throw new Error('临时测试产物不能发布');
   }
   if (production) {
     const settings = preflight(config, { signing: false, inputs: false });
-    if (process.env.RELEASE_TAG && process.env.RELEASE_TAG !== `v${settings.version}`) throw new Error('发布 tag 与产品版本不一致');
     const manifest = JSON.parse(fs.readFileSync(path.join(artifacts, 'latest.json'), 'utf8'));
     const names = installerNames(settings.version);
     if (manifest.version !== settings.version) throw new Error('清单与发布配置版本不一致');
@@ -44,15 +45,22 @@ function verify(config, artifacts, production = false) {
         throw new Error('发布资产 URL 与正式版本不一致');
       }
     }
-    const expected = ['latest.json', ...Object.values(names).flatMap(name => [name, `${name}.sig`])].sort();
+    const expected = ['latest.json', sourceArchiveName, ...Object.values(names).flatMap(name => [name, `${name}.sig`])].sort();
     if (JSON.stringify(fs.readdirSync(artifacts).sort()) !== JSON.stringify([...expected, 'SHA256SUMS'].sort())) throw new Error('发布目录缺少文件或混入额外文件');
     const sums = expected.map(name => `${createHash('sha256').update(fs.readFileSync(path.join(artifacts, name))).digest('hex')}  ${name}`).join('\n');
     if (fs.readFileSync(path.join(artifacts, 'SHA256SUMS'), 'utf8') !== `${sums}\n`) throw new Error('发布文件校验和不匹配');
   }
-  const env = { ...process.env };
+  const testOnly = !production
+    && JSON.stringify(settings.plugins?.updater?.endpoints) === JSON.stringify(['https://example.invalid/ag-relay-test/latest.json']);
+  verifySourceArchive({ root: sourceRoot, file: path.join(artifacts, sourceArchiveName), version: settings.version, testOnly });
+  const env = { ...process.env, AG_RELAY_TEST_DISTRIBUTION: testOnly ? '1' : '0' };
   delete env.TAURI_SIGNING_PRIVATE_KEY;
   delete env.TAURI_SIGNING_PRIVATE_KEY_PATH;
   delete env.TAURI_SIGNING_PRIVATE_KEY_PASSWORD;
+  verifySignatures(config, artifacts, { env });
+}
+
+function verifyUpdaterSignatures(config, artifacts, { env }) {
   const result = spawnSync('cargo', ['run', '--locked', '-j', '2', '--manifest-path',
     path.join(root, 'src-tauri/Cargo.toml'), '--example', 'verify-update', '--', config, artifacts],
   { cwd: root, env, stdio: 'inherit' });
@@ -67,7 +75,9 @@ function installerNames(version) {
   return { nsis: `ag-relay_${version}_x64-setup.exe`, msi: `ag-relay_${version}_x64_zh-CN.msi` };
 }
 
-function stage(configFile, bundleDir, out, notesFile, testOnly) {
+export function stage(configFile, bundleDir, out, notesFile, testOnly, {
+  sourceRoot = root, distributionDir = distributionPath(sourceRoot), verifySignatures = verifyUpdaterSignatures,
+} = {}) {
   if (!bundleDir || !out || !notesFile) throw new Error('生成清单需要 --bundle-dir、--out、--notes');
   const config = JSON.parse(fs.readFileSync(configFile, 'utf8'));
   const names = installerNames(config.version);
@@ -85,12 +95,14 @@ function stage(configFile, bundleDir, out, notesFile, testOnly) {
       manifest.platforms[`windows-x86_64-${kind}`] = { url: `${base}/${name}`,
         signature: fs.readFileSync(`${source}.sig`, 'utf8').trim() };
     }
+    verifyDistribution({ root: sourceRoot, out: distributionDir, version: config.version, testOnly });
+    fs.copyFileSync(path.join(distributionDir, sourceArchiveName), path.join(out, sourceArchiveName));
     fs.writeFileSync(path.join(out, 'latest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
     if (testOnly) {
       fs.writeFileSync(path.join(out, 'TEST-ONLY-NOT-FOR-RELEASE'), '独立临时测试签名，禁止发布，未运行安装验收。\n');
       fs.copyFileSync(configFile, path.join(out, 'tauri.test.json'));
     }
-    verify(configFile, out);
+    verify(configFile, out, false, { sourceRoot, verifySignatures });
     const sums = fs.readdirSync(out).sort().map(name => `${createHash('sha256').update(fs.readFileSync(path.join(out, name))).digest('hex')}  ${name}`).join('\n');
     fs.writeFileSync(path.join(out, 'SHA256SUMS'), `${sums}\n`);
     console.log(`${testOnly ? '仅测试' : '正式'}发布物已验证：${path.resolve(out)}`);
@@ -139,7 +151,6 @@ function checkBuildInputs(config, installerRuntime = false) {
     fs.readFileSync(path.join(root, 'src-tauri/Cargo.toml'), 'utf8').match(/^version = "([^"]+)"/m)?.[1]];
   installerNames(config.version);
   if (versions.some(version => version !== config.version)) throw new Error('产品版本不一致，拒绝混合版本发布');
-  if (process.env.RELEASE_TAG && process.env.RELEASE_TAG !== `v${config.version}`) throw new Error('发布 tag 与产品版本不一致');
   if (config.identifier !== 'ag-relay' || config.productName !== 'ag-relay'
       || config.bundle?.createUpdaterArtifacts !== true
       || JSON.stringify(config.bundle.targets) !== JSON.stringify(['nsis', 'msi'])
@@ -148,14 +159,15 @@ function checkBuildInputs(config, installerRuntime = false) {
   }
   assertInstallerSafetyPolicy(config);
   const resources = config.bundle.resources;
-  const requiredResources = { 'resources/gateway/': 'resources/gateway/', '../LICENSE': 'licenses/LICENSE',
-    '../THIRD_PARTY_NOTICES.md': 'licenses/THIRD_PARTY_NOTICES.md', '../licenses/': 'licenses/third-party/' };
-  if (JSON.stringify(config.bundle.externalBin) !== JSON.stringify(['binaries/node'])
+  const requiredResources = { 'resources/gateway/': 'resources/gateway/',
+    'generated/license-distribution/installer/': 'licenses/' };
+  if (config.build?.beforeBuildCommand !== 'node scripts/prepare-distribution.mjs && npm run build'
+      || JSON.stringify(config.bundle.externalBin) !== JSON.stringify(['binaries/node'])
       || !resources || Array.isArray(resources)
       || Object.entries(requiredResources).some(([from, to]) => resources[from] !== to)
       || Object.keys(resources).length !== Object.keys(requiredResources).length
       || !fs.existsSync(path.join(root, 'src-tauri/binaries/node-x86_64-pc-windows-msvc.exe'))) {
-    throw new Error('随包资源必须包含自带 Node、完整网关目录及完整许可目录，且不能混入额外资源');
+    throw new Error('随包资源必须包含自带 Node、完整网关及构建前重新生成的许可目录，且不能混入额外资源');
   }
   const rustc = spawnSync('rustc', ['--version'], { cwd: root, encoding: 'utf8' });
   const rustVersion = rustc.stdout?.match(/^rustc (\S+)/)?.[1];
@@ -198,7 +210,8 @@ function build(options, testOnly) {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'ag-relay-build-'));
   const tauri = path.join(root, 'node_modules/@tauri-apps/cli/tauri.js');
   // WiX 会把 sidecar 中转为临时目录下的 node.exe；必须隔离 TEMP/TMP，不能共用用户临时文件。
-  const env = { ...process.env, CARGO_BUILD_JOBS: '2', TEMP: temp, TMP: temp, TMPDIR: temp };
+  const env = { ...process.env, CARGO_BUILD_JOBS: '2', TEMP: temp, TMP: temp, TMPDIR: temp,
+    AG_RELAY_TEST_DISTRIBUTION: testOnly ? '1' : '0' };
   // 仅影响本次构建子进程；编码形式避免 Windows 含空格路径被 Cargo 拆成多个参数。
   const inheritedFlags = env.CARGO_ENCODED_RUSTFLAGS !== undefined
     ? env.CARGO_ENCODED_RUSTFLAGS.split('\x1f') : (env.RUSTFLAGS || '').split(/\s+/);
@@ -253,26 +266,38 @@ function build(options, testOnly) {
   }
 }
 
-try {
-  const { values, positionals } = parseArgs({ allowPositionals: true, options: {
-    config: { type: 'string' }, artifacts: { type: 'string' },
-    'bundle-dir': { type: 'string' }, out: { type: 'string' }, notes: { type: 'string' },
-    production: { type: 'boolean', default: false }, binary: { type: 'string' },
-  } });
-  if (positionals[0] === 'preflight') {
-    preflight(values.config);
-    console.log('发布前置检查通过');
-  } else if (positionals[0] === 'build' || positionals[0] === 'test-build') {
-    if (values.config) throw new Error('构建只能使用仓库已审核配置，测试密钥由 test-build 独立生成');
-    build(values, positionals[0] === 'test-build');
-  } else if (positionals[0] === 'test-manifest') {
-    stage(values.config, values['bundle-dir'], values.out, values.notes, true);
-  } else if (positionals[0] === 'audit-paths') {
-    auditPaths(values.binary);
-  } else if (positionals[0] === 'verify') {
-    verify(values.config, values.artifacts, values.production);
-  } else throw new Error('用法：node scripts/release.mjs preflight|build|test-build|test-manifest|verify|audit-paths；构建/清单需 --out，验签需 --config 与 --artifacts');
-} catch (error) {
-  console.error(error.message);
-  process.exitCode = 1;
+function main() {
+  try {
+    const { values, positionals } = parseArgs({ allowPositionals: true, options: {
+      config: { type: 'string' }, artifacts: { type: 'string' },
+      'bundle-dir': { type: 'string' }, out: { type: 'string' }, notes: { type: 'string' },
+      production: { type: 'boolean', default: false }, binary: { type: 'string' },
+    } });
+    if (positionals[0] === 'preflight') {
+      preflight(values.config);
+      console.log('发布前置检查通过');
+    } else if (positionals[0] === 'build' || positionals[0] === 'test-build') {
+      if (values.config) throw new Error('构建只能使用仓库已审核配置，测试密钥由 test-build 独立生成');
+      build(values, positionals[0] === 'test-build');
+    } else if (positionals[0] === 'test-manifest') {
+      const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'ag-relay-test-manifest-'));
+      try {
+        const distributionDir = path.join(temp, 'license-distribution');
+        const config = JSON.parse(fs.readFileSync(values.config, 'utf8'));
+        prepareDistribution({ out: distributionDir, version: config.version, testOnly: true });
+        stage(values.config, values['bundle-dir'], values.out, values.notes, true, { distributionDir });
+      } finally {
+        fs.rmSync(temp, { recursive: true, force: true });
+      }
+    } else if (positionals[0] === 'audit-paths') {
+      auditPaths(values.binary);
+    } else if (positionals[0] === 'verify') {
+      verify(values.config, values.artifacts, values.production);
+    } else throw new Error('用法：node scripts/release.mjs preflight|build|test-build|test-manifest|verify|audit-paths；构建/清单需 --out，验签需 --config 与 --artifacts');
+  } catch (error) {
+    console.error(error.message);
+    process.exitCode = 1;
+  }
 }
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main();
