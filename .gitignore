@@ -4,6 +4,7 @@ src-tauri/target/
 src-tauri/gen/schemas/
 *.log
 .claude/worktrees/
+.claude/previews/
 # 签名私钥和本地发布暂存绝不进入版本控制（公钥写入 tauri.conf.json）。
 *.key
 *.key.pub

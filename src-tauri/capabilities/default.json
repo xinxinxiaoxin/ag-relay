@@ -1,7 +1,14 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "主窗口核心权限；T2 增 core:app:default 以允许前端读取应用版本（运行版本主显）",
+  "description": "主窗口核心权限与窗口拖动、最小化、最大化和安全关闭",
   "windows": ["main"],
-  "permissions": ["core:default", "core:app:default"]
+  "permissions": [
+    "core:default",
+    "core:app:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-minimize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-close"
+  ]
 }

@@ -91,7 +91,7 @@ pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     }
 
     TrayIconBuilder::with_id(TRAY_ID)
-        .icon(app.default_window_icon().expect("bundle 图标已配置").clone())
+        .icon(tauri::include_image!("icons/tray.png"))
         .tooltip("AG Relay · 网关")
         .menu(&menu)
         // 左键不弹菜单：单击留给「显示/隐藏面板」切换，菜单只走右键

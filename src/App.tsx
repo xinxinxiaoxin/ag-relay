@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   ActivityIcon, ArrowUpRightIcon, CheckIcon, CopyIcon, FileTextIcon, LogOutIcon, MonitorIcon,
-  MoreHorizontalIcon, NetworkIcon, PlayIcon, RotateCwIcon, SearchIcon, Settings2Icon,
+  MoreHorizontalIcon, PlayIcon, RotateCwIcon, SearchIcon, Settings2Icon,
   ShieldAlertIcon, ShieldCheckIcon, SquareIcon, TerminalIcon,
 } from 'lucide-react'
 import { toast } from 'sonner'
@@ -28,6 +28,8 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel,
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { Input } from '@/components/ui/input'
 import { UpdatePanel } from '@/components/update-panel'
+import { WindowControls } from '@/components/window-controls'
+import brandIcon from '@/assets/brand-small.png'
 import { Toaster } from '@/components/ui/sonner'
 import { OverviewPage } from '@/pages/overview-page'
 import { LogsPage } from '@/pages/logs-page'
@@ -70,7 +72,7 @@ function AppSidebar({ page, onNavigate, onSearch, onAction, appVersion }: {
         <SidebarMenu>
           <SidebarMenuItem>
             <SidebarMenuButton size="lg" onClick={() => navigate('overview')} className="gap-3 rounded-[18px] hover:bg-transparent" tooltip="AG Relay · 本地网关">
-              <div className="flex size-10 shrink-0 items-center justify-center rounded-[14px] border border-border bg-white text-foreground"><NetworkIcon className="size-5" strokeWidth={1.6} /></div>
+              <img src={brandIcon} alt="" className="size-10 shrink-0 group-data-[collapsible=icon]:size-8" draggable={false} />
               <div className="grid gap-0.5 text-left"><span className="text-lg font-semibold tracking-tight">AG Relay</span><span className="text-xs text-muted-foreground">本地网关工作空间</span></div>
             </SidebarMenuButton>
           </SidebarMenuItem>
@@ -313,10 +315,11 @@ export default function App() {
       <SidebarProvider defaultOpen style={{ '--sidebar-width': '15rem', '--sidebar-width-icon': '4rem' } as React.CSSProperties}>
         <AppSidebar page={page} onNavigate={navigate} onSearch={() => setCommandOpen(true)} onAction={act} appVersion={appVersion} />
         <SidebarInset className="min-w-0 bg-background">
-          <header className="app-header flex h-[72px] shrink-0 items-center justify-between gap-3 border-b border-border bg-white px-5 lg:px-8">
+          <header data-tauri-drag-region="deep" className="app-header flex h-[72px] shrink-0 items-center justify-between gap-3 border-b border-border bg-white pl-5 lg:pl-8">
             <div className="flex min-w-0 items-center gap-3"><SidebarTrigger className="-ml-1 size-8 shrink-0" aria-label="展开或收起侧栏" /><Separator orientation="vertical" className="!h-4" />
               <Breadcrumb><BreadcrumbList className="text-sm"><BreadcrumbItem className="hidden sm:block">工作空间</BreadcrumbItem><BreadcrumbSeparator className="hidden sm:block" /><BreadcrumbItem><BreadcrumbPage>本地网关</BreadcrumbPage></BreadcrumbItem></BreadcrumbList></Breadcrumb>
             </div>
+            <WindowControls />
           </header>
           <main ref={mainRef} className="app-main min-w-0 flex-1 px-5 pb-7 pt-7 sm:px-6 lg:px-8 lg:pt-8" id="main-content">
             <div className="mx-auto w-full max-w-[1280px]">
