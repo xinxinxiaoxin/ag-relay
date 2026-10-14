@@ -122,6 +122,9 @@ pub fn format_uptime(started_at_ms: i64, now_ms: i64) -> Option<String> {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StatusSnapshot {
+    /// None 表示旧核心未提供详情；空数组才表示提供了空列表。
+    pub requests: Option<Vec<RequestProgress>>,
+    pub requests_truncated: Option<bool>,
     pub available: bool,
     /// loadedVersion 前 8 位短哈希
     pub version: Option<String>,
@@ -132,10 +135,25 @@ pub struct StatusSnapshot {
     pub owner: InstanceOwner,
 }
 
+/// 只传递面板需要的字段，不携带请求体、密钥或任意额外字段。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestProgress {
+    pub request_id: String,
+    pub phase: Option<String>,
+    pub attempt: Option<u64>,
+    pub elapsed_ms: Option<u64>,
+    /// 缺失/非法时不序列化；显式 null 才表示从未收到内容进展。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub since_last_progress_ms: Option<Option<u64>>,
+}
+
 impl StatusSnapshot {
     /// 离线快照：网关不可达时的四卡值（归属默认「无」，命令层再按受管句柄覆盖）。
     pub fn offline() -> Self {
         Self {
+            requests: None,
+            requests_truncated: None,
             available: false,
             version: None,
             active_requests: None,
@@ -203,7 +221,33 @@ pub fn parse_status_snapshot_with_now(body: &str, now_ms: i64) -> Option<StatusS
         .and_then(parse_iso8601_utc_ms)
         .and_then(|started| format_uptime(started, now_ms));
 
+    let requests = obj.get("requests").and_then(serde_json::Value::as_array).map(|items| {
+        items.iter().take(100).filter_map(|item| {
+            let request_id = item.get("requestId")?.as_str()?.trim();
+            if request_id.is_empty() { return None; }
+            let number = |field| item.get(field).and_then(serde_json::Value::as_u64);
+            Some(RequestProgress {
+                request_id: request_id.to_string(),
+                phase: item.get("phase").and_then(serde_json::Value::as_str).map(str::to_string),
+                attempt: number("attempt"),
+                elapsed_ms: number("elapsedMs"),
+                since_last_progress_ms: match item.get("sinceLastProgressMs") {
+                    Some(serde_json::Value::Null) => Some(None),
+                    Some(value) => value.as_u64().map(Some),
+                    None => None,
+                },
+            })
+        }).collect()
+    });
+    let requests_truncated = if obj.get("requests").and_then(serde_json::Value::as_array).is_some_and(|items| items.len() > 100) {
+        Some(true)
+    } else {
+        obj.get("requestsTruncated").and_then(serde_json::Value::as_bool)
+    };
+
     Some(StatusSnapshot {
+        requests,
+        requests_truncated,
         available: true,
         version,
         active_requests,
@@ -334,6 +378,41 @@ mod tests {
     // ------------------------------------------------------------------
     // 时间换算（独立真值：node -e "new Date(...).getTime()"）
     // ------------------------------------------------------------------
+
+    #[test]
+    fn 请求进展_超过一百条时有界展示并明确截断() {
+        let requests: Vec<_> = (0..101).map(|n| serde_json::json!({"requestId":format!("req-{n}"),"phase":"reasoning"})).collect();
+        let body = serde_json::json!({"requests":requests,"requestsTruncated":false}).to_string();
+        let snap = parse_status_snapshot_with_now(&body, 0).unwrap();
+        assert_eq!(snap.requests.unwrap().len(), 100);
+        assert_eq!(snap.requests_truncated, Some(true));
+    }
+
+    #[test]
+    fn 请求进展_非法字段显示未知且仅透传必要信息() {
+        let body = r#"{"activeRequests":1,"requests":[{"requestId":"r","phase":"future_phase","attempt":-1,"elapsedMs":"bad","sinceLastProgressMs":"bad","authorization":"fixture-secret","body":"private-content"}]}"#;
+        let value = serde_json::to_value(parse_status_snapshot_with_now(body, 0).unwrap()).unwrap();
+        assert_eq!(value["requests"][0]["phase"], "future_phase");
+        assert_eq!(value["requests"][0]["attempt"], serde_json::Value::Null);
+        assert_eq!(value["requests"][0]["elapsedMs"], serde_json::Value::Null);
+        assert!(value["requests"][0].get("sinceLastProgressMs").is_none());
+        assert!(!value.to_string().contains("fixture-secret"));
+        assert!(!value.to_string().contains("private-content"));
+    }
+
+    #[test]
+    fn 请求进展_保留阶段耗时与尝试次数并兼容旧核心() {
+        let body = r#"{"activeRequests":2,"requests":[{"requestId":"abc","phase":"waiting_first_content","attempt":3,"elapsedMs":65000,"sinceLastProgressMs":null},{"requestId":"def","phase":"text_output","attempt":1,"elapsedMs":12000,"sinceLastProgressMs":800}],"requestsTruncated":false}"#;
+        let value = serde_json::to_value(parse_status_snapshot_with_now(body, 0).unwrap()).unwrap();
+        assert_eq!(value["requests"][0]["phase"], "waiting_first_content");
+        assert_eq!(value["requests"][0]["attempt"], 3);
+        assert_eq!(value["requests"][0]["elapsedMs"], 65000);
+        assert_eq!(value["requests"][0]["sinceLastProgressMs"], serde_json::Value::Null);
+        assert_eq!(value["requests"][1]["sinceLastProgressMs"], 800);
+        assert_eq!(value["requestsTruncated"], false);
+        let legacy = serde_json::to_value(parse_status_snapshot_with_now(r#"{"activeRequests":2}"#, 0).unwrap()).unwrap();
+        assert_eq!(legacy["requests"], serde_json::Value::Null);
+    }
 
     #[test]
     fn iso8601_标准zulu格式转epoch毫秒_含闰年与边界() {
@@ -527,6 +606,8 @@ mod tests {
     #[test]
     fn 快照序列化_含owner字段且既有camelCase不回归() {
         let snap = StatusSnapshot {
+            requests: None,
+            requests_truncated: None,
             available: true,
             version: Some("abcd1234".to_string()),
             active_requests: Some(2),

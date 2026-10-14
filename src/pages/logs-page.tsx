@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { ChevronLeft, ChevronRight, FolderOpen, Search, X } from 'lucide-react'
 
-import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
   Card,
@@ -19,25 +18,11 @@ import {
 } from '@/components/ui/empty'
 import { Input } from '@/components/ui/input'
 import { Separator } from '@/components/ui/separator'
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '@/components/ui/table'
+import { ActivityTable } from '@/components/activity-table'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { queryActivityEvents } from '@/lib/gateway'
 import type { ActivityLevelFilter, ActivityPage } from '@/lib/gateway'
-import { formatEventTime } from '@/lib/types'
-import type { ActivityEvent, PageProps } from '@/lib/types'
-
-const LEVEL_LABELS: Record<ActivityEvent['level'], string> = {
-  info: '信息',
-  warn: '警告',
-  error: '错误',
-}
+import type { PageProps } from '@/lib/types'
 
 const LEVEL_FILTERS: { value: ActivityLevelFilter; label: string }[] = [
   { value: 'all', label: '全部' },
@@ -47,7 +32,7 @@ const LEVEL_FILTERS: { value: ActivityLevelFilter; label: string }[] = [
 ]
 
 // 诊断日志页用服务端分页（T5 query_activity_events）：page 为 0 基，pageSize 1..=500。
-const PAGE_SIZE = 10
+const PAGE_SIZE = 20
 
 export function LogsPage(props: PageProps) {
   const [level, setLevel] = useState<ActivityLevelFilter>('all')
@@ -146,13 +131,12 @@ export function LogsPage(props: PageProps) {
   }
 
   return (
-    <section aria-labelledby="logs-page-title" className="min-w-0 space-y-6 text-sm text-foreground">
+    <section aria-labelledby="logs-page-title" className="min-w-0 space-y-4 text-sm text-foreground">
       <header className="flex min-w-0 flex-wrap items-start justify-between gap-4">
         <div className="min-w-0 space-y-2">
-          <h1 id="logs-page-title" className="text-[30px] leading-9 font-semibold tracking-[-0.025em]">
+          <h1 id="logs-page-title" className="text-2xl font-semibold tracking-tight">
             诊断日志
           </h1>
-          <p className="text-sm leading-6 text-muted-foreground">查看连接和生命周期记录。</p>
         </div>
         <Button type="button" variant="outline" onClick={() => props.onAction('open-logs')}>
           <FolderOpen aria-hidden="true" className="size-4" />
@@ -161,24 +145,22 @@ export function LogsPage(props: PageProps) {
       </header>
 
       <Card className="min-w-0 gap-0 rounded-[24px] border border-border py-0 ring-0">
-        <CardHeader className="gap-1 px-5 py-5">
+        <CardHeader className="gap-1 px-5 py-4">
           <CardTitle role="heading" aria-level={2} className="text-base font-semibold">
-            事件记录
+            请求与网关活动
           </CardTitle>
-          <CardDescription className="text-xs leading-5">
-            按级别筛选、搜索并分页浏览活动事件。
-          </CardDescription>
+          <CardDescription className="text-xs leading-5">点击请求编号筛选，展开查看详情。</CardDescription>
         </CardHeader>
 
         <div className="flex flex-wrap items-center gap-3 px-5 pb-4">
           <span role="status" className="text-xs text-muted-foreground">
-            {following ? (props.activity.status === 'watching' ? '实时追新' : '等待实时通知') : '已冻结阅读'}
+            {following ? (props.activity.status === 'watching' ? '自动更新' : '等待更新通知') : '已暂停更新'}
             {!following && hasNew ? ' · 有新事件' : ''}
           </span>
           {following ? (
-            <Button variant="outline" size="sm" disabled={loading && !data} onClick={freeze}>暂停追新</Button>
+            <Button variant="outline" size="sm" disabled={loading && !data} onClick={freeze}>暂停更新</Button>
           ) : (
-            <Button variant="outline" size="sm" onClick={returnToLatest}>回到最新并追新</Button>
+            <Button variant="outline" size="sm" onClick={returnToLatest}>回到最新</Button>
           )}
           <Button variant="ghost" size="sm" onClick={retry}>重新读取</Button>
           {loading && data && <span className="text-xs text-muted-foreground">正在读取…</span>}
@@ -219,7 +201,7 @@ export function LogsPage(props: PageProps) {
                 type="text"
                 inputMode="search"
                 aria-label="搜索日志"
-                placeholder="搜索事件或详情…"
+                placeholder="搜索现象、请求编号或错误码…"
                 autoComplete="off"
                 spellCheck={false}
                 value={query}
@@ -252,47 +234,7 @@ export function LogsPage(props: PageProps) {
               <div ref={scroller} className="max-h-[60vh] overflow-auto" onScroll={() => {
                 if (following && (scroller.current?.scrollTop ?? 0) > 8) freeze()
               }}>
-              <Table aria-label="连接和生命周期日志" className="min-w-[640px] table-fixed">
-                <TableHeader className="border-t border-border bg-[#fafafa]">
-                  <TableRow className="border-border hover:bg-transparent">
-                    <TableHead scope="col" className="h-10 w-28 pl-5 text-xs text-muted-foreground">
-                      时间
-                    </TableHead>
-                    <TableHead scope="col" className="h-10 w-24 text-xs text-muted-foreground">
-                      级别
-                    </TableHead>
-                    <TableHead scope="col" className="h-10 w-40 text-xs text-muted-foreground">
-                      事件
-                    </TableHead>
-                    <TableHead scope="col" className="h-10 pr-5 text-xs text-muted-foreground">
-                      详情
-                    </TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {events.map((event, index) => (
-                    <TableRow key={`${event.time}-${index}`} className="border-border">
-                      <TableCell className="py-4 pl-5 align-top text-xs leading-5 whitespace-normal text-muted-foreground tabular-nums">
-                        <time dateTime={event.time}>{formatEventTime(event.time)}</time>
-                      </TableCell>
-                      <TableCell className="py-4 align-top">
-                        <Badge
-                          variant={event.level === 'error' ? 'destructive' : event.level === 'warn' ? 'outline' : 'secondary'}
-                          className={event.level === 'info' ? 'text-xs text-muted-foreground' : 'text-xs'}
-                        >
-                          {LEVEL_LABELS[event.level]}
-                        </Badge>
-                      </TableCell>
-                      <TableCell className="py-4 align-top text-sm leading-5 font-medium whitespace-normal wrap-break-word">
-                        {event.title}
-                      </TableCell>
-                      <TableCell className="py-4 pr-5 align-top text-xs leading-5 whitespace-normal text-muted-foreground wrap-break-word">
-                        {event.detail}
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
+              <ActivityTable events={events} onExpand={freeze} onRequest={id => { setQuery(id); setLevel('all'); setPage(0) }} />
               </div>
             ) : readError ? (
               <div className="min-h-40 px-5 py-12 text-sm text-muted-foreground">未能读取活动事件，请点击「重新读取」。</div>

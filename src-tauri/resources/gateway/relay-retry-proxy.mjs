@@ -134,7 +134,7 @@ const PERMANENT_TEXT =
   /invalid api key|incorrect api key|invalid_api_key|unauthorized|authentication failed|authentication_error|insufficient permissions|permission denied|account (is )?(deactivated|disabled|suspended)/i;
 
 function isPermanentError(info) {
-  return !!info && PERMANENT_TEXT.test(String(info.message || ''));
+  return !!info && PERMANENT_TEXT.test(`${info.code || ''} ${info.message || ''}`);
 }
 
 // 「找不到部署 / 上游没有该模型部署」——通道抖动，重试换通道即可，值得多试几次
@@ -368,7 +368,7 @@ const QUOTA_TEXT =
   /budget pool|quota has been exhausted|quota exhausted|insufficient_quota|insufficient quota|out of quota|exceeded your current quota|no available channel|balance|payment required|insufficient balance|余额不足|额度不足|配额/;
 
 function isQuotaError(info) {
-  return !!info && QUOTA_TEXT.test(String(info.message || ''));
+  return !!info && QUOTA_TEXT.test(`${info.code || ''} ${info.message || ''}`);
 }
 function isQuotaErrorText(text) {
   return QUOTA_TEXT.test(String(text || ''));
@@ -384,6 +384,17 @@ const DETERMINISTIC_BODY_TEXT =
 
 function isDeterministicBodyError(bodyText) {
   return isQuotaErrorText(bodyText) || DETERMINISTIC_BODY_TEXT.test(String(bodyText || ''));
+}
+
+// 三种错误载体共用既有确定性规则；未知错误不因“不认识”就被禁用重试。
+// 部署缺失仍走快速重试，鉴权/配额错误不被混合文案中的 deployment 放行。
+function isDeterministicError(info) {
+  if (!info) return false;
+  // invalid_request_error 是泛化信封，不足以证明请求不可恢复。
+  // 有些服务把限流/未知临时故障也包在这个 type 下；仍以具体原因判断。
+  const code = String(info.code || '').toLowerCase() === 'invalid_request_error' ? '' : info.code;
+  return isPermanentError(info) || isQuotaError(info) ||
+    (!isDeploymentError(info) && isDeterministicBodyError(`${code || ''} ${info.message || ''}`));
 }
 
 // 日志：默认只打到控制台；显式启用的普通文件日志也受总容量约束。
@@ -423,7 +434,17 @@ function describeFetchError(e) {
   return parts.join(' <- ') || 'unknown fetch error';
 }
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// 只在需要重试时创建计时器；取消立即结束等待，不等下一轮才收尾。
+const sleep = (ms, signal) => new Promise((resolve) => {
+  if (signal.aborted) return resolve();
+  const finish = () => {
+    clearTimeout(timer);
+    signal.removeEventListener('abort', finish);
+    resolve();
+  };
+  const timer = setTimeout(finish, ms);
+  signal.addEventListener('abort', finish, { once: true });
+});
 const backoffMs = (attempt) =>
   Math.min(cfg.maxDelayMs, Math.round(cfg.baseDelayMs * 2 ** (attempt - 1) * (1 + Math.random() * 0.3)));
 
@@ -776,7 +797,7 @@ async function peekAndCommit(upstream, res, onCommit = () => {}, state) {
   const failure = (reason, kind = 'other') => ({
     committed: false, reason, kind, errorMessage: streamError?.message,
     errorCode: streamError?.code ?? null,
-    permanent: isPermanentError(streamError) || isQuotaError(streamError),
+    permanent: isDeterministicError(streamError),
     deployment: !isQuotaError(streamError) && isDeploymentError(streamError),
     quota: isQuotaError(streamError),
   });
@@ -889,8 +910,12 @@ async function handle(req, res, state) {
   res.setHeader('x-relay-request-id', requestId);
   res.once('finish', () => diagnose('finished', { status: res.statusCode }));
   res.once('close', () => { if (!res.writableFinished) diagnose('client_closed'); });
+  if (res.destroyed || req.aborted) return;
+  const ac = new AbortController();
+  res.once('close', () => { if (!res.writableFinished) ac.abort(); });
   const chunks = [];
   for await (const c of req) chunks.push(c);
+  if (ac.signal.aborted || res.destroyed) return;
   const body = Buffer.concat(chunks);
   const target = joinUrl(cfg.upstream, req.url);
 
@@ -905,9 +930,6 @@ async function handle(req, res, state) {
     if (['host', 'content-length', 'connection', 'accept-encoding', 'transfer-encoding', 'expect'].includes(k.toLowerCase())) continue;
     headers[k] = Array.isArray(v) ? v.join(', ') : v;
   }
-
-  const ac = new AbortController();
-  res.on('close', () => { if (!res.writableEnded) ac.abort(); });
 
   const noBody = req.method === 'GET' || req.method === 'HEAD';
   let lastReason = 'unknown';
@@ -1093,7 +1115,7 @@ async function handle(req, res, state) {
   };
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    if (codexResourceRetry && ac.signal.aborted) return;
+    if (ac.signal.aborted || res.destroyed) return;
     // 剩余预算不足以支撑「再等一次 + 还可能再重试」时，就别开新尝试了：
     // 否则只会白等到客户端自己超时。
     const remaining = deadline - Date.now();
@@ -1113,207 +1135,213 @@ async function handle(req, res, state) {
       if (!attemptAc.signal.aborted) attemptAc.abort(new Error('CONNECT_TIMEOUT'));
     }, waitMs);
 
-    attemptCount = attempt;
-    state.attempt = attempt;
-    state.phase = 'waiting_headers';
-    diagnose('attempt_started');
-    let upstream;
     try {
-      // 每条上游请求都用新连接。实测：网关自己重试 8 次、磨 110–180 秒全部失败，而 1–3 秒后
-      // 客户端同样的新请求就能成功——1–3 秒不可能是限流窗口恢复的时间，说明重试沿用的那条
-      // 上游连接被持续拒绝，换新连接即可通过。只给重试加还不够：首次尝试若保持 keep-alive，
-      // 它的空闲连接会被下一次重试捡走（test/retry-fresh-connection.mjs 可复现），所以一律用
-      // `connection: close`。代价是每条请求多一次握手（相对 20–40 秒的请求可忽略）。
-      // `connection` 是逐跳头，站点看到的其它请求头与指纹没有任何变化。
-      upstream = await fetch(target, {
-        method: req.method,
-        headers: { ...headers, connection: 'close' },
-        body: noBody ? undefined : activeBody,
-        redirect: 'manual',
-        signal: attemptAc.signal,
-      });
-    } catch (e) {
-      if (ac.signal.aborted) return;
-      if (outOfBudget()) {
-        lastReason = `total budget ${cfg.totalBudgetMs}ms exhausted`;
+      attemptCount = attempt;
+      state.attempt = attempt;
+      state.phase = 'waiting_headers';
+      diagnose('attempt_started');
+      let upstream;
+      try {
+        // 每条上游请求都用新连接。实测：网关自己重试 8 次、磨 110–180 秒全部失败，而 1–3 秒后
+        // 客户端同样的新请求就能成功——1–3 秒不可能是限流窗口恢复的时间，说明重试沿用的那条
+        // 上游连接被持续拒绝，换新连接即可通过。只给重试加还不够：首次尝试若保持 keep-alive，
+        // 它的空闲连接会被下一次重试捡走（test/retry-fresh-connection.mjs 可复现），所以一律用
+        // `connection: close`。代价是每条请求多一次握手（相对 20–40 秒的请求可忽略）。
+        // `connection` 是逐跳头，站点看到的其它请求头与指纹没有任何变化。
+        upstream = await fetch(target, {
+          method: req.method,
+          headers: { ...headers, connection: 'close' },
+          body: noBody ? undefined : activeBody,
+          redirect: 'manual',
+          signal: attemptAc.signal,
+        });
+      } catch (e) {
+        if (ac.signal.aborted) return;
+        if (outOfBudget()) {
+          lastReason = `total budget ${cfg.totalBudgetMs}ms exhausted`;
+          log(`attempt ${attempt}: ${lastReason}`);
+          return sendRetryable(res, 503, lastReason, attempt);
+        }
+        lastReason = connectTimedOut
+          ? `upstream connect timeout after ${cfg.connectTimeoutMs}ms`
+          : `upstream connect failed: ${describeFetchError(e)}`;
         log(`attempt ${attempt}: ${lastReason}`);
-        return sendRetryable(res, 503, lastReason, attempt);
+        // 连接超时/失败属于通道抖动：放宽次数、缩短间隔，快速换通道
+        maxAttempts = Math.max(maxAttempts, cfg.deployMaxAttempts);
+        if (attempt < maxAttempts) { await sleep(cfg.deployDelayMs, ac.signal); continue; }
+        return sendRetryable(res, 502, lastReason, attempt);
+      } finally {
+        clearTimeout(connectTimer);   // 已拿到响应头，后续由 peek 的读取超时接管
       }
-      lastReason = connectTimedOut
-        ? `upstream connect timeout after ${cfg.connectTimeoutMs}ms`
-        : `upstream connect failed: ${describeFetchError(e)}`;
-      log(`attempt ${attempt}: ${lastReason}`);
-      // 连接超时/失败属于通道抖动：放宽次数、缩短间隔，快速换通道
-      maxAttempts = Math.max(maxAttempts, cfg.deployMaxAttempts);
-      if (attempt < maxAttempts) { await sleep(cfg.deployDelayMs); continue; }
-      return sendRetryable(res, 502, lastReason, attempt);
-    } finally {
-      clearTimeout(connectTimer);   // 已拿到响应头，后续由 peek 的读取超时接管
-    }
 
-    state.phase = 'reading_body';
-    diagnose('upstream_response', { status: upstream.status });
-    if (!upstream.ok) {                       // 真实的 HTTP 错误
+      state.phase = 'reading_body';
+      diagnose('upstream_response', { status: upstream.status });
+      if (!upstream.ok) {                       // 真实的 HTTP 错误
+        const buf = Buffer.from(await upstream.arrayBuffer());
+        const text = buf.toString('utf8');
+
+        let errorMessage = '';
+        let errorInfo = null;
+        try { errorInfo = errorInfoFromJson(JSON.parse(text)); errorMessage = errorInfo?.message || ''; } catch { /* not an error envelope */ }
+        const statusAction = handleStatusError(errorMessage, attempt, 'http_error', upstream.status);
+        if (statusAction === 'stop') return;
+        if (statusAction === 'retry') { await sleep(cfg.deployDelayMs, ac.signal); continue; }
+        const itemAction = handleItemError(httpErrorMessage(text), attempt, 'http_error', upstream.status);
+        if (itemAction === 'stop') return;
+        if (itemAction === 'retry') { await sleep(cfg.deployDelayMs, ac.signal); continue; }
+
+        // 「找不到部署」是通道抖动，优先按可重试处理（换通道重试有机会命中）。
+        const isDeploy = DEPLOYMENT_TEXT.test(text);
+        // 其余 5xx 里混着确定性错误：内容被审核拦、模型/参数不对等，重试纯属白烧额度。
+        if (isDeterministicError(errorInfo) || (!isDeploy && isDeterministicBodyError(text))) {
+          lastReason = `HTTP ${upstream.status} deterministic error: ${snippet(buf)}`;
+          log(`attempt ${attempt}: ${lastReason}`);
+          log('  -> deterministic error, not retrying');
+          return passthrough(res, upstream.status, upstream.headers, buf);
+        }
+        const retryable = isDeploy || upstream.status === 429 || upstream.status === 408 || upstream.status >= 500;
+        if (!retryable) return passthrough(res, upstream.status, upstream.headers, buf);
+        lastReason = `HTTP ${upstream.status} ${snippet(buf)}`;
+        log(`attempt ${attempt}: ${lastReason}`);
+        if (isDeploy) {
+          maxAttempts = Math.max(maxAttempts, cfg.deployMaxAttempts);
+          if (attempt < maxAttempts) {
+            log('  -> deployment missing on this route, retrying for another route');
+            await sleep(cfg.deployDelayMs, ac.signal);
+            continue;
+          }
+          return sendRetryable(res, 429, lastReason, attempt);
+        }
+        if (attempt < maxAttempts) { await sleep(backoffMs(attempt), ac.signal); continue; }
+        return sendRetryable(res, upstream.status === 429 ? 429 : 503, lastReason, attempt);
+      }
+
+      const ct = (upstream.headers.get('content-type') || '').toLowerCase();
+
+      if (ct.includes('text/event-stream')) {   // 流式
+        state.phase = 'waiting_first_content';
+        const outcome = await peekAndCommit(upstream, res, () => diagnose('sse_committed', { status: 200 }), state);
+        if (outcome.committed) {
+          diagnose('sse_ended', { status: 200, sawTerminal: outcome.sawTerminal, terminalKind: outcome.terminalKind, idleAfterCommit: outcome.idleAfterCommit, stallReason: outcome.stallReason });
+          if (attempt > 1) log(`attempt ${attempt}: recovered on a later route (previous failures: ${attempt - 1})`);
+          return;
+        }
+        if (ac.signal.aborted) return;
+        lastReason = outcome.reason;
+        log(`attempt ${attempt}: ${lastReason}`);
+        // 有界诊断：把「200 流内的失败」分类成固定枚举 + 上游错误指纹（不落盘文案）。
+        // 之前这类失败没有任何诊断记录，只能靠反推，代价很大。
+        {
+          const fp = errorFingerprint(outcome.errorMessage
+            ? { code: outcome.errorCode, message: outcome.errorMessage } : null);
+          diagnose('precommit_failure', {
+            source: 'sse_precommit',
+            kind: outcome.kind,
+            code: fp ? fp.code : 'none',
+            hints: fp ? fp.hints : '',
+            masked: fp ? fp.masked : false,
+            retryable: !outcome.permanent && isRetryableError({ code: outcome.errorCode, message: outcome.errorMessage }),
+          });
+        }
+        const statusAction = handleStatusError(outcome.errorMessage, attempt, 'sse_precommit', upstream.status);
+        if (statusAction === 'stop') return;
+        if (statusAction === 'retry') { await sleep(cfg.deployDelayMs, ac.signal); continue; }
+        const itemAction = handleItemError(outcome.errorMessage, attempt, 'sse_precommit', upstream.status);
+        if (itemAction === 'stop') return;
+        if (itemAction === 'retry') { await sleep(cfg.deployDelayMs, ac.signal); continue; }
+        if (outcome.permanent) {                // 确认的确定性错误：不重试，直接失败
+          log(outcome.quota
+            ? '  -> quota exhausted, not retrying (switch model or wait for the pool to refill)'
+            : '  -> permanent error, not retrying');
+          return sendPermanent(res, lastReason, outcome.quota ? 402 : 400);
+        }
+        if (outcome.deployment) {               // 通道缺部署：放宽次数、缩短间隔，快速换通道
+          maxAttempts = Math.max(maxAttempts, cfg.deployMaxAttempts);
+          if (attempt < maxAttempts) {
+            log('  -> deployment missing on this route, retrying for another route');
+            await sleep(cfg.deployDelayMs, ac.signal);
+            continue;
+          }
+        }
+        if (outcome.kind === 'empty_stream_drop') {   // 上游静默丢弃：快速换通道 + 形状修复升级
+          notePreCommitFailure(attempt, 'sse_precommit');
+          if (attempt < maxAttempts) {
+            log('  -> upstream closed the stream with no content, retrying for another route');
+            await sleep(cfg.deployDelayMs, ac.signal);
+            continue;
+          }
+        }
+        // 200 流内可重试错误（生产实测 154/154 都是 rate_limit_exceeded）刻意不做形状修复：
+        // 实测把 item id 和 reasoning 都摘干净之后，请求仍然被限流 5~21 次 —— 形状不是触发条件，
+        // 再改请求体只是白白损失推理连续性。这里保持纯重试。
+        if (attempt < maxAttempts) { await sleep(backoffMs(attempt), ac.signal); continue; }
+        return sendRetryable(res, 429, lastReason, attempt);
+      }
+
+      // 非流式
       const buf = Buffer.from(await upstream.arrayBuffer());
-      const text = buf.toString('utf8');
+      let obj = null;
+      try { obj = JSON.parse(buf.toString('utf8')); } catch { /* 非 JSON */ }
 
-      let errorMessage = '';
-      try { errorMessage = errorInfoFromJson(JSON.parse(text))?.message || ''; } catch { /* not an error envelope */ }
-      const statusAction = handleStatusError(errorMessage, attempt, 'http_error', upstream.status);
-      if (statusAction === 'stop') return;
-      if (statusAction === 'retry') { await sleep(cfg.deployDelayMs); continue; }
-      const itemAction = handleItemError(httpErrorMessage(text), attempt, 'http_error', upstream.status);
-      if (itemAction === 'stop') return;
-      if (itemAction === 'retry') { await sleep(cfg.deployDelayMs); continue; }
-
-      // 「找不到部署」是通道抖动，优先按可重试处理（换通道重试有机会命中）。
-      const isDeploy = DEPLOYMENT_TEXT.test(text);
-      // 其余 5xx 里混着确定性错误：内容被审核拦、模型/参数不对等，重试纯属白烧额度。
-      if (!isDeploy && isDeterministicBodyError(text)) {
-        lastReason = `HTTP ${upstream.status} deterministic error: ${snippet(buf)}`;
-        log(`attempt ${attempt}: ${lastReason}`);
-        log('  -> deterministic error, not retrying');
-        return passthrough(res, upstream.status, upstream.headers, buf);
+      const info = errorInfoFromJson(obj);
+      // 200 + 错误体里的 item 类错误（推理项失效 / 跨 Azure 资源引用）走同一处理：
+      // 可安全重放时修一次，不可安全重放则明确失败，不落进泛化重试。
+      if (info) {
+        const statusAction = handleStatusError(info.message, attempt, 'json_error', upstream.status);
+        if (statusAction === 'stop') return;
+        if (statusAction === 'retry') { await sleep(cfg.deployDelayMs, ac.signal); continue; }
+        const itemAction = handleItemError(info.message, attempt, 'json_error', upstream.status);
+        if (itemAction === 'stop') return;
+        if (itemAction === 'retry') { await sleep(cfg.deployDelayMs, ac.signal); continue; }
       }
-      const retryable = isDeploy || upstream.status === 429 || upstream.status === 408 || upstream.status >= 500;
-      if (!retryable) return passthrough(res, upstream.status, upstream.headers, buf);
-      lastReason = `HTTP ${upstream.status} ${snippet(buf)}`;
-      log(`attempt ${attempt}: ${lastReason}`);
-      if (isDeploy) {
+      if (info && isQuotaError(info)) {         // 配额耗尽：不重试，返回 402
+        lastReason = `HTTP 200 but body was an error: ${info.code || ''} ${info.message}`;
+        log(`attempt ${attempt}: ${lastReason}`);
+        log('  -> quota exhausted, not retrying (switch model or wait for the pool to refill)');
+        return sendPermanent(res, lastReason, 402);
+      }
+      if (isDeterministicError(info)) {        // 与 HTTP / 流式一致的确定性错误
+        lastReason = `HTTP 200 but body was an error: ${info.code || ''} ${info.message}`;
+        log(`attempt ${attempt}: ${lastReason}`);
+        log('  -> permanent error, not retrying');
+        return sendPermanent(res, lastReason);
+      }
+      if (info && isDeploymentError(info)) {    // 通道缺部署：放宽次数、缩短间隔
+        lastReason = `HTTP 200 but body was an error: ${info.code || ''} ${info.message}`;
+        log(`attempt ${attempt}: ${lastReason}`);
         maxAttempts = Math.max(maxAttempts, cfg.deployMaxAttempts);
         if (attempt < maxAttempts) {
           log('  -> deployment missing on this route, retrying for another route');
-          await sleep(cfg.deployDelayMs);
+          await sleep(cfg.deployDelayMs, ac.signal);
           continue;
         }
         return sendRetryable(res, 429, lastReason, attempt);
       }
-      if (attempt < maxAttempts) { await sleep(backoffMs(attempt)); continue; }
-      return sendRetryable(res, upstream.status === 429 ? 429 : 503, lastReason, attempt);
-    }
+      if (info && isRetryableError(info)) {
+        lastReason = `HTTP 200 but body was an error: ${info.code || ''} ${info.message}`;
+        log(`attempt ${attempt}: ${lastReason}`);
+        if (attempt < maxAttempts) { await sleep(backoffMs(attempt), ac.signal); continue; }
+        return sendRetryable(res, 429, lastReason, attempt);
+      }
 
-    const ct = (upstream.headers.get('content-type') || '').toLowerCase();
-
-    if (ct.includes('text/event-stream')) {   // 流式
-      state.phase = 'waiting_first_content';
-      const outcome = await peekAndCommit(upstream, res, () => diagnose('sse_committed', { status: 200 }), state);
-      if (outcome.committed) {
-        diagnose('sse_ended', { status: 200, sawTerminal: outcome.sawTerminal, terminalKind: outcome.terminalKind, idleAfterCommit: outcome.idleAfterCommit, stallReason: outcome.stallReason });
-        if (attempt > 1) log(`attempt ${attempt}: recovered on a later route (previous failures: ${attempt - 1})`);
-        return;
-      }
-      if (ac.signal.aborted) return;
-      lastReason = outcome.reason;
-      log(`attempt ${attempt}: ${lastReason}`);
-      // 有界诊断：把「200 流内的失败」分类成固定枚举 + 上游错误指纹（不落盘文案）。
-      // 之前这类失败没有任何诊断记录，只能靠反推，代价很大。
-      {
-        const fp = errorFingerprint(outcome.errorMessage
-          ? { code: outcome.errorCode, message: outcome.errorMessage } : null);
-        diagnose('precommit_failure', {
-          source: 'sse_precommit',
-          kind: outcome.kind,
-          code: fp ? fp.code : 'none',
-          hints: fp ? fp.hints : '',
-          masked: fp ? fp.masked : false,
-          retryable: isRetryableError({ code: outcome.errorCode, message: outcome.errorMessage }),
-        });
-      }
-      const statusAction = handleStatusError(outcome.errorMessage, attempt, 'sse_precommit', upstream.status);
-      if (statusAction === 'stop') return;
-      if (statusAction === 'retry') { await sleep(cfg.deployDelayMs); continue; }
-      const itemAction = handleItemError(outcome.errorMessage, attempt, 'sse_precommit', upstream.status);
-      if (itemAction === 'stop') return;
-      if (itemAction === 'retry') { await sleep(cfg.deployDelayMs); continue; }
-      if (outcome.permanent) {                // 鉴权/配额类问题：不重试，直接失败
-        log(outcome.quota
-          ? '  -> quota exhausted, not retrying (switch model or wait for the pool to refill)'
-          : '  -> permanent error, not retrying');
-        return sendPermanent(res, lastReason, outcome.quota ? 402 : 400);
-      }
-      if (outcome.deployment) {               // 通道缺部署：放宽次数、缩短间隔，快速换通道
-        maxAttempts = Math.max(maxAttempts, cfg.deployMaxAttempts);
-        if (attempt < maxAttempts) {
-          log('  -> deployment missing on this route, retrying for another route');
-          await sleep(cfg.deployDelayMs);
-          continue;
-        }
-      }
-      if (outcome.kind === 'empty_stream_drop') {   // 上游静默丢弃：快速换通道 + 形状修复升级
-        notePreCommitFailure(attempt, 'sse_precommit');
+      if (obj && isEmptyCompletion(obj)) {      // 空回应
+        lastReason = 'empty response (HTTP 200 but message.content is blank)';
+        log(`attempt ${attempt}: ${lastReason}`);
+        notePreCommitFailure(attempt, 'json_empty');
         if (attempt < maxAttempts) {
           log('  -> upstream closed the stream with no content, retrying for another route');
-          await sleep(cfg.deployDelayMs);
+          await sleep(cfg.deployDelayMs, ac.signal);
           continue;
         }
+        return sendRetryable(res, 429, lastReason, attempt);
       }
-      // 200 流内可重试错误（生产实测 154/154 都是 rate_limit_exceeded）刻意不做形状修复：
-      // 实测把 item id 和 reasoning 都摘干净之后，请求仍然被限流 5~21 次 —— 形状不是触发条件，
-      // 再改请求体只是白白损失推理连续性。这里保持纯重试。
-      if (attempt < maxAttempts) { await sleep(backoffMs(attempt)); continue; }
-      return sendRetryable(res, 429, lastReason, attempt);
-    }
 
-    // 非流式
-    const buf = Buffer.from(await upstream.arrayBuffer());
-    let obj = null;
-    try { obj = JSON.parse(buf.toString('utf8')); } catch { /* 非 JSON */ }
-
-    const info = errorInfoFromJson(obj);
-    // 200 + 错误体里的 item 类错误（推理项失效 / 跨 Azure 资源引用）走同一处理：
-    // 可安全重放时修一次，不可安全重放则明确失败，不落进泛化重试。
-    if (info) {
-      const statusAction = handleStatusError(info.message, attempt, 'json_error', upstream.status);
-      if (statusAction === 'stop') return;
-      if (statusAction === 'retry') { await sleep(cfg.deployDelayMs); continue; }
-      const itemAction = handleItemError(info.message, attempt, 'json_error', upstream.status);
-      if (itemAction === 'stop') return;
-      if (itemAction === 'retry') { await sleep(cfg.deployDelayMs); continue; }
+      if (attempt > 1) log(`attempt ${attempt}: recovered on a later route (previous failures: ${attempt - 1})`);
+      return passthrough(res, 200, upstream.headers, buf);
+    } finally {
+      clearTimeout(connectTimer);
+      ac.signal.removeEventListener('abort', onParentAbort);
     }
-    if (info && isQuotaError(info)) {         // 配额耗尽：不重试，返回 402
-      lastReason = `HTTP 200 but body was an error: ${info.code || ''} ${info.message}`;
-      log(`attempt ${attempt}: ${lastReason}`);
-      log('  -> quota exhausted, not retrying (switch model or wait for the pool to refill)');
-      return sendPermanent(res, lastReason, 402);
-    }
-    if (info && isPermanentError(info)) {     // 鉴权类错误：不重试
-      lastReason = `HTTP 200 but body was an error: ${info.code || ''} ${info.message}`;
-      log(`attempt ${attempt}: ${lastReason}`);
-      log('  -> permanent error, not retrying');
-      return sendPermanent(res, lastReason);
-    }
-    if (info && isDeploymentError(info)) {    // 通道缺部署：放宽次数、缩短间隔
-      lastReason = `HTTP 200 but body was an error: ${info.code || ''} ${info.message}`;
-      log(`attempt ${attempt}: ${lastReason}`);
-      maxAttempts = Math.max(maxAttempts, cfg.deployMaxAttempts);
-      if (attempt < maxAttempts) {
-        log('  -> deployment missing on this route, retrying for another route');
-        await sleep(cfg.deployDelayMs);
-        continue;
-      }
-      return sendRetryable(res, 429, lastReason, attempt);
-    }
-    if (info && isRetryableError(info)) {
-      lastReason = `HTTP 200 but body was an error: ${info.code || ''} ${info.message}`;
-      log(`attempt ${attempt}: ${lastReason}`);
-      if (attempt < maxAttempts) { await sleep(backoffMs(attempt)); continue; }
-      return sendRetryable(res, 429, lastReason, attempt);
-    }
-
-    if (obj && isEmptyCompletion(obj)) {      // 空回应
-      lastReason = 'empty response (HTTP 200 but message.content is blank)';
-      log(`attempt ${attempt}: ${lastReason}`);
-      notePreCommitFailure(attempt, 'json_empty');
-      if (attempt < maxAttempts) {
-        log('  -> upstream closed the stream with no content, retrying for another route');
-        await sleep(cfg.deployDelayMs);
-        continue;
-      }
-      return sendRetryable(res, 429, lastReason, attempt);
-    }
-
-    if (attempt > 1) log(`attempt ${attempt}: recovered on a later route (previous failures: ${attempt - 1})`);
-    return passthrough(res, 200, upstream.headers, buf);
   }
 }
 
@@ -1448,6 +1476,7 @@ const server = http.createServer((req, res) => {
   res.once('finish', () => { responseDone = true; cleanup(); });
   res.once('close', () => { responseDone = true; cleanup(); });
   handle(req, res, state).catch((e) => {
+    if (res.destroyed) return;
     log('request handler error:', e.message);
     if (res.headersSent) { try { res.end(); } catch { /* ignore */ } }
     else sendRetryable(res, 502, e.message);

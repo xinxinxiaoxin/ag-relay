@@ -4,7 +4,17 @@ export type PageId = 'overview' | 'logs' | 'settings'
 export type GatewayState = 'running' | 'stopped' | 'external' | 'error' | 'starting' | 'draining'
 export type StableState = 'running' | 'stopped' | 'external' | 'error'
 export type GatewayAction = 'start' | 'stop' | 'restart' | 'copy' | 'open-logs' | 'exit'
+export interface RequestProgress {
+  requestId: string
+  phase: string | null
+  attempt: number | null
+  elapsedMs: number | null
+  sinceLastProgressMs?: number | null
+}
 export interface GatewaySnapshot {
+  // null / 缺失表示当前核心未提供详情，不等于没有请求。
+  requests?: RequestProgress[] | null
+  requestsTruncated?: boolean | null
   state: GatewayState
   inflight: number | null
   uptime: string | null
@@ -13,9 +23,15 @@ export interface GatewaySnapshot {
   owner: 'window' | 'external' | 'none'
 }
 // 活动事件（GLOSSARY）：壳侧把英文诊断记录提炼成的分级中文事件。
-// T6 定型：逐字对齐 T5 命令的 ActivityEvent（serde camelCase，最新在前，无 id）。
+// 对齐 Rust ActivityEvent（camelCase，最新在前）；可选字段兼容旧面板返回值。
 // 级别 token 用 info|warn|error；中文级别（信息/警告/错误）由展示层映射。
 export interface ActivityEvent {
+  attempt?: number | null
+  httpStatus?: number | null
+  summary?: string
+  requestId?: string | null
+  code?: string
+  technicalDetail?: string
   level: 'info' | 'warn' | 'error'
   title: string
   detail: string

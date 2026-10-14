@@ -446,25 +446,12 @@ export default function App() {
             </AlertDialogMedia>
             <AlertDialogTitle>{confirmExit?.kind === 'window' ? '关闭 AG Relay 窗口？' : '退出 AG Relay？'}</AlertDialogTitle>
             <AlertDialogDescription>
-              {confirmExit?.kind === 'window' ? '可保留在托盘继续运行网关，或彻底退出。' : ''}
-              彻底退出前会先优雅排空在途请求（最多等待 10 秒）；排空超时会取消退出并恢复接单，不强杀。
+              {confirmExit?.kind === 'window' ? '留在托盘可继续运行；退出会等待请求结束，超时则保持运行。' : '退出会等待请求结束，超时则保持运行。'}
             </AlertDialogDescription>
           </AlertDialogHeader>
-          <div className="space-y-2 text-xs leading-5 text-muted-foreground">
-            <p>
-              <span className="font-medium text-foreground">受管网关</span>
-              （本窗口拉起）：排空完成后才会停止；超时保持运行。
-              {view.owner === 'window' ? '当前实例由本窗口管理。' : ''}
-            </p>
-            <p>
-              <span className="font-medium text-foreground">外部网关</span>
-              （外部实例）：仅在核实归属且支持安全停机时才会优雅停止，否则取消退出，不强杀。
-              {view.owner === 'external' ? '当前监听端口上为外部实例。' : ''}
-            </p>
-            {confirmExit?.kind === 'window' && !confirmExit.request.trayAvailable && <p id="tray-unavailable">系统托盘当前不可用，无法保留在托盘；请选择取消或彻底退出。</p>}
-          </div>
+          {confirmExit?.kind === 'window' && !confirmExit.request.trayAvailable && <p id="tray-unavailable" className="text-xs text-muted-foreground">系统托盘不可用，请取消或退出。</p>}
           {exitError && <p role="alert" className="text-sm text-destructive">{exitError}</p>}
-          {exitBusy && <p role="status" className="text-xs text-muted-foreground">{exitBusy === 'quit' ? '正在安全退出，请等待排空结果…' : '正在处理窗口操作…'}</p>}
+          {exitBusy && <p role="status" className="text-xs text-muted-foreground">{exitBusy === 'quit' ? '正在等待请求结束…' : '正在处理窗口操作…'}</p>}
           <AlertDialogFooter className="sm:flex-wrap">
             <AlertDialogCancel disabled={exitBusy !== null} onClick={event => { event.preventDefault(); void runExit('cancel') }}>取消</AlertDialogCancel>
             {confirmExit?.kind === 'window' && <Button variant="outline" disabled={exitBusy !== null || !confirmExit.request.trayAvailable} aria-describedby={!confirmExit.request.trayAvailable ? 'tray-unavailable' : undefined} onClick={() => void runExit('tray')}>保留在托盘</Button>}

@@ -8,11 +8,13 @@
 // 现有壳命令层见 src-tauri（lib.rs 的 invoke_handler 注册 8 个命令）。
 // T1 只接读取（get_status）用于状态轮询；start/stop/restart/open-logs/quit 等
 // 变更型动作在 UI 层暂为占位（toast），真实接线在 T2/T3/T8。
-import type { ActivityEvent, GatewaySnapshot } from './types'
+import type { ActivityEvent, GatewaySnapshot, RequestProgress } from './types'
 
 // get_status 的真实返回形状（camelCase，见现有 gateway_status.rs / 原生 main.js）。
 // owner 为 T2 新增：实例归属，壳侧推导（status 接口本身无此字段）。
 export interface StatusSnapshot {
+  requests?: RequestProgress[] | null
+  requestsTruncated?: boolean | null
   available: boolean
   version: string | null
   activeRequests: number | null
@@ -49,7 +51,7 @@ export async function invoke<T>(cmd: string, args?: Record<string, unknown>): Pr
   return fn<T>(cmd, args)
 }
 
-// 状态轮询节奏，沿用原生壳：3 秒（网关 status 有约 20 秒内部缓存，数值不秒变属正常）。
+// 每 3 秒读取核心当前状态；不在前端推算请求进展或完成时间。
 export const STATUS_POLL_MS = 3000
 
 // 命令层异常时的兜底：整体按未运行显示（永不抛错、不闪退）。
@@ -62,25 +64,29 @@ const OFFLINE_STATUS: StatusSnapshot = {
 // 便于截图核对「运行版本」主/次两行语义不同。
 const MOCK_STATUS: StatusSnapshot = {
   available: true, version: 'e8395e0f', activeRequests: 3, uptimeText: '2 小时 18 分', owner: 'window',
+  requestsTruncated: false,
+  requests: [
+    { requestId: 'b8d74e30-demo-0001', phase: 'waiting_first_content', attempt: 3, elapsedMs: 65000, sinceLastProgressMs: null },
+    { requestId: 'a2519c62-demo-0002', phase: 'reasoning', attempt: 1, elapsedMs: 24000, sinceLastProgressMs: 2000 },
+    { requestId: 'f16b8a04-demo-0003', phase: 'text_output', attempt: 1, elapsedMs: 18000, sinceLastProgressMs: 500 },
+  ],
 }
 
 // 浏览器回退 mock：译后活动事件样例（最新在前），混合 信息/警告/错误 三级并给够条数，
 // 使诊断日志页在 vite 预览下可演示级别筛选 / 搜索 / 分页 / 空态。仅限开发渲染/截图。
 const MOCK_EVENTS: ActivityEvent[] = [
-  { time: '14:18:36', level: 'info', title: '运行状态已更新', detail: '网关保持运行，当前有 3 个在途请求正在处理。' },
-  { time: '14:12:04', level: 'warn', title: '上游响应变慢', detail: '一次转发的首字节延迟超过预期，已记录以便观察。' },
-  { time: '14:05:51', level: 'error', title: '上游连接失败', detail: '与上游建立连接超时，该请求已按重试策略处理。' },
-  { time: '13:58:20', level: 'info', title: '请求流式结束', detail: '一次 SSE 响应正常收尾，连接已释放。' },
-  { time: '13:40:12', level: 'warn', title: '请求被限流', detail: '上游返回限流，网关已按退避策略稍后重试。' },
-  { time: '13:22:47', level: 'info', title: '安全重启完成', detail: '排空在途请求后已重新拉起网关。' },
-  { time: '13:21:30', level: 'info', title: '开始优雅排空', detail: '重启前等待在途请求自然结束，预算 10 秒。' },
-  { time: '12:47:15', level: 'error', title: '请求异常中止', detail: '一次响应在完成前中断，客户端需重试。' },
-  { time: '12:30:08', level: 'warn', title: '账号额度紧张', detail: '某上游账号接近额度上限，已切换到备用账号。' },
-  { time: '12:15:42', level: 'info', title: '配置已加载', detail: '网关脚本配置解析完成，开始受理请求。' },
-  { time: '12:00:01', level: 'info', title: '本地端点就绪', detail: '网关开始监听 127.0.0.1:8787。' },
-  { time: '12:00:00', level: 'info', title: '网关启动完成', detail: '由当前窗口创建并管理此实例。' },
-  { time: '11:59:59', level: 'info', title: '工作空间已准备', detail: '本地运行环境初始化完成。' },
-  { time: '11:58:30', level: 'info', title: '诊断读取器就绪', detail: '已开始增量读取诊断记录，提炼为活动事件。' },
+  { time: '14:18:36', level: 'info', title: '等待首段内容', detail: '等待首段内容，上游已连接但还未返回可交付的内容；已用时 1分5秒；第 3 次尝试；尚未收到内容进展。', requestId: 'b8d74e30-demo-0001', summary: '尚未收到内容', attempt: 3, code: 'request_status', technicalDetail: '等待首个内容。' },
+  { time: '14:18:31', level: 'info', title: '正在推理', detail: '最近收到推理内容，正文可能尚未开始；已用时 24秒；第 1 次尝试；距上次内容进展 2秒。', requestId: 'a2519c62-demo-0002', summary: '已用时 24秒', attempt: 1, code: 'request_status', technicalDetail: '正在输出推理。' },
+  { time: '14:18:20', level: 'info', title: '回复已完整结束', detail: '已收到正常结束标记，本次流式回复完整结束。', requestId: 'd532abc1-demo-0004', summary: '已收到正常结束标记', attempt: 2, httpStatus: 200, code: 'sse_ended', technicalDetail: '流式响应结束：终止类型 正常完成，停滞 无停滞。' },
+  { time: '14:18:16', level: 'warn', title: '尚未收到可用回复', detail: '回复交付前遇到问题：等待首个内容超时。是否继续尝试，请查看后续记录。', requestId: 'b8d74e30-demo-0001', summary: '首段等待超时', attempt: 2, code: 'precommit_failure', technicalDetail: '等待首个内容超时。' },
+  { time: '14:18:10', level: 'info', title: '发起上游尝试', detail: '第 2 次向上游发起尝试。', requestId: 'b8d74e30-demo-0001', summary: '已发送至上游', attempt: 2, code: 'attempt_started' },
+  { time: '14:18:02', level: 'warn', title: '客户端提前断开', detail: '客户端在回复完成前断开，可能是主动取消、超时或关闭了连接。', requestId: 'ea978c11-demo-0005', summary: '取消、超时或连接断开', attempt: 1, code: 'client_closed' },
+  { time: '14:17:50', level: 'error', title: '上游未能完成回复', detail: '上游明确报告本次生成失败，可查看技术信息定位原因。', requestId: 'f49a8821-demo-0006', summary: '上游生成失败', attempt: 2, httpStatus: 200, code: 'sse_ended', technicalDetail: '流式响应结束：终止类型 失败终止，停滞 无停滞。' },
+  { time: '14:17:31', level: 'info', title: '收到请求', detail: '客户端已把请求交给网关，开始处理。', technicalDetail: '收到客户端请求：/v1/responses。', requestId: 'b8d74e30-demo-0001', summary: '/v1/responses', attempt: 0, code: 'received' },
+  { time: '14:17:20', level: 'info', title: '开始传回内容', detail: '已收到可交付的内容，开始向客户端传回回复。', requestId: 'd532abc1-demo-0004', summary: '开始返回内容', attempt: 2, httpStatus: 200, code: 'sse_committed' },
+  { time: '14:17:10', level: 'info', title: '上游已响应', detail: '上游已接受本次连接，仍需等待内容；这还不代表回复完整结束。', requestId: 'd532abc1-demo-0004', summary: '已响应，等待内容', attempt: 2, httpStatus: 200, code: 'upstream_response', technicalDetail: '收到上游响应头：HTTP 200（成功）。' },
+  { time: '14:17:05', level: 'info', title: '收到请求', detail: '客户端已把请求交给网关，开始处理。', technicalDetail: '收到客户端请求：/v1/responses。', requestId: 'd532abc1-demo-0004', summary: '/v1/responses', attempt: 0, code: 'received' },
+  { time: '12:00:00', level: 'info', title: '网关已启动', detail: '网关已就绪，可以接收客户端请求。', summary: '就绪，可接收请求', code: 'gateway_started', technicalDetail: '网关监听就绪。' },
 ]
 
 // ── 开发态 mock 场景（T7；仅浏览器预览/截图，绝不进真机逻辑）────────────────
@@ -137,9 +143,11 @@ export function deriveSnapshot(status: StatusSnapshot): GatewaySnapshot {
       uptime: status.uptimeText,
       version: status.version,
       owner: status.owner,
+      requests: status.requests ?? null,
+      requestsTruncated: status.requestsTruncated ?? null,
     }
   }
-  return { state: 'stopped', inflight: null, uptime: null, version: null, owner: status.owner }
+  return { state: 'stopped', inflight: null, uptime: null, version: null, owner: status.owner, requests: null, requestsTruncated: null }
 }
 
 // 应用版本（运行版本「主显」）：优先 Tauri app.getVersion()（取自 tauri.conf.json 的 version），
@@ -302,7 +310,7 @@ function mockQueryActivityEvents(query: ActivityQuery, page: number, pageSize: n
   const filtered = MOCK_EVENTS.filter((event) => {
     if (level !== 'all' && event.level !== level) return false
     if (!keyword) return true
-    return `${event.time} ${event.title} ${event.detail}`.toLocaleLowerCase().includes(keyword)
+    return `${event.title} ${event.summary ?? ''} ${event.detail} ${event.technicalDetail ?? ''} ${event.requestId ?? ''} ${event.code ?? ''}`.toLocaleLowerCase().includes(keyword)
   })
   const start = page * pageSize
   const events = filtered.slice(start, start + pageSize)

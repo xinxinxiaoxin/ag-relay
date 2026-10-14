@@ -105,6 +105,11 @@
 [data-slot='dialog-content'], [data-slot='alert-dialog-content'] { border-radius: 24px; }
 [data-slot='table-head'] { height: 42px; color: #737373; font-size: 12px; font-weight: 500; }
 [data-slot='table-cell'] { padding-top: 14px; padding-bottom: 14px; font-size: 14px; }
+/* Request/activity tables favor scanning; other tables keep the existing geometry. */
+[data-slot='table'][data-density='compact'] [data-slot='table-head'] { height: 34px; }
+[data-slot='table'][data-density='compact'] [data-slot='table-cell'] { padding-top: 5px; padding-bottom: 5px; font-size: 12px; }
+[data-slot='table'][data-density='compact'] [data-slot='button'] { border-radius: 6px; }
+
 [data-slot='command-item'] { border-radius: 18px; }
 [data-slot='tabs-list'] { border-radius: 18px; }
 [data-slot='tabs-trigger'] { border-radius: 18px; }

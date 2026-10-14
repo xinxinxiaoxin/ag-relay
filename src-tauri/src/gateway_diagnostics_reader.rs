@@ -332,7 +332,7 @@ pub fn query_activity_in(
     })
 }
 
-/// 级别 + 关键词匹配。关键词对 title+detail 做大小写不敏感子串匹配（空关键词恒真）。
+/// 级别 + 关键词匹配：解释、技术信息、事件码及请求编号均可检索。
 fn event_matches(ev: &ActivityEvent, query: &ActivityQuery) -> bool {
     let level_ok = match query.level {
         LevelFilter::All => true,
@@ -348,7 +348,9 @@ fn event_matches(ev: &ActivityEvent, query: &ActivityQuery) -> bool {
         return true;
     }
     let needle = needle.to_lowercase();
-    ev.title.to_lowercase().contains(&needle) || ev.detail.to_lowercase().contains(&needle)
+    [&ev.title, &ev.summary, &ev.detail, &ev.technical_detail, &ev.code]
+        .iter().any(|field| field.to_lowercase().contains(&needle))
+        || ev.request_id.as_deref().is_some_and(|id| id.to_lowercase().contains(&needle))
 }
 
 /// 在已打开的文件快照上反向逐完整行读取（最新在前）；`f` 返回 false 即停。
@@ -511,6 +513,18 @@ mod tests {
 
     fn received_line(time: &str, path: &str) -> String {
         format!(r#"{{"time":"{time}","event":"received","path":"{path}","attempt":0}}"#)
+    }
+
+    #[test]
+    fn 按请求编号找到同一次请求的事件() {
+        let dir = temp_dir("request-id");
+        let live = dir.join("relay-diagnostics.jsonl");
+        let rotated = dir.join("relay-diagnostics.jsonl.1");
+        write_file(&live, &format!("{L_RECEIVED}\n{L_ITEM_ERR}\n{L_FIN_503}\n"));
+        let page = query_activity_in(&live, &rotated, &query(LevelFilter::All, "0c3987c3", 0, 10)).unwrap();
+        assert_eq!(page.events.len(), 2);
+        assert!(page.events.iter().all(|e| e.request_id.as_deref() == Some("0c3987c3")));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -771,27 +785,27 @@ mod tests {
         let p0 = query_activity_in(&live, &rotated, &query(LevelFilter::All, "", 0, 3)).unwrap();
         assert_eq!(p0.events.len(), 3);
         assert!(
-            p0.events[0].detail.contains("/req/6"),
+            p0.events[0].technical_detail.contains("/req/6"),
             "最新在前：{}",
-            p0.events[0].detail
+            p0.events[0].technical_detail
         );
-        assert!(p0.events[2].detail.contains("/req/4"));
+        assert!(p0.events[2].technical_detail.contains("/req/4"));
         assert!(p0.has_more, "后面还有 4 条");
 
         // 第 1 页跨越 live/.1 边界：/req/3,2,1
         let p1 = query_activity_in(&live, &rotated, &query(LevelFilter::All, "", 1, 3)).unwrap();
         assert!(
-            p1.events[0].detail.contains("/req/3"),
+            p1.events[0].technical_detail.contains("/req/3"),
             "{}",
-            p1.events[0].detail
+            p1.events[0].technical_detail
         );
-        assert!(p1.events[2].detail.contains("/req/1"));
+        assert!(p1.events[2].technical_detail.contains("/req/1"));
         assert!(p1.has_more, "还有 /req/0");
 
         // 第 2 页：仅剩 /req/0
         let p2 = query_activity_in(&live, &rotated, &query(LevelFilter::All, "", 2, 3)).unwrap();
         assert_eq!(p2.events.len(), 1);
-        assert!(p2.events[0].detail.contains("/req/0"));
+        assert!(p2.events[0].technical_detail.contains("/req/0"));
         assert!(!p2.has_more, "已到最旧");
 
         // 越界页：空

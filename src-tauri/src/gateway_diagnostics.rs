@@ -6,7 +6,7 @@
 //!
 //! 字典以**稳定封闭枚举**为键：`event` 加 `kind`/`source`/`refusal`/`terminalKind`/
 //! `stallReason`/`phase`/`status`（HTTP 段）以及 `status_repair_refused.reason`。
-//! 数字 / UUID / sha256 / 时间戳等动态槽**原样透传、绝不翻译**。
+//! 请求标识与时间戳原样保留；用户解释把毫秒转换为可读时长，技术信息保留原有码表。
 //! 未知事件码或未知子枚举值 → **诚实回退**（显示原始码），绝不隐藏、绝不 panic。
 //!
 //! 严重度不只看 `event`：`sse_ended` 由 `terminalKind`+`stallReason` 定级、
@@ -49,10 +49,18 @@ impl ActivityLevel {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ActivityEvent {
+    pub attempt: Option<u64>,
+    pub http_status: Option<u16>,
+    pub summary: String,
+    /// 用于关联同一请求，不从正文猜测标识。
+    pub request_id: Option<String>,
+    pub code: String,
+    /// 已汉化的技术细节，默认折叠，不包含原始报错正文。
+    pub technical_detail: String,
     pub level: ActivityLevel,
     /// 中文标题（简短，面向「最近活动」列表）
     pub title: String,
-    /// 中文详情（含透传槽：路径 / HTTP 码 / 次数等原样搬运）
+    /// 面向用户的含义解释；路径与内部枚举保留在 technical_detail 中。
     pub detail: String,
     /// 原始 ISO8601 时间戳（透传槽；缺失则空串）
     pub time: String,
@@ -68,6 +76,11 @@ pub struct ActivityEvent {
 /// - 其余 ⇒ `Some`：中文标题 + 中文详情 + 据子枚举定级。
 pub fn localize_record(record: &Value) -> Option<ActivityEvent> {
     let event = record.get("event").and_then(Value::as_str)?;
+    let attempt = record.get("attempt").and_then(Value::as_u64);
+    let http_status = record.get("status").and_then(Value::as_u64)
+        .filter(|s| (100..=599).contains(s)).map(|s| s as u16);
+    let request_id = record.get("requestId").and_then(Value::as_str)
+        .filter(|id| !id.is_empty()).map(str::to_string);
     let time = record
         .get("time")
         .and_then(Value::as_str)
@@ -81,6 +94,10 @@ pub fn localize_record(record: &Value) -> Option<ActivityEvent> {
     let Some((base_level, title)) = event_base(event) else {
         // 未知事件码：诚实回退，原样显示原始码（不隐藏、不 panic）。
         return Some(ActivityEvent {
+            attempt, http_status, summary: "未知事件".into(),
+            request_id,
+            code: event.to_string(),
+            technical_detail: format!("原始事件码：{event}"),
             level: ActivityLevel::Info,
             title: format!("未识别事件：{event}"),
             detail: "壳未收录此事件码，已原样显示原始码。".to_string(),
@@ -88,8 +105,16 @@ pub fn localize_record(record: &Value) -> Option<ActivityEvent> {
         });
     };
 
-    let (level, detail) = refine(event, base_level, record);
-    Some(ActivityEvent { level, title: title.to_string(), detail, time })
+    let (level, mut technical_detail) = refine(event, base_level, record);
+    if event == "sse_ended" {
+        let terminal_seen = match record.get("sawTerminal").and_then(Value::as_bool) {
+            Some(true) => "是", Some(false) => "否", None => "未知",
+        };
+        technical_detail.push_str(&format!("终止标记已确认：{terminal_seen}。"));
+    }
+    let (title, detail) = explain(event, title, record, &technical_detail);
+    let summary = compact_summary(event, record, &title);
+    Some(ActivityEvent { attempt, http_status, summary, level, title, detail, technical_detail, request_id, code: event.to_string(), time })
 }
 
 /// 便捷入口：一行诊断记录文本 → 可选活动事件（供 fixture 与 T5 读取层逐行调用）。
@@ -97,6 +122,148 @@ pub fn localize_record(record: &Value) -> Option<ActivityEvent> {
 pub fn localize_line(line: &str) -> Option<ActivityEvent> {
     let v: Value = serde_json::from_str(line).ok()?;
     localize_record(&v)
+}
+
+/// 用户先看到含义与下一步，原有码表解释留在可展开的技术信息中。
+fn explain(event: &str, title: &str, r: &Value, fallback: &str) -> (String, String) {
+    let (title, detail) = match event {
+        "gateway_started" => (title, "网关已就绪，可以接收客户端请求。".into()),
+        "gateway_draining" => ("正在等待请求结束", format!("网关准备{}，会先等待进行中的请求完成。", if r.get("restart").and_then(Value::as_bool) == Some(true) { "重启" } else { "停止" })),
+        "received" => (title, "客户端已把请求交给网关，开始处理。".into()),
+        "request_status" => {
+            let phase = match r.get("phase").and_then(Value::as_str) {
+                Some("receiving_request") => "正在接收客户端请求".into(),
+                Some("waiting_headers") => "等待上游响应，还未收到回复".into(),
+                Some("reading_body") => "上游已响应，正在读取回复".into(),
+                Some("waiting_first_content") => "等待首段内容，上游已连接但还未返回可交付的内容".into(),
+                Some("stream_waiting") => "已开始传回内容，等待后续输出".into(),
+                Some("reasoning") => "最近收到推理内容，正文可能尚未开始".into(),
+                Some("tool_output") => "最近收到工具调用信息，不代表工具已执行完成".into(),
+                Some("text_output") => "最近收到正文，回复仍在进行".into(),
+                _ => field_cn(r, "phase").unwrap_or_else(|| "请求仍在处理，具体阶段未知".into()),
+            };
+            let mut parts = vec![phase];
+            if let Some(ms) = num(r, "elapsedMs").filter(|n| *n >= 0) { parts.push(format!("已用时 {}", duration_text(ms))); }
+            if let Some(n) = num(r, "attempt").filter(|n| *n >= 0) { parts.push(if n == 0 { "尚未发起尝试".into() } else { format!("第 {n} 次尝试") }); }
+            match r.get("sinceLastProgressMs") {
+                Some(Value::Null) => parts.push("尚未收到内容进展".into()),
+                Some(value) => if let Some(ms) = value.as_i64().filter(|n| *n >= 0) { parts.push(format!("距上次内容进展 {}", duration_text(ms))); },
+                None => {},
+            }
+            let title = match r.get("phase").and_then(Value::as_str) {
+                Some("receiving_request") => "接收请求",
+                Some("waiting_headers") => "等待上游响应",
+                Some("reading_body") => "读取回复",
+                Some("waiting_first_content") => "等待首段内容",
+                Some("stream_waiting") => "等待后续内容",
+                Some("reasoning") => "正在推理",
+                Some("tool_output") => "输出工具调用",
+                Some("text_output") => "输出文本",
+                _ => "请求阶段未知",
+            };
+            (title, format!("{}。", parts.join("；")))
+        },
+        "upstream_response" => ("上游已响应", match num(r, "status") {
+            Some(200..=299) => "上游已接受本次连接，仍需等待内容；这还不代表回复完整结束。".into(),
+            Some(401 | 403) => "上游拒绝了访问，请检查客户端填写的密钥及使用权限。".into(),
+            Some(429) => "上游暂时限制请求频率或额度，请留意后续尝试结果。".into(),
+            Some(s @ 500..=599) => format!("上游服务暂时出错（HTTP {s}），请留意后续尝试结果。"),
+            _ => fallback.into(),
+        }),
+        "sse_committed" => ("开始传回内容", "已收到可交付的内容，开始向客户端传回回复。".into()),
+        "sse_ended" => {
+            let terminal = r.get("terminalKind").and_then(Value::as_str);
+            let stall = r.get("stallReason");
+            let success = r.get("sawTerminal").and_then(Value::as_bool) == Some(true)
+                && stall == Some(&Value::Null)
+                && matches!(terminal, Some("done_marker" | "response.completed" | "message_stop" | "chat_finish_reason"));
+            if success { ("回复已完整结束", "已收到正常结束标记，本次流式回复完整结束。".into()) }
+            else if stall.and_then(Value::as_str) == Some("client_closed") { ("客户端已断开", "客户端在回复完成前断开，本次回复未确认完整结束。".into()) }
+            else if terminal == Some("response.failed") { ("上游未能完成回复", "上游明确报告本次生成失败，可查看技术信息定位原因。".into()) }
+            else if terminal == Some("response.incomplete") { ("回复未完整结束", "上游报告回复不完整，请在客户端检查结果后决定是否重试。".into()) }
+            else { ("回复结束，完整性未确认", "连接已结束，但缺少正常完成的完整证据。请检查客户端收到的内容，技术信息中保留了结束原因。".into()) }
+        },
+        "finished" => (title, match num(r, "status") {
+            Some(200..=299) => "本次连接已结束。HTTP 成功状态不等于内容完整，流式回复请结合结束记录判断。".into(),
+            Some(401 | 403) => "本次请求被拒绝，请检查客户端的密钥与权限。".into(),
+            Some(429) => "本次请求因上游限流或额度限制未能完成，请稍后再试并检查额度。".into(),
+            Some(s) => format!("本次请求结束，返回 HTTP {s}。请结合前面的事件查看原因。"),
+            None => "本次连接已结束，记录未提供结果状态。".into(),
+        }),
+        "client_closed" => ("客户端提前断开", "客户端在回复完成前断开，可能是主动取消、超时或关闭了连接。".into()),
+        "precommit_failure" => ("尚未收到可用回复", format!("回复交付前遇到问题：{}。是否继续尝试，请查看后续记录。", field_cn(r, "kind").unwrap_or_else(|| "原因未知".into()))),
+        "item_error" => ("请求中的历史内容不被上游接受", "上游无法使用部分历史内容，网关正在判断能否兼容处理。".into()),
+        "session_compat_refused" | "repair_refused" => ("无法安全自动修复", "继续修改可能损失历史内容，网关没有强行修复。可在客户端检查会话内容。".into()),
+        "status_repair_refused" => ("无法自动调整请求格式", "当前请求不符合安全修复条件，未执行这项修改。具体原因见技术信息。".into()),
+        "status_repair_applied" | "repair_applied" | "session_compat_applied" => ("已调整请求兼容性", "网关已处理不兼容的请求字段；是否成功仍需查看后续回复结果。".into()),
+        "session_compat_enabled" => ("已记录会话兼容方式", "已记录当前会话需要的兼容处理，供后续请求使用。".into()),
+        "codex_session_passthrough" => ("保留原请求继续尝试", "为保留会话历史，网关没有删改原请求，继续按原请求尝试。".into()),
+        "codex_resource_retry" => ("正在重新尝试", "上游未能接续当前会话，网关保留历史内容再次尝试。".into()),
+        "codex_resource_exhausted" => ("本次自动恢复已停止", "已无法继续安全恢复，本次请求未能完成。请检查客户端结果后决定是否重新发起。".into()),
+        _ => (title, fallback.into()),
+    };
+    (title.to_string(), detail)
+}
+
+/// 列表直接展示短原因；只读取已有封闭枚举和数字，不解析上游正文。
+fn compact_summary(event: &str, r: &Value, title: &str) -> String {
+    match event {
+        "gateway_started" => "就绪，可接收请求".into(),
+        "gateway_draining" => num(r, "activeRequests").map(|n| format!("等待 {n} 个请求")).unwrap_or_else(|| "等待请求结束".into()),
+        "received" => text(r, "path").unwrap_or_else(|| "请求已接收".into()),
+        "attempt_started" => "已发送至上游".into(),
+        "request_status" => num(r, "elapsedMs").map(|ms| format!("已用时 {}", duration_text(ms.max(0)))).unwrap_or_else(|| "等待后续进展".into()),
+        "sse_committed" => "开始返回内容".into(),
+        "sse_ended" if title == "回复已完整结束" => "已收到正常结束标记".into(),
+        "sse_ended" => {
+            match r.get("stallReason").and_then(Value::as_str) {
+                Some("client_closed") => "客户端断开".into(),
+                Some("progress_timeout") => "内容进展超时".into(),
+                Some("transport_idle_timeout") => "连接静默超时".into(),
+                Some("upstream_read_error") => "上游读取失败".into(),
+                Some("event_size_limit") => "内容片段过大".into(),
+                _ => match r.get("terminalKind").and_then(Value::as_str) {
+                    Some("response.failed") => "上游生成失败".into(),
+                    Some("response.incomplete") => "上游报告不完整".into(),
+                    _ => "完整性未确认".into(),
+                },
+            }
+        },
+        "finished" | "upstream_response" => match num(r, "status") {
+            Some(200..=299) => if event == "finished" { "连接结束，完整性待确认" } else { "已响应，等待内容" }.into(),
+            Some(401 | 403) => "密钥或权限被拒".into(),
+            Some(402) => "额度不足".into(),
+            Some(429) => "限流或额度限制".into(),
+            Some(408) => "上游请求超时".into(),
+            Some(500..=599) => "上游服务错误".into(),
+            _ => "查看详情".into(),
+        },
+        "client_closed" => "取消、超时或连接断开".into(),
+        "precommit_failure" => match r.get("kind").and_then(Value::as_str) {
+            Some("peek_timeout") => "首段等待超时".into(),
+            Some("empty_stream_drop") => "上游未返回内容".into(),
+            Some("read_timeout") => "读取超时".into(),
+            Some("buffer_limit") => "首段内容过大".into(),
+            Some("stream_error") => "上游返回错误".into(),
+            _ => "交付前失败".into(),
+        },
+        "repair_refused" | "codex_resource_exhausted" => field_cn(r, "refusal").unwrap_or_else(|| "无法安全恢复".into()),
+        "status_repair_refused" => field_cn(r, "reason").unwrap_or_else(|| "无法安全修复".into()),
+        "item_error" => field_cn(r, "kind").unwrap_or_else(|| "历史内容不兼容".into()),
+        "codex_resource_retry" | "codex_session_passthrough" => "保留历史继续尝试".into(),
+        "session_compat_enabled" => "已记录兼容方式".into(),
+        "session_compat_refused" => "历史内容无法安全改写".into(),
+        "repair_applied" | "status_repair_applied" | "session_compat_applied" => "已调整不兼容字段".into(),
+        _ => "查看详情".into(),
+    }
+}
+
+fn duration_text(ms: i64) -> String {
+    let seconds = ms / 1000;
+    if seconds == 0 { "不足1秒".into() }
+    else if seconds < 60 { format!("{seconds}秒") }
+    else if seconds < 3600 { format!("{}分{}秒", seconds / 60, seconds % 60) }
+    else { format!("{}小时{}分", seconds / 3600, seconds % 3600 / 60) }
 }
 
 // ───────────────────────── 字典数据（稳定封闭枚举为键） ─────────────────────────
@@ -392,7 +559,7 @@ fn refine(event: &str, base_level: ActivityLevel, record: &Value) -> (ActivityLe
                 _ => ActivityLevel::Warn, // 未知 kind：安全兜底警告
             };
             let kind_cn = field_cn(record, "kind").unwrap_or_else(|| "未知类别".to_string());
-            (level, format!("流式下发前失败：{kind_cn}（换通道重试）。"))
+            (level, format!("流式下发前失败：{kind_cn}。"))
         }
         _ => (base_level, String::new()),
     }
@@ -513,6 +680,57 @@ mod tests {
     /// 覆盖率契约（主闸门）：从只读打包脚本抽取的 event 码，必须恰为清单 23 项，
     /// 且字典（EVENT_BASE）对每一项都有中文条目。上游新增/删除事件码即红。
     #[test]
+    fn 重试边界诊断样本_沿用事件码并保留关联信息() {
+        let samples = include_str!("../tests/fixtures/diagnostics-retry-boundaries.jsonl");
+        let events: Vec<_> = samples.lines().map(|line| localize_line(line).unwrap()).collect();
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0].code, "precommit_failure");
+        assert_eq!(events[0].attempt, Some(1));
+        assert_eq!(events[1].http_status, Some(400));
+        assert_eq!(events[0].request_id, events[1].request_id);
+        assert_eq!(events[2].title, "尚未收到可用回复");
+    }
+
+    #[test]
+    fn 紧凑活动列只复用既有字段_缺失值不补零() {
+        let event = localize_record(&json!({"event":"precommit_failure","requestId":"r","attempt":3,"status":200,"kind":"peek_timeout"})).unwrap();
+        let value = serde_json::to_value(event).unwrap();
+        assert_eq!(value["attempt"], 3);
+        assert_eq!(value["httpStatus"], 200);
+        assert_eq!(value["summary"], "首段等待超时");
+        let legacy = serde_json::to_value(localize_record(&json!({"event":"finished","status":200})).unwrap()).unwrap();
+        assert_eq!(legacy["attempt"], Value::Null);
+        assert_eq!(legacy["summary"], "连接结束，完整性待确认");
+    }
+
+    #[test]
+    fn 易读诊断_等待解释包含耗时并保留请求标识() {
+        let event = localize_record(&json!({"event":"request_status","requestId":"req-a","phase":"waiting_first_content","attempt":3,"elapsedMs":65000,"sinceLastProgressMs":null})).unwrap();
+        assert!(event.detail.contains("首段内容"));
+        assert!(event.detail.contains("1分5秒"));
+        assert!(event.detail.contains("第 3 次尝试"));
+        let value = serde_json::to_value(event).unwrap();
+        assert_eq!(value["requestId"], "req-a");
+        assert_eq!(value["code"], "request_status");
+    }
+
+    #[test]
+    fn 易读诊断_只有完整终止证据才声称完成() {
+        let event = |record| localize_record(&record).unwrap();
+        assert!(!event(json!({"event":"finished","status":200})).detail.contains("（成功）"));
+        let complete = event(json!({"event":"sse_ended","sawTerminal":true,"terminalKind":"response.completed","stallReason":null}));
+        assert_eq!(complete.title, "回复已完整结束");
+        for record in [
+            json!({"event":"sse_ended","sawTerminal":false,"terminalKind":"response.completed","stallReason":null}),
+            json!({"event":"sse_ended","sawTerminal":true,"terminalKind":"response.completed","stallReason":"progress_timeout"}),
+            json!({"event":"sse_ended","sawTerminal":true,"terminalKind":"response.failed","stallReason":null}),
+            json!({"event":"sse_ended","terminalKind":"future_terminal","stallReason":null}),
+        ] {
+            assert_ne!(event(record).title, "回复已完整结束");
+        }
+    }
+
+    #[test]
     fn 契约_打包脚本事件码恰为清单23项且字典全覆盖() {
         let text = std::fs::read_to_string(mjs_path()).expect("读取打包脚本失败（禁改，只读）");
         let scanned = extract_events(&text);
@@ -626,7 +844,7 @@ mod tests {
         assert_eq!((a.level, a.title.as_str()), (Info, "网关已启动"));
         let a = localize_record(pick(&recs, |r| ev(r) == "gateway_draining")).unwrap();
         assert_eq!(a.level, Info);
-        assert!(a.detail.contains("热重启排空"), "restart=true → 热重启排空：{}", a.detail);
+        assert!(a.technical_detail.contains("热重启排空"), "restart=true → 热重启排空：{}", a.technical_detail);
 
         // happy-path
         assert_eq!(localize_record(pick(&recs, |r| ev(r) == "received")).unwrap().title, "收到请求");
@@ -637,21 +855,21 @@ mod tests {
 
         let up200 = localize_record(pick(&recs, |r| ev(r) == "upstream_response" && status_is(r, 200))).unwrap();
         assert_eq!(up200.level, Info);
-        assert!(up200.detail.contains("成功"), "{}", up200.detail);
+        assert!(up200.technical_detail.contains("成功"), "{}", up200.technical_detail);
         let up400 = localize_record(pick(&recs, |r| ev(r) == "upstream_response" && status_is(r, 400))).unwrap();
         assert_eq!(up400.level, Info, "upstream_response 级别恒信息（成败由 finished/sse_ended 定）");
-        assert!(up400.detail.contains("请求被拒"), "{}", up400.detail);
+        assert!(up400.technical_detail.contains("请求被拒"), "{}", up400.technical_detail);
 
         // sse_ended：三种 terminalKind/stallReason → 三种级别
         let done = localize_record(pick(&recs, |r| ev(r) == "sse_ended" && r.get("terminalKind").and_then(Value::as_str) == Some("response.completed"))).unwrap();
         assert_eq!(done.level, Info);
-        assert!(done.detail.contains("正常完成"), "{}", done.detail);
+        assert!(done.technical_detail.contains("正常完成"), "{}", done.technical_detail);
         let failed = localize_record(pick(&recs, |r| ev(r) == "sse_ended" && r.get("terminalKind").and_then(Value::as_str) == Some("response.failed"))).unwrap();
         assert_eq!(failed.level, Error);
-        assert!(failed.detail.contains("失败终止"), "{}", failed.detail);
+        assert!(failed.technical_detail.contains("失败终止"), "{}", failed.technical_detail);
         let closed = localize_record(pick(&recs, |r| ev(r) == "sse_ended" && r.get("stallReason").and_then(Value::as_str) == Some("client_closed"))).unwrap();
         assert_eq!(closed.level, Info, "stallReason=client_closed 客户端主动断 → 信息");
-        assert!(closed.detail.contains("客户端断开"), "{}", closed.detail);
+        assert!(closed.technical_detail.contains("客户端断开"), "{}", closed.technical_detail);
 
         assert_eq!(localize_record(pick(&recs, |r| ev(r) == "client_closed")).unwrap().level, Warn);
 
@@ -663,28 +881,28 @@ mod tests {
 
         // request_status：phase 决定详情
         let rs_r = localize_record(pick(&recs, |r| ev(r) == "request_status" && r.get("phase").and_then(Value::as_str) == Some("reasoning"))).unwrap();
-        assert!(rs_r.detail.contains("正在输出推理"), "{}", rs_r.detail);
+        assert!(rs_r.technical_detail.contains("正在输出推理"), "{}", rs_r.technical_detail);
         let rs_t = localize_record(pick(&recs, |r| ev(r) == "request_status" && r.get("phase").and_then(Value::as_str) == Some("tool_output"))).unwrap();
-        assert!(rs_t.detail.contains("正在输出工具调用"), "{}", rs_t.detail);
+        assert!(rs_t.technical_detail.contains("正在输出工具调用"), "{}", rs_t.technical_detail);
 
         // 错误/修复路径
         let ie = localize_record(pick(&recs, |r| ev(r) == "item_error")).unwrap();
         assert_eq!(ie.level, Warn);
-        assert!(ie.detail.contains("跨 Azure 资源引用"), "{}", ie.detail);
+        assert!(ie.technical_detail.contains("跨 Azure 资源引用"), "{}", ie.technical_detail);
         let rr = localize_record(pick(&recs, |r| ev(r) == "repair_refused")).unwrap();
         assert_eq!(rr.level, Warn);
-        assert!(rr.detail.contains("内联历史不安全"), "{}", rr.detail);
+        assert!(rr.technical_detail.contains("内联历史不安全"), "{}", rr.technical_detail);
         assert_eq!(localize_record(pick(&recs, |r| ev(r) == "codex_resource_retry")).unwrap().level, Info);
 
         let exh_limit = localize_record(pick(&recs, |r| ev(r) == "codex_resource_exhausted" && r.get("refusal").and_then(Value::as_str) == Some("resource_attempt_limit"))).unwrap();
         assert_eq!(exh_limit.level, Error);
-        assert!(exh_limit.detail.contains("资源尝试达上限"), "{}", exh_limit.detail);
+        assert!(exh_limit.technical_detail.contains("资源尝试达上限"), "{}", exh_limit.technical_detail);
         let exh_unsafe = localize_record(pick(&recs, |r| ev(r) == "codex_resource_exhausted" && r.get("refusal").and_then(Value::as_str) == Some("unsafe_inline_history"))).unwrap();
         assert_eq!(exh_unsafe.level, Error);
 
         let pf = localize_record(pick(&recs, |r| ev(r) == "precommit_failure")).unwrap();
         assert_eq!(pf.level, Error, "kind=stream_error → 错误");
-        assert!(pf.detail.contains("流内携带错误"), "{}", pf.detail);
+        assert!(pf.technical_detail.contains("流内携带错误"), "{}", pf.technical_detail);
     }
 
     /// 样本未触发的 7 个事件（手造最小记录，字段形状照 diagnostics-codes.md §1/§2）。
@@ -701,9 +919,9 @@ mod tests {
 
         let r = base(json!({"time":"t","event":"session_compat_applied","source":"explicit_session","removedIds":2}));
         assert_eq!(r.level, Info);
-        assert!(r.detail.contains("显式会话"), "{}", r.detail);
+        assert!(r.technical_detail.contains("显式会话"), "{}", r.technical_detail);
         let r = base(json!({"time":"t","event":"session_compat_applied","source":"resource_lineage"}));
-        assert!(r.detail.contains("资源血缘"), "{}", r.detail);
+        assert!(r.technical_detail.contains("资源血缘"), "{}", r.technical_detail);
 
         let r = base(json!({"time":"t","event":"session_compat_enabled","kind":"azure","source":"explicit_session"}));
         assert_eq!(r.level, Info);
@@ -713,7 +931,7 @@ mod tests {
             let r = base(json!({"time":"t","event":"status_repair_refused","source":"http_error","status":400,"reason":reason}));
             assert_eq!(r.level, Warn, "status_repair_refused reason={reason}");
             assert!(sub_label("reason", reason).is_some());
-            assert!(!r.detail.contains("原始码"), "reason={reason} 应已汉化：{}", r.detail);
+            assert!(!r.technical_detail.contains("原始码"), "reason={reason} 应已汉化：{}", r.technical_detail);
         }
 
         let r = base(json!({"time":"t","event":"status_repair_applied","source":"http_error","status":400,"index":3}));
@@ -722,7 +940,7 @@ mod tests {
         // repair_applied（样本里从未触发）：空回应形状修复
         let r = base(json!({"time":"t","event":"repair_applied","kind":"empty_stream_shape","source":"json_empty","status":200,"removedIds":4}));
         assert_eq!(r.level, Info);
-        assert!(r.detail.contains("空回应形状修复"), "{}", r.detail);
+        assert!(r.technical_detail.contains("空回应形状修复"), "{}", r.technical_detail);
     }
 
     /// 样本未触发的子枚举值（kind/source/refusal/terminalKind/stallReason/phase）全覆盖、不回退。
@@ -731,12 +949,12 @@ mod tests {
         // item/peek/shape 全部 kind
         for k in EXPECTED_KIND {
             let r = localize_record(&json!({"time":"t","event":"item_error","kind":k,"source":"json_error","status":200})).unwrap();
-            assert!(!r.detail.contains("原始码"), "kind={k} 未汉化：{}", r.detail);
+            assert!(!r.technical_detail.contains("原始码"), "kind={k} 未汉化：{}", r.technical_detail);
         }
         // 全部 phase
         for p in EXPECTED_PHASE {
             let r = localize_record(&json!({"time":"t","event":"request_status","phase":p})).unwrap();
-            assert!(!r.detail.contains("原始码"), "phase={p} 未汉化：{}", r.detail);
+            assert!(!r.technical_detail.contains("原始码"), "phase={p} 未汉化：{}", r.technical_detail);
         }
         // 全部 source（经 item_error 详情体现）
         for s in EXPECTED_SOURCE {
@@ -746,7 +964,7 @@ mod tests {
         for rf in EXPECTED_REFUSAL {
             let r = localize_record(&json!({"time":"t","event":"repair_refused","kind":"stale_reasoning_item","source":"http_error","status":400,"refusal":rf})).unwrap();
             assert_eq!(r.level, ActivityLevel::Warn);
-            assert!(!r.detail.contains("原始码"), "refusal={rf} 未汉化：{}", r.detail);
+            assert!(!r.technical_detail.contains("原始码"), "refusal={rf} 未汉化：{}", r.technical_detail);
         }
     }
 
@@ -814,14 +1032,14 @@ mod tests {
         // sse_ended 未知 terminalKind（无停滞）→ 有终止即信息（诚实回退）
         let r = localize_record(&json!({"time":"t","event":"sse_ended","terminalKind":"response.brand_new","stallReason":null})).unwrap();
         assert_eq!(r.level, ActivityLevel::Info);
-        assert!(r.detail.contains("原始码：response.brand_new"), "{}", r.detail);
+        assert!(r.technical_detail.contains("原始码：response.brand_new"), "{}", r.technical_detail);
         // precommit_failure 未知 kind → 兜底警告
         let r = localize_record(&json!({"time":"t","event":"precommit_failure","kind":"mystery_kind"})).unwrap();
         assert_eq!(r.level, ActivityLevel::Warn);
-        assert!(r.detail.contains("原始码：mystery_kind"), "{}", r.detail);
+        assert!(r.technical_detail.contains("原始码：mystery_kind"), "{}", r.technical_detail);
         // item_error 未知 source → 详情回退，不崩
         let r = localize_record(&json!({"time":"t","event":"item_error","kind":"azure_resource_mismatch","source":"new_layer","status":400})).unwrap();
-        assert!(r.detail.contains("原始码：new_layer"), "{}", r.detail);
+        assert!(r.technical_detail.contains("原始码：new_layer"), "{}", r.technical_detail);
     }
 
     /// None 语义：无 event / event 非字符串 / request_profile / 非法行。
@@ -842,7 +1060,7 @@ mod tests {
             "path":"/v1/responses","attempt":7,"repairCount":0
         })).unwrap();
         assert_eq!(r.time, "2026-10-11T11:49:17.160Z");
-        assert!(r.detail.contains("第 7 次"), "attempt 数字透传：{}", r.detail);
+        assert!(r.technical_detail.contains("第 7 次"), "attempt 数字透传：{}", r.technical_detail);
 
         // 级别序列化为稳定小写机器码；中文标签经 as_cn 取用
         let json = serde_json::to_string(&r).unwrap();

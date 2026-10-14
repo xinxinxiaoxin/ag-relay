@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>隔离界面验证</title></head>
+<body>
+<div id="root"></div>
+<div style="position:fixed;bottom:7px;left:50%;transform:translateX(-50%);z-index:9999;font:11px sans-serif;color:#666;pointer-events:none">隔离界面验证 · 模拟数据 · 不连接真实网关</div>
+<script type="module">
+  // 只用于 Vite 开发验收，不进入生产入口。所有 IPC 在这里拦截，未知操作直接失败。
+  const params = new URLSearchParams(location.search)
+  const listeners = new Map()
+  let closeRequest = params.has('close') ? { id: 1, trayAvailable: params.get('tray') !== '0' } : null
+  const request = { requestId: 'fixture-0001', phase: 'waiting_first_content', attempt: 3, elapsedMs: 65000, sinceLastProgressMs: null }
+  const status = { available: true, owner: 'window', activeRequests: 1, version: 'fixture0', uptimeText: '2分钟', requests: [request], requestsTruncated: false }
+  switch (params.get('mode')) {
+    case 'legacy': status.requests = null; break
+    case 'unknown': request.phase = 'future_phase'; delete request.sinceLastProgressMs; break
+    case 'empty': status.activeRequests = 0; status.requests = []; break
+    case 'offline': status.available = false; status.owner = 'none'; break
+    case 'truncated': status.activeRequests = 101; status.requestsTruncated = true; break
+  }
+  const calls = []
+  window.__agUiFixture = { status, calls }
+  window.__TAURI__ = {
+    app: { getVersion: async () => '0.3.4' },
+    event: { listen: async (name, callback) => { listeners.set(name, callback); return () => { if (listeners.get(name) === callback) listeners.delete(name) } } },
+    window: { getCurrentWindow: () => ({
+      isMaximized: async () => false, onResized: async () => () => {},
+      close: async () => { closeRequest = { id: Date.now(), trayAvailable: true }; listeners.get('window-close-requested')?.({ payload: closeRequest }) },
+      minimize: async () => {}, toggleMaximize: async () => {},
+    }) },
+    core: { invoke: async (command, args) => {
+      calls.push({ command, args })
+      switch (command) {
+        case 'get_status': return structuredClone(status)
+        case 'get_close_request': return closeRequest
+        case 'get_connection_settings': return { saved: { upstream: 'http://fixture.invalid', port: 18787 }, active: { upstream: 'http://fixture.invalid', port: 18787 }, restartRequired: false, endpoint: 'http://127.0.0.1:18787' }
+        case 'get_recent_activity': return []
+        case 'start_activity_watch': return { subscription: args.subscription, revision: 0, status: 'watching', message: null }
+        case 'stop_activity_watch': return
+        case 'get_update_state': return { phase: 'disabled', currentVersion: '0.3.4', release: null, download: null, detail: '隔离测试禁用更新', recovery: null }
+        case 'respond_to_close':
+          if (args.action === 'quit') throw new Error('模拟：等待请求超时，退出已取消。')
+          closeRequest = null
+          return
+        default: throw new Error(`隔离测试不允许该操作：${command}`)
+      }
+    } },
+  }
+  await import('/src/main.tsx')
+</script>
+</body>
+</html>
