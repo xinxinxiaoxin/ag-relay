@@ -185,7 +185,27 @@ node scripts/release.mjs test-build --out C:\Temp\ag-relay-test-artifacts
 
 注：网关核心的四个 `.mjs` 与 `gateway-config.bat` 已由 `.gitattributes` 固定为不做换行符转换（`-text`），因此任何机器上检出内容与仓库内容一致、哈希唯一。此前 `.bat` 未固定：仓库内容为 LF、Windows 检出为 CRLF，两者哈希不同。下表 v0.2.0/v0.3.1 条目记录的是当时**磁盘检出**（CRLF）的值 `102865c8…`，属历史留档不回填；v0.3.2 及以后记录的是**仓库内容**（LF）的值 `9a8a483e…`。
 
-### v0.3.2（当前）
+### v0.3.5（当前）
+
+| 项 | 值 |
+| --- | --- |
+| 打包日期 | 2026-10-14 20:35（UTC+8） |
+| 本仓构建提交 | `b35d18e504c522c4a299418f62e6c3d757fa7e06`（tag `v0.3.5`：紧凑请求面板、诊断列与重试取消修复） |
+| 构建方式 | 维护者本机，生产更新签名；不运行安装器 |
+| 验证 | 隔离回归通过；NSIS/MSI 更新签名与版本绑定、SHA-256、随包许可及本机路径隐私检查通过；未执行本机安装/升级 |
+| `relay-retry-proxy.mjs` sha256 | `18e424caadd294542fac2084f76f683b075e303fedfd8efb3101f40876565376` |
+| `relay-supervisor.mjs` sha256 | `f2f030b46999f84afc77f7f92643075c1d1f1ddf7ad3c327fbd92f5593dff77c` |
+| `relay-start-check.mjs` sha256 | `bb54cc7255b4f570ba1bdcfda255f19f0ca0a70fa6d028d0ed4e44f8146037c4` |
+| `bounded-file-log.mjs` sha256 | `3841b877ce76e6ff37497bfbcd65e3dd4f478442dc7fff9eaf4b39612b25c205` |
+| `gateway-config.bat` sha256 | `9a8a483ec40f34fc59ef34284304c938f4a00b6813aa7486c2df501c7caf80ab` |
+| `ag-relay_0.3.5_x64-setup.exe` sha256 | `1e53dd7144cc4daa9623d4034073a909ef5a672865f1f2016e65d2931734921f` |
+| `ag-relay_0.3.5_x64_zh-CN.msi` sha256 | `c889350e84a31c3c10621a5718c28f903d9fd5fa97e210ec050fac40fb0a09a1` |
+| `third-party-sources.tar.gz` sha256 | `a0c553aa4a75efa933ebef2ab410596f330983af69afbc6b0e4bd4d4410a611d` |
+| Release | [v0.3.5](https://github.com/xinxinxiaoxin/ag-relay/releases/tag/v0.3.5)（NSIS + MSI + 各自 `.sig` + `latest.json` + `SHA256SUMS` + 第三方源码附件） |
+
+本次更新网关核心取消/重试边界与面板信息展示；默认重试参数未变，未增加 token/tok/s 采集。
+
+### v0.3.2（历史）
 
 | 项 | 值 |
 | --- | --- |
