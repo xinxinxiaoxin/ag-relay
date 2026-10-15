@@ -219,12 +219,12 @@ function safeDiagnostic(record) {
 }
 
 /**
- * Conservative stateless replay. Only inline message/function items have optional
+ * Conservative stateless replay. Only inline message/function/custom-tool items have optional
  * item ids removed; never recurse into content, arguments, output, or call_id.
  * Server-side history cannot be reconstructed or proven complete by this proxy.
  *
  * options:
- *   stripItemIds      – drop the id handle on message/function_call/function_call_output
+ *   stripItemIds      – drop the id handle on messages and inline tool calls/outputs
  *   stripReasoningIds – drop the id handle on reasoning items but keep the items
  *   stripMessageType  – drop the redundant `type: "message"` tag (role/content stay)
  *   dropReasoning     – remove reasoning items entirely (the only lossy option)
@@ -253,7 +253,7 @@ function repairResponsesItems(bodyBuf, options = {}) {
   let removedIds = 0;
   let removedTypes = 0;
   const input = [];
-  const calls = new Set();
+  const calls = new Map();
   for (const item of obj.input) {
     if (!item || typeof item !== 'object' || Array.isArray(item)) return { error: 'unsupported inline input item' };
     if (item.type === 'item_reference') return { error: 'item_reference requires server-side history; refusing to discard it' };
@@ -278,11 +278,20 @@ function repairResponsesItems(bodyBuf, options = {}) {
     } else if (item.type === 'function_call') {
       if (!nonEmptyStr(item.call_id) || !nonEmptyStr(item.name) || typeof item.arguments !== 'string'
           || calls.has(item.call_id)) return { error: 'function_call is incomplete or has a duplicate call_id' };
-      calls.add(item.call_id);
+      calls.set(item.call_id, 'function_call');
     } else if (item.type === 'function_call_output') {
-      if (!nonEmptyStr(item.call_id) || !calls.has(item.call_id)
+      if (!nonEmptyStr(item.call_id) || calls.get(item.call_id) !== 'function_call'
           || !(typeof item.output === 'string' || Array.isArray(item.output))) {
         return { error: 'function_call_output lacks a preceding inline function_call or complete output' };
+      }
+    } else if (item.type === 'custom_tool_call') {
+      if (!nonEmptyStr(item.call_id) || !nonEmptyStr(item.name) || typeof item.input !== 'string'
+          || calls.has(item.call_id)) return { error: 'custom_tool_call is incomplete or has a duplicate call_id' };
+      calls.set(item.call_id, 'custom_tool_call');
+    } else if (item.type === 'custom_tool_call_output') {
+      if (!nonEmptyStr(item.call_id) || calls.get(item.call_id) !== 'custom_tool_call'
+          || !(typeof item.output === 'string' || Array.isArray(item.output))) {
+        return { error: 'custom_tool_call_output lacks a preceding inline custom_tool_call or complete output' };
       }
     } else {
       return { error: 'unsupported or reference-only input item; safe replay cannot be verified' };
@@ -1009,7 +1018,8 @@ async function handle(req, res, state) {
     if (!azure && !reasoning) return null;
     const kind = azure ? 'azure_resource_mismatch' : 'stale_reasoning_item';
     diagnose('item_error', { kind, source, status, shape: summarizeResponsesBody(activeBody) });
-    if (azure && codexResourceRetry && ++resourceFailures >= 5) {
+    // 两类历史错误都可能来自当前通道无法接续；无法安全改写不等于无法原样重试。
+    if (codexResourceRetry && ++resourceFailures >= 5) {
       diagnose('codex_resource_exhausted', { kind, source, status, resourceFailures, refusal: 'resource_attempt_limit' });
       log(`attempt ${attempt}: ${kind}; stopping after ${resourceFailures} resource attempts`);
       sendPermanent(res, `${kind}: stopping after ${resourceFailures} resource attempts; upstream could not access the retained response history.`);
@@ -1017,10 +1027,10 @@ async function handle(req, res, state) {
     }
     const fail = (reason, refusal = 'unsafe_inline_history') => {
       diagnose('repair_refused', { kind, source, status, refusal });
-      if (azure && codexResourceRetry) {
+      if (codexResourceRetry) {
         preserveResourceHistory = true;
         // Refusing a lossy rewrite does not rule out another route accepting the same history.
-        lastReason = 'azure_resource_mismatch: upstream could not access the retained response history';
+        lastReason = `${kind}: upstream could not access the retained response history`;
         if (ac.signal.aborted) return 'stop';
         if (attempt < maxAttempts && deadline - Date.now() >= cfg.minRetryWindowMs + cfg.deployDelayMs) {
           diagnose('codex_resource_retry', { kind, source, status, refusal });

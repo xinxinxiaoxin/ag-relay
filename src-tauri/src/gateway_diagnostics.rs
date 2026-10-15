@@ -683,12 +683,20 @@ mod tests {
     fn 重试边界诊断样本_沿用事件码并保留关联信息() {
         let samples = include_str!("../tests/fixtures/diagnostics-retry-boundaries.jsonl");
         let events: Vec<_> = samples.lines().map(|line| localize_line(line).unwrap()).collect();
-        assert_eq!(events.len(), 3);
+        assert_eq!(events.len(), 5);
         assert_eq!(events[0].code, "precommit_failure");
         assert_eq!(events[0].attempt, Some(1));
         assert_eq!(events[1].http_status, Some(400));
         assert_eq!(events[0].request_id, events[1].request_id);
         assert_eq!(events[2].title, "尚未收到可用回复");
+        assert_eq!(events[3].code, "codex_resource_retry");
+        assert_eq!(events[3].level, ActivityLevel::Info);
+        assert_eq!(events[3].summary, "保留历史继续尝试");
+        assert!(events[3].technical_detail.contains("失效的 reasoning 项"));
+        assert_eq!(events[4].code, "codex_resource_exhausted");
+        assert_eq!(events[4].level, ActivityLevel::Error);
+        assert_eq!(events[4].attempt, Some(5));
+        assert_eq!(events[4].summary, "资源尝试达上限");
     }
 
     #[test]

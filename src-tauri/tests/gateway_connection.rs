@@ -327,6 +327,7 @@ fn 连接切换_保存不打断旧实例_明确重启才注入并释放旧端口
 struct RetryUpstream {
     url: String,
     count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    bodies: std::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     worker: Option<std::thread::JoinHandle<()>>,
 }
@@ -337,8 +338,10 @@ impl RetryUpstream {
         let url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
         listener.set_nonblocking(true).unwrap();
         let count = Arc::new(AtomicUsize::new(0));
+        let bodies = Arc::new(std::sync::Mutex::new(Vec::new()));
         let stop = Arc::new(AtomicBool::new(false));
         let (seen, done) = (count.clone(), stop.clone());
+        let captured = bodies.clone();
         let worker = std::thread::spawn(move || {
             while !done.load(Ordering::SeqCst) {
                 match listener.accept() {
@@ -367,6 +370,7 @@ impl RetryUpstream {
                                     Ok(n) => request.extend_from_slice(&chunk[..n]),
                                 }
                             }
+                            captured.lock().unwrap().push(request[header_end..].to_vec());
                         }
                         let index = seen.fetch_add(1, Ordering::SeqCst);
                         let reply = &replies[index.min(replies.len() - 1)];
@@ -377,9 +381,10 @@ impl RetryUpstream {
                 }
             }
         });
-        Self { url, count, stop, worker: Some(worker) }
+        Self { url, count, bodies, stop, worker: Some(worker) }
     }
     fn attempts(&self) -> usize { self.count.load(std::sync::atomic::Ordering::SeqCst) }
+    fn bodies(&self) -> Vec<Vec<u8>> { self.bodies.lock().unwrap().clone() }
 }
 impl Drop for RetryUpstream {
     fn drop(&mut self) {
@@ -400,6 +405,76 @@ fn wait_retry_status(port: u16, check: impl Fn(&serde_json::Value) -> bool) {
         if check(&status) { return; }
         assert!(std::time::Instant::now() < deadline, "未出现预期的隔离请求状态：{status}");
         std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn responses_request(port: u16, body: &str, client: &str) -> String {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    write!(stream, "POST /v1/responses HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer fixture-only-not-a-key\r\nContent-Type: application/json\r\nX-Relay-Client: {client}\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    response
+}
+
+#[test]
+fn 重试边界_自定义工具历史可修复失效推理而不丢失调用记录() {
+    let error = r#"{"error":{"type":"invalid_request_error","message":"encrypted content could not be verified"}}"#;
+    let body = r#" {"model":"gpt-6.1-sol","store":false,"input":[{"type":"message","id":"msg_fixture","role":"user","content":"fixture prompt"},{"type":"reasoning","id":"rs_fixture","encrypted_content":"fixture ciphertext"},{"type":"custom_tool_call","id":"ct_fixture","call_id":"call_custom","name":"fixture_tool","input":"{\"id\":\"nested\",\"encrypted_content\":\"keep\"}"},{"type":"custom_tool_call_output","id":"cto_fixture","call_id":"call_custom","output":[{"type":"input_text","text":"fixture tool result"}]},{"type":"function_call","id":"fc_fixture","call_id":"call_function","name":"fixture_function","arguments":"{}"},{"type":"function_call_output","id":"fco_fixture","call_id":"call_function","output":"fixture function result"}]} "#;
+    let expected: serde_json::Value = serde_json::from_str(r#"{"model":"gpt-6.1-sol","store":false,"input":[{"type":"message","id":"msg_fixture","role":"user","content":"fixture prompt"},{"type":"custom_tool_call","id":"ct_fixture","call_id":"call_custom","name":"fixture_tool","input":"{\"id\":\"nested\",\"encrypted_content\":\"keep\"}"},{"type":"custom_tool_call_output","id":"cto_fixture","call_id":"call_custom","output":[{"type":"input_text","text":"fixture tool result"}]},{"type":"function_call","id":"fc_fixture","call_id":"call_function","name":"fixture_function","arguments":"{}"},{"type":"function_call_output","id":"fco_fixture","call_id":"call_function","output":"fixture function result"}]}"#).unwrap();
+    for (carrier, status, ct, error_body) in [
+        ("http", 400, "application/json", error.to_string()),
+        ("json", 200, "application/json", error.to_string()),
+        ("sse", 200, "text/event-stream", format!("data: {error}\n\n")),
+    ] {
+        let upstream = RetryUpstream::new(vec![upstream_reply(status, ct, &error_body), upstream_reply(200, "application/json", r#"{"ok":true}"#)]);
+        let port = free_port();
+        let mut fixture = Fixture::new(&format!("custom-reasoning-{carrier}"), &upstream.url, port);
+        fixture.gateway.start().unwrap();
+        let response = responses_request(port, body, "codex");
+        assert_eq!(upstream.attempts(), 2, "{carrier} 完整的自定义工具历史不能阻断既有推理修复：{response}");
+        assert!(response.contains(r#"{"ok":true}"#));
+        let captured = upstream.bodies();
+        assert_eq!(captured[0], body.as_bytes());
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&captured[1]).unwrap(), expected, "{carrier} 只删除失效推理，完整保留两类工具、调用编号、输入与结果");
+        let diagnostics = std::fs::read_to_string(fixture.dir.join("logs/diagnostics.jsonl")).unwrap();
+        assert!(diagnostics.contains("repair_applied"));
+        for sensitive in ["fixture-only-not-a-key", "fixture ciphertext", "fixture prompt", "fixture tool result"] {
+            assert!(!diagnostics.contains(sensitive));
+        }
+    }
+}
+
+#[test]
+fn 重试边界_失效推理无法安全修复时保留完整历史换通道() {
+    let error = r#"{"error":{"type":"invalid_request_error","message":"Item with id 'rs_fixture' not found. Items are not persisted when store is set to false."}}"#;
+    for (history, body) in [
+        ("opaque", r#" {"model":"gpt-6.1-sol","store":false,"input":[{"type":"reasoning","id":"rs_fixture","encrypted_content":"fixture reasoning"},{"type":"compaction","id":"cmp_fixture","encrypted_content":"fixture opaque history"},{"role":"user","content":"fixture prompt"}]} "#),
+        ("reference", r#" {"model":"gpt-6.1-sol","previous_response_id":"resp_fixture","input":[{"type":"item_reference","id":"rs_fixture"},{"role":"user","content":"fixture prompt"}]} "#),
+        ("orphan-tool-output", r#" {"model":"gpt-6.1-sol","input":[{"type":"reasoning","id":"rs_fixture","encrypted_content":"fixture reasoning"},{"type":"custom_tool_call_output","call_id":"missing_call","output":"fixture tool result"},{"role":"user","content":"fixture prompt"}]} "#),
+        ("wrong-tool-kind", r#" {"model":"gpt-6.1-sol","input":[{"type":"reasoning","id":"rs_fixture","encrypted_content":"fixture reasoning"},{"type":"function_call","call_id":"call_fixture","name":"fixture_function","arguments":"{}"},{"type":"custom_tool_call_output","call_id":"call_fixture","output":"fixture tool result"},{"role":"user","content":"fixture prompt"}]} "#),
+    ] {
+        for (carrier, status, ct, error_body) in [
+            ("http", 400, "application/json", error.to_string()),
+            ("json", 200, "application/json", error.to_string()),
+            ("sse", 200, "text/event-stream", format!("data: {error}\n\n")),
+        ] {
+            let upstream = RetryUpstream::new(vec![upstream_reply(status, ct, &error_body), upstream_reply(200, "application/json", r#"{"ok":true}"#)]);
+            let port = free_port();
+            let mut fixture = Fixture::new(&format!("stale-retain-{history}-{carrier}"), &upstream.url, port);
+            fixture.gateway.start().unwrap();
+            let response = responses_request(port, body, "codex");
+            assert_eq!(upstream.attempts(), 2, "{history}/{carrier} 不安全改写不等于下一条通道也无法恢复：{response}");
+            assert!(response.contains(r#"{"ok":true}"#));
+            assert!(upstream.bodies().iter().all(|sent| sent == body.as_bytes()), "{history}/{carrier} 未识别项、密文、引用和原始字节必须全部保留");
+            let diagnostics = std::fs::read_to_string(fixture.dir.join("logs/diagnostics.jsonl")).unwrap();
+            let rows: Vec<serde_json::Value> = diagnostics.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+            assert!(rows.iter().any(|r| r["event"] == "codex_resource_retry" && r["kind"] == "stale_reasoning_item"));
+            assert!(!rows.iter().any(|r| r["event"] == "repair_applied" || r["event"] == "session_compat_applied"));
+            for sensitive in ["fixture-only-not-a-key", "fixture reasoning", "fixture opaque history", "fixture prompt"] {
+                assert!(!diagnostics.contains(sensitive));
+            }
+        }
     }
 }
 
@@ -425,6 +500,78 @@ fn 重试边界_退避期间取消后不再访问上游() {
     std::thread::sleep(Duration::from_millis(1300));
     assert_eq!(upstream.attempts(), 1, "客户端已取消，不能再发起上游请求");
     wait_retry_status(port, |s| s["activeRequests"] == 0);
+}
+
+#[test]
+fn 重试边界_失效推理保留历史重试受上限约束() {
+    let error = r#"{"error":{"type":"invalid_request_error","message":"encrypted content could not be decrypted"}}"#;
+    let body = r#"{"model":"gpt-6.1-sol","input":[{"type":"reasoning","id":"rs_fixture","encrypted_content":"fixture reasoning"},{"type":"compaction","encrypted_content":"fixture opaque history"},{"role":"user","content":"fixture"}]}"#;
+    for (carrier, status, ct, error_body) in [
+        ("http", 400, "application/json", error.to_string()),
+        ("json", 200, "application/json", error.to_string()),
+        ("sse", 200, "text/event-stream", format!("data: {error}\n\n")),
+    ] {
+        let upstream = RetryUpstream::new(vec![upstream_reply(status, ct, &error_body)]);
+        let port = free_port();
+        let mut fixture = Fixture::new(&format!("stale-limit-{carrier}"), &upstream.url, port);
+        fixture.gateway.start().unwrap();
+        let response = responses_request(port, body, "codex");
+        assert_eq!(upstream.attempts(), 5, "{carrier} 相同资源错误最多尝试五次，不能用默认总重试上限反复等待");
+        assert!(response.starts_with("HTTP/1.1 400"));
+        assert!(response.contains("stopping after 5 resource attempts"));
+        assert!(upstream.bodies().iter().all(|sent| sent == body.as_bytes()));
+        let diagnostics = std::fs::read_to_string(fixture.dir.join("logs/diagnostics.jsonl")).unwrap();
+        let rows: Vec<serde_json::Value> = diagnostics.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        assert!(rows.iter().any(|r| r["event"] == "codex_resource_exhausted" && r["kind"] == "stale_reasoning_item" && r["resourceFailures"] == 5 && r["refusal"] == "resource_attempt_limit"));
+        assert!(!diagnostics.contains("fixture reasoning"));
+    }
+}
+
+#[test]
+fn 重试边界_失效推理换通道等待期间取消不再发请求() {
+    let error = r#"{"error":{"type":"invalid_request_error","message":"encrypted content could not be verified"}}"#;
+    let body = r#"{"input":[{"type":"compaction","encrypted_content":"fixture opaque history"},{"role":"user","content":"fixture"}]}"#;
+    let upstream = RetryUpstream::new(vec![upstream_reply(400, "application/json", error)]);
+    let port = free_port();
+    let mut fixture = Fixture::new("stale-cancel", &upstream.url, port);
+    fixture.gateway.start().unwrap();
+    let mut client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    write!(client, "POST /v1/responses HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nX-Relay-Client: codex\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while upstream.attempts() == 0 {
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    std::thread::sleep(Duration::from_millis(25));
+    client.shutdown(std::net::Shutdown::Both).unwrap();
+    drop(client);
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(retry_status(port)["activeRequests"], 0);
+    std::thread::sleep(Duration::from_millis(1000));
+    assert_eq!(upstream.attempts(), 1, "取消后不允许再试下一条通道");
+}
+
+#[test]
+fn 重试边界_失效推理保留历史重试只对启用兼容的codex请求生效() {
+    let error = r#"{"error":{"type":"invalid_request_error","message":"encrypted content could not be verified"}}"#;
+    let body = r#"{"input":[{"type":"compaction","encrypted_content":"fixture opaque history"},{"role":"user","content":"fixture"}]}"#;
+    for (name, client, disabled) in [("zcode", "zcode", false), ("disabled", "codex", true)] {
+        let upstream = RetryUpstream::new(vec![upstream_reply(400, "application/json", error)]);
+        let port = free_port();
+        let mut fixture = Fixture::new(&format!("stale-scope-{name}"), &upstream.url, port);
+        if disabled {
+            // 只改自建临时副本；不写全局环境变量，不影响其他测试或现用实例。
+            let script = fixture.dir.join("gateway/relay-retry-proxy.mjs");
+            let original = std::fs::read_to_string(&script).unwrap();
+            // 保留首行 shebang，环境覆盖在模块读取配置之前执行。
+            std::fs::write(script, original.replacen('\n', "\nprocess.env.PROXY_CODEX_RESOURCE_RETRY = '0';\n", 1)).unwrap();
+        }
+        fixture.gateway.start().unwrap();
+        let response = responses_request(port, body, client);
+        assert!(response.starts_with("HTTP/1.1 400"));
+        assert_eq!(upstream.attempts(), 1);
+        assert_eq!(upstream.bodies()[0], body.as_bytes());
+    }
 }
 
 
@@ -513,6 +660,7 @@ fn 重试边界_内容下发后不重新生成_成功流不改写内容() {
     for (name, ending) in [
         ("complete", "data: [DONE]\n\n"),
         ("failed", "data: {\"type\":\"error\",\"error\":{\"code\":\"context_length_exceeded\",\"message\":\"maximum context length exceeded\"}}\n\n"),
+        ("stale", "data: {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"encrypted content could not be verified\"}}\n\n"),
     ] {
         let body = format!("data: {{\"choices\":[{{\"delta\":{{\"content\":\"fixture text\"}}}}]}}\n\n{ending}");
         let upstream = RetryUpstream::new(vec![upstream_reply(200, "text/event-stream", &body)]);
