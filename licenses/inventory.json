@@ -6,7 +6,7 @@
   "inputs": [
     {
       "path": "package.json",
-      "sha256": "465d91d29dca04e3fcec97891b471875a5cd8f2f5dc213fd52ea2e657472e4ae",
+      "sha256": "454bf3bb7913cd3d2c547b496af5c06f92e545a77cf07342e087c296d60ee83c",
       "normalizeLf": true
     },
     {
@@ -21,7 +21,7 @@
     },
     {
       "path": "src-tauri/Cargo.toml",
-      "sha256": "ca47f27930cbb0e8ae13cd080887eb36357baba73c537084dd864e1f6452306c",
+      "sha256": "de1596bc92c455aa229a1b81ba5d4fab52755158cf44e66596612ecd863c852c",
       "normalizeLf": true
     },
     {
