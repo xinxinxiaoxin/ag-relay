@@ -69,26 +69,26 @@ function AppSidebar({ page, onNavigate, onSearch, onAction, appVersion, updateNo
   const navigate = (next: PageId) => { onNavigate(next); if (isMobile) setOpenMobile(false) }
   return (
     <Sidebar collapsible="icon" className="border-r-0">
-      <SidebarHeader className="gap-5 px-4 pb-5 pt-7 group-data-[collapsible=icon]:px-2">
+      <SidebarHeader className="gap-3 px-3 pb-3 pt-4 group-data-[collapsible=icon]:px-2">
         <SidebarMenu>
           <SidebarMenuItem>
             <SidebarMenuButton size="lg" onClick={() => navigate('overview')} className="gap-3 rounded-[18px] hover:bg-transparent" tooltip="AG Relay · Agent Router专属网关">
-              <img src={brandIcon} alt="" className="size-10 shrink-0 group-data-[collapsible=icon]:size-8" draggable={false} />
-              <div className="grid gap-0.5 text-left"><span className="text-lg font-semibold tracking-tight">AG Relay</span><span className="text-xs text-muted-foreground">Agent Router专属网关</span></div>
+              <img src={brandIcon} alt="" className="size-9 shrink-0 group-data-[collapsible=icon]:size-8" draggable={false} />
+              <div className="grid gap-0.5 text-left"><span className="text-base font-semibold tracking-tight">AG Relay</span><span className="text-[11px] text-muted-foreground">Agent Router专属网关</span></div>
             </SidebarMenuButton>
           </SidebarMenuItem>
         </SidebarMenu>
-        <Button variant="secondary" onClick={onSearch} className="h-10 w-full justify-between px-3 text-muted-foreground group-data-[collapsible=icon]:size-10 group-data-[collapsible=icon]:p-0 group-data-[collapsible=icon]:justify-center" aria-label="搜索页面和操作 Ctrl K">
+        <Button variant="secondary" onClick={onSearch} className="h-9 w-full justify-between px-2.5 text-xs text-muted-foreground group-data-[collapsible=icon]:size-9 group-data-[collapsible=icon]:p-0 group-data-[collapsible=icon]:justify-center" aria-label="搜索页面和操作 Ctrl K">
           <span className="flex items-center gap-2"><SearchIcon className="size-4" /><span className="group-data-[collapsible=icon]:hidden">搜索与快捷操作</span></span>
           <Kbd className="bg-transparent font-mono text-xs group-data-[collapsible=icon]:hidden">⌃ K</Kbd>
         </Button>
       </SidebarHeader>
-      <SidebarContent className="gap-5 px-2">
+      <SidebarContent className="gap-3 px-1">
         <SidebarGroup>
           <SidebarGroupLabel className="mb-1 text-xs font-normal">工作空间</SidebarGroupLabel>
           <SidebarGroupContent><SidebarMenu className="gap-1.5">
             {navigation.map(item => <SidebarMenuItem key={item.id}>
-              <SidebarMenuButton onClick={() => navigate(item.id)} isActive={page === item.id} tooltip={item.id === 'settings' && updateNotice ? `${item.name} · ${updateNotice}` : item.name} className="relative h-11 gap-3 px-3 text-sm" aria-label={item.id === 'settings' && updateNotice ? `${item.name}，${updateNotice}` : item.name} aria-current={page === item.id ? 'page' : undefined}>
+              <SidebarMenuButton onClick={() => navigate(item.id)} isActive={page === item.id} tooltip={item.id === 'settings' && updateNotice ? `${item.name} · ${updateNotice}` : item.name} className="relative h-10 gap-2.5 px-3 text-sm" aria-label={item.id === 'settings' && updateNotice ? `${item.name}，${updateNotice}` : item.name} aria-current={page === item.id ? 'page' : undefined}>
                 <item.icon className="size-4" strokeWidth={1.7} /><span>{item.name}</span>
                 {item.id === 'settings' && updateNotice && <span data-testid="settings-update-dot" aria-hidden="true" className="absolute right-3 top-2 size-2 rounded-full bg-destructive group-data-[collapsible=icon]:right-1 group-data-[collapsible=icon]:top-1" />}
               </SidebarMenuButton>
@@ -102,9 +102,9 @@ function AppSidebar({ page, onNavigate, onSearch, onAction, appVersion, updateNo
           </SidebarMenu></SidebarGroupContent>
         </SidebarGroup>
       </SidebarContent>
-      <SidebarFooter className="gap-4 px-4 pb-5 group-data-[collapsible=icon]:px-2">
-        <Card className="sidebar-note-card gap-0 py-0 group-data-[collapsible=icon]:hidden"><CardContent className="p-4">
-          <div className="mb-2 flex items-center gap-2 text-sm font-medium"><ShieldCheckIcon className="size-4" />仅在本机运行</div>
+      <SidebarFooter className="gap-3 px-3 pb-3 group-data-[collapsible=icon]:px-2">
+        <Card className="sidebar-note-card gap-0 py-0 group-data-[collapsible=icon]:hidden"><CardContent className="p-3">
+          <div className="mb-1.5 flex items-center gap-2 text-sm font-medium"><ShieldCheckIcon className="size-4" />仅在本机运行</div>
           <p className="text-xs leading-relaxed text-muted-foreground">只管理这台设备上的连接。<br />关闭前，有序结束在途请求。</p>
         </CardContent></Card>
         <SidebarMenu><SidebarMenuItem>
@@ -355,23 +355,23 @@ export default function App() {
   const common = { endpoint, activity, snapshot: view, events, onAction: act, onNavigate: navigate }
   return (
     <TooltipProvider delayDuration={200}>
-      <SidebarProvider defaultOpen style={{ '--sidebar-width': '15rem', '--sidebar-width-icon': '4rem' } as React.CSSProperties}>
+      <SidebarProvider defaultOpen style={{ '--sidebar-width': '13.5rem', '--sidebar-width-icon': '3.5rem' } as React.CSSProperties}>
         <AppSidebar page={page} onNavigate={navigate} onSearch={() => setCommandOpen(true)} onAction={act} appVersion={appVersion} updateNotice={updateNotice} />
         <SidebarInset className="min-w-0 bg-background">
-          <header data-tauri-drag-region="deep" className="app-header flex h-[72px] shrink-0 items-center justify-between gap-3 border-b border-border bg-white pl-5 lg:pl-8">
+          <header data-tauri-drag-region="deep" className="app-header flex h-14 shrink-0 items-center justify-between gap-3 border-b border-border pl-5">
             <div className="flex min-w-0 items-center gap-3"><span className="relative inline-flex shrink-0"><SidebarTrigger className="-ml-1 size-8 shrink-0" aria-label={updateNotice ? `展开或收起侧栏，${updateNotice}` : '展开或收起侧栏'} />{updateNotice && <span aria-hidden="true" data-testid="mobile-update-dot" className="pointer-events-none absolute right-0 top-0 size-2 rounded-full bg-destructive md:hidden" />}</span><Separator orientation="vertical" className="!h-4" />
               <Breadcrumb><BreadcrumbList className="text-sm"><BreadcrumbItem className="hidden sm:block">工作空间</BreadcrumbItem><BreadcrumbSeparator className="hidden sm:block" /><BreadcrumbItem><BreadcrumbPage>本地网关</BreadcrumbPage></BreadcrumbItem></BreadcrumbList></Breadcrumb>
             </div>
             <WindowControls />
           </header>
-          <main ref={mainRef} className="app-main min-w-0 flex-1 px-5 pb-7 pt-7 sm:px-6 lg:px-8 lg:pt-8" id="main-content">
+          <main ref={mainRef} className="app-main min-w-0 flex-1 p-4 sm:p-5" id="main-content">
             <div className="mx-auto w-full max-w-[1280px]">
               {page === 'overview' && <OverviewPage {...common} appVersion={appVersion} gatewayError={gatewayError} onDismissError={() => setGatewayError(null)} />}
               {page === 'logs' && <LogsPage {...common} />}
               {page === 'settings' && <SettingsPage {...common} update={update} />}
             </div>
           </main>
-          <footer className="flex flex-wrap items-center justify-between gap-2 border-t border-border bg-white/60 px-6 py-3.5 text-xs text-muted-foreground lg:px-8"><span>AG Relay · Agent Router专属网关</span><span className="tabular-nums">v{appVersion}</span></footer>
+          <footer className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-t border-border bg-white/60 px-5 py-2 text-[11px] text-muted-foreground"><span>AG Relay · Agent Router专属网关</span><span className="tabular-nums">v{appVersion}</span></footer>
         </SidebarInset>
       </SidebarProvider>
       <CommandDialog open={commandOpen} onOpenChange={setCommandOpen} title="搜索页面与快捷操作" description="搜索页面和可用操作。">

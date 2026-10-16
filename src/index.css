@@ -2,7 +2,7 @@
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 
-/* User DESIGN.md → official shadcn semantic tokens. Components remain CLI-sourced. */
+/* Shared neutral theme and compact desktop geometry for the shadcn components. */
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {
@@ -46,32 +46,32 @@
 
 :root {
   color-scheme: light;
-  --background: #f5f5f5;
-  --foreground: #0a0a0a;
+  --background: #f2f2f7;
+  --foreground: #1c1c1e;
   --card: #ffffff;
-  --card-foreground: #0a0a0a;
+  --card-foreground: #1c1c1e;
   --popover: #ffffff;
-  --popover-foreground: #0a0a0a;
-  --primary: #0a0a0a;
+  --popover-foreground: #1c1c1e;
+  --primary: #1c1c1e;
   --primary-foreground: #fafafa;
-  --secondary: #f5f5f5;
+  --secondary: #ebebf0;
   --secondary-foreground: #171717;
-  --muted: #f5f5f5;
-  --muted-foreground: #737373;
-  --accent: #f5f5f5;
-  --accent-foreground: #0a0a0a;
-  --destructive: #e7000b;
-  --border: #e5e5e5;
-  --input: #e5e5e5;
+  --muted: #f2f2f7;
+  --muted-foreground: #696970;
+  --accent: #ebebf0;
+  --accent-foreground: #1c1c1e;
+  --destructive: #c91628;
+  --border: #e3e3e9;
+  --input: #dedee5;
   --ring: #a3a3a3;
   --radius: 1.125rem;
-  --sidebar: #fafafa;
-  --sidebar-foreground: #0a0a0a;
+  --sidebar: #f8f8fa;
+  --sidebar-foreground: #1c1c1e;
   --sidebar-primary: #171717;
   --sidebar-primary-foreground: #fafafa;
-  --sidebar-accent: #ededed;
-  --sidebar-accent-foreground: #0a0a0a;
-  --sidebar-border: #e5e5e5;
+  --sidebar-accent: #ebebf0;
+  --sidebar-accent-foreground: #1c1c1e;
+  --sidebar-border: #e3e3e9;
   --sidebar-ring: #a3a3a3;
 }
 
@@ -86,42 +86,52 @@
 
 /* Theme-level geometry only. No replacement implementations of any UI primitive. */
 [data-slot='card'] {
-  --card-spacing: 20px;
+  --card-spacing: 16px;
+  --card-radius: 26px;
   border: 1px solid var(--border);
-  border-radius: 24px;
+  border-radius: var(--card-radius);
   --tw-ring-shadow: 0 0 #0000;
-  box-shadow: 0 0 0 1px rgb(23 23 23 / 0.02), 0 1px 3px rgb(0 0 0 / 0.035), 0 1px 2px -1px rgb(0 0 0 / 0.025);
+  box-shadow: 0 2px 6px rgb(28 28 30 / 0.025), 0 8px 24px rgb(28 28 30 / 0.025);
 }
-[data-slot='card-header'] { border-top-left-radius: 24px; border-top-right-radius: 24px; }
-[data-slot='card-footer'] { border-bottom-left-radius: 24px; border-bottom-right-radius: 24px; }
+[data-slot='card'][data-size='sm'] { --card-spacing: 12px; }
+[data-slot='card-header'] { border-top-left-radius: var(--card-radius); border-top-right-radius: var(--card-radius); }
+[data-slot='card-footer'] { border-bottom-left-radius: var(--card-radius); border-bottom-right-radius: var(--card-radius); }
 [data-slot='button'], [data-slot='input'], [data-slot='select-trigger'], [data-slot='badge'], [data-slot='sidebar-menu-button'] { border-radius: 18px; }
-[data-slot='input'] { background: #f5f5f5; min-height: 36px; }
+[data-slot='input'] { background: var(--muted); min-height: 36px; }
 [data-slot='input']:focus-visible { box-shadow: none; border-color: #a3a3a3; outline: 2px solid #d4d4d4; outline-offset: 1px; }
 [data-slot='badge'] { font-weight: 500; }
 [data-slot='sidebar-inset'] { min-height: 100svh; }
-[data-slot='sidebar-inner'] { background: #fafafa; }
-[data-slot='sidebar-menu-button'][data-active='true'] { background: #ededed; font-weight: 500; }
+[data-slot='sidebar-inner'] { background: var(--sidebar); }
+[data-slot='sidebar-menu-button'][data-active='true'] {
+  background: var(--card); font-weight: 600;
+  box-shadow: 0 1px 3px rgb(28 28 30 / 0.06), 0 0 0 1px rgb(28 28 30 / 0.035);
+}
 [data-slot='sidebar-trigger'] { border-radius: 18px; }
 [data-slot='dialog-content'], [data-slot='alert-dialog-content'] { border-radius: 24px; }
-[data-slot='table-head'] { height: 42px; color: #737373; font-size: 12px; font-weight: 500; }
+[data-slot='table-head'] { height: 38px; color: var(--muted-foreground); font-size: 12px; font-weight: 500; }
 [data-slot='table-cell'] { padding-top: 14px; padding-bottom: 14px; font-size: 14px; }
 /* Request/activity tables favor scanning; other tables keep the existing geometry. */
-[data-slot='table'][data-density='compact'] [data-slot='table-head'] { height: 34px; }
-[data-slot='table'][data-density='compact'] [data-slot='table-cell'] { padding-top: 5px; padding-bottom: 5px; font-size: 12px; }
+[data-slot='table'][data-density='compact'] [data-slot='table-head'] { height: 30px; }
+[data-slot='table'][data-density='compact'] [data-slot='table-cell'] { padding-top: 4px; padding-bottom: 4px; font-size: 12px; }
+[data-slot='table'][data-density='compact'] [data-slot='table-cell']:has([data-slot='button']) { padding-top: 2px; padding-bottom: 2px; }
 [data-slot='table'][data-density='compact'] [data-slot='button'] { border-radius: 6px; }
 
 [data-slot='command-item'] { border-radius: 18px; }
 [data-slot='tabs-list'] { border-radius: 18px; }
-[data-slot='tabs-trigger'] { border-radius: 18px; }
+[data-slot='tabs-trigger'] { border-radius: 14px; color: var(--muted-foreground); }
+[data-slot='tabs-trigger'][data-state='active'] {
+  color: var(--foreground); background: var(--card);
+  box-shadow: 0 1px 3px rgb(28 28 30 / 0.08);
+}
 [data-sonner-toast] { font-family: var(--font-sans); border-radius: 18px !important; }
 [data-sonner-toast][data-type='error'] { color: var(--destructive); }
 
-.app-header { -webkit-user-select: none; user-select: none; }
-.window-controls { display: flex; align-self: stretch; flex-shrink: 0; }
+.app-header { background: rgb(255 255 255 / 0.78); -webkit-user-select: none; user-select: none; }
+.window-controls { display: flex; align-items: center; flex-shrink: 0; gap: 4px; padding: 0 10px; }
 .window-control {
   display: flex; align-items: center; justify-content: center;
-  width: 46px; border: 0; border-radius: 0; padding: 0;
-  background: transparent; color: var(--foreground);
+  width: 34px; height: 30px; border: 0; border-radius: 10px; padding: 0;
+  background: transparent; color: var(--muted-foreground);
 }
 .window-control > svg { width: 14px; height: 14px; stroke-width: 1.5; }
 .window-control:hover { background: var(--sidebar-accent); }
@@ -131,16 +141,15 @@
 @media (min-width: 768px) {
   body { overflow: hidden; }
   [data-slot='sidebar-inset'] { height: 100svh; min-height: 0; overflow: hidden; }
-  .app-main { overflow-y: auto; scrollbar-gutter: stable; }
+  .app-main { overflow-y: auto; }
 }
 @media (max-width: 767px) {
-  .app-header { position: sticky; top: 0; z-index: 20; height: 60px; }
-  .app-main { padding-top: 22px; }
+  .app-header { position: sticky; top: 0; z-index: 20; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; scroll-behavior: auto !important; }
 }
 
-@media (max-height: 720px) {
+@media (max-height: 660px) {
   .sidebar-note-card { display: none; }
 }

@@ -134,7 +134,7 @@ export function LogsPage(props: PageProps) {
     <section aria-labelledby="logs-page-title" className="min-w-0 space-y-4 text-sm text-foreground">
       <header className="flex min-w-0 flex-wrap items-start justify-between gap-4">
         <div className="min-w-0 space-y-2">
-          <h1 id="logs-page-title" className="text-2xl font-semibold tracking-tight">
+          <h1 id="logs-page-title" className="text-xl font-semibold tracking-tight">
             诊断日志
           </h1>
         </div>

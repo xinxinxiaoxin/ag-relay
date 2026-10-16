@@ -32,9 +32,9 @@ export function OverviewPage({ endpoint: connectionEndpoint, snapshot, events, a
     : pending ? '状态切换中，请稍候。' : state === 'error' ? '请先解决端口冲突。' : '仅控制本窗口启动的网关。'
 
   return (
-    <div className="flex w-full min-w-0 flex-col gap-5">
+    <div className="flex w-full min-w-0 flex-col gap-4">
       <header className="flex flex-wrap items-center justify-between gap-3">
-        <h1 className="text-2xl font-semibold tracking-tight">网关总览</h1>
+        <h1 className="text-xl font-semibold tracking-tight">网关总览</h1>
         <div className="flex items-center gap-3">
           {!isTauri() && <span className="text-xs text-foreground/65">示例数据 · 不连接真实网关</span>}
           <Button variant="outline" size="sm" onClick={() => onNavigate('settings')}><Settings2 aria-hidden="true" />启动与退出</Button>
@@ -51,7 +51,7 @@ export function OverviewPage({ endpoint: connectionEndpoint, snapshot, events, a
       )}
 
       <Card size="sm" className="min-w-0 gap-2" role="region" aria-label="网关控制与连接">
-        <CardContent className="space-y-2.5">
+        <CardContent className="flex flex-col gap-2">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex items-center gap-2.5" role="status" aria-live="polite" aria-atomic="true">
               {pending ? <LoaderCircle className="size-4 animate-spin motion-reduce:animate-none" aria-hidden="true" /> : <span className={`size-2 rounded-full ${state === 'error' ? 'bg-destructive' : connected ? 'bg-foreground' : 'bg-muted-foreground'}`} aria-hidden="true" />}
@@ -67,7 +67,7 @@ export function OverviewPage({ endpoint: connectionEndpoint, snapshot, events, a
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-x-5 gap-y-1 text-xs text-muted-foreground">
-            <div className="flex min-w-0 items-center gap-1"><code className="break-all text-foreground">{connectionEndpoint}</code><Button variant="ghost" size="icon-sm" aria-label="复制连接地址" onClick={() => onAction('copy')}><Copy aria-hidden="true" /></Button></div>
+            <div className="flex min-w-0 items-center gap-1"><code className="break-all text-foreground">{connectionEndpoint}</code><Button variant="ghost" size="icon-xs" aria-label="复制连接地址" onClick={() => onAction('copy')}><Copy aria-hidden="true" /></Button></div>
             <span>运行 {connected ? snapshot.uptime ?? '未知' : '—'}</span>
             <span>v{appVersion}</span>
             <details><summary className="cursor-pointer">实例信息</summary><p className="mt-1 break-all">归属：{ownerText} · 脚本：{connected ? snapshot.version ?? '未知' : '—'}<br />{controlNote}</p></details>
@@ -78,10 +78,10 @@ export function OverviewPage({ endpoint: connectionEndpoint, snapshot, events, a
 
       <RequestProgressCard snapshot={snapshot} onOpenLogs={() => onNavigate('logs')} />
       <Card size="sm" className="min-w-0 gap-0 pb-0" role="region" aria-labelledby="recent-activity-heading">
-        <CardHeader className="pb-3">
+        <CardHeader className="pb-2">
           <div className="flex items-center justify-between gap-2">
             <CardTitle role="heading" aria-level={2} id="recent-activity-heading" className="flex items-center gap-2 text-sm"><Activity className="size-4 text-muted-foreground" aria-hidden="true" />最近活动</CardTitle>
-            <Button variant="ghost" size="sm" onClick={() => onNavigate('logs')}>全部日志<ArrowRight aria-hidden="true" /></Button>
+            <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => onNavigate('logs')}>全部日志<ArrowRight aria-hidden="true" /></Button>
           </div>
         </CardHeader>
         {activityError && <div role="alert" className="flex items-center gap-3 px-4 pb-2 text-xs text-destructive">读取失败，保留上次记录。<Button variant="outline" size="sm" onClick={activity.retry}>重试</Button></div>}

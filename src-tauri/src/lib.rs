@@ -20,12 +20,25 @@ pub mod gateway_diagnostics_reader;
 pub mod gateway_env;
 pub mod gateway_process;
 pub mod gateway_status;
+pub mod single_instance;
 pub mod timeutil;
 pub mod tray;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let context = tauri::generate_context!();
+    let startup = single_instance::StartupGuard::acquire(&context.config().identifier)
+        .expect("无法取得单实例启动锁");
+    let activation = std::sync::Arc::new(single_instance::ActivationRequests::default());
+    let callback_activation = activation.clone();
+    let app = tauri::Builder::default()
+        // 必须最先注册：第二个进程在插件初始化阶段转发参数后立即退出，
+        // 不会创建第二个面板/托盘，也不会执行更新、自启与网关初始化。
+        .plugin(tauri_plugin_single_instance::init(move |app, _argv, _cwd| {
+            if callback_activation.request() {
+                tray::show_main_window(app);
+            }
+        }))
         // 只由 Rust 安全更新服务调用；不给前端开放可绕过排空的 updater 安装权限。
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(gateway_commands::GatewayState::default())
@@ -75,15 +88,21 @@ pub fn run() {
             gateway_activity::watch_activity_events,
             gateway_activity::stop_activity_watch
         ])
-        .build(tauri::generate_context!())
-        .expect("error while building tauri application")
-        .run(|app, event| {
-            if let tauri::RunEvent::ExitRequested { api, .. } = event {
-                if !update_commands::exit_authorized(app) {
-                    api.prevent_exit();
-                    app_exit::request_exit_from_event(app, None);
-                }
+        .build(context)
+        .expect("error while building tauri application");
+    // build 已创建插件通知窗口；不要持锁进入事件循环，否则其他进程无法通知本实例。
+    drop(startup);
+    app.run(move |app, event| {
+        // 主窗口与应用 setup 在 Ready 期间完成，比插件初始化晚。
+        if matches!(event, tauri::RunEvent::Ready) && activation.mark_ready() {
+            tray::show_main_window(app);
+        }
+        if let tauri::RunEvent::ExitRequested { api, .. } = event {
+            if !update_commands::exit_authorized(app) {
+                api.prevent_exit();
+                app_exit::request_exit_from_event(app, None);
             }
-            // Exit 不再二次扫描端口/强杀：安全停机已在授权退出前完成，不能误停新外部实例。
-        });
+        }
+        // Exit 不再二次扫描端口/强杀：安全停机已在授权退出前完成，不能误停新外部实例。
+    });
 }

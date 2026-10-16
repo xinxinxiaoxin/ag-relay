@@ -426,26 +426,44 @@ fn responses_request_with_headers(port: u16, body: &str, headers: &[(&str, &str)
     response
 }
 
+/// 与核心 `stripCodexItemIds` 一致：首发前只删除可省略的 id 句柄。
+fn codex_stripped(body: &str) -> serde_json::Value {
+    let mut value: serde_json::Value = serde_json::from_str(body).unwrap();
+    if let Some(items) = value.get_mut("input").and_then(|value| value.as_array_mut()) {
+        for item in items.iter_mut() {
+            let keep = match item.get("type").and_then(|value| value.as_str()) {
+                Some("message" | "reasoning" | "function_call" | "function_call_output"
+                    | "custom_tool_call" | "custom_tool_call_output") => false,
+                Some(_) => true,
+                None => item.get("role").and_then(|value| value.as_str()).is_none(),
+            };
+            if !keep {
+                item.as_object_mut().unwrap().remove("id");
+            }
+        }
+    }
+    value
+}
+
 #[test]
-fn 重试边界_codex同类历史错误两次原样后第三次才修复() {
+fn 重试边界_codex首次同类历史错误即修复() {
     let error = r#"{"error":{"type":"invalid_request_error","message":"encrypted content could not be verified"}}"#;
     let body = r#" {"model":"gpt-6.1-sol","store":false,"input":[{"type":"message","id":"msg_fixture","role":"user","content":"fixture prompt"},{"type":"reasoning","id":"rs_fixture","encrypted_content":"fixture ciphertext"}]} "#;
     let expected = serde_json::json!({
         "model": "gpt-6.1-sol", "store": false,
-        "input": [{"type": "message", "id": "msg_fixture", "role": "user", "content": "fixture prompt"}]
+        "input": [{"type": "message", "role": "user", "content": "fixture prompt"}]
     });
     let failure = upstream_reply(400, "application/json", error);
-    let upstream = RetryUpstream::new(vec![failure.clone(), failure, upstream_reply(200, "application/json", r#"{"ok":true}"#)]);
+    let upstream = RetryUpstream::new(vec![failure, upstream_reply(200, "application/json", r#"{"ok":true}"#)]);
     let port = free_port();
-    let mut fixture = Fixture::new("codex-two-original-http", &upstream.url, port);
+    let mut fixture = Fixture::new("codex-first-error-repair", &upstream.url, port);
     fixture.gateway.start().unwrap();
     let response = responses_request(port, body, "codex");
-    assert_eq!(upstream.attempts(), 3, "同类历史错误应先发两次原始请求，再发一次修复版：{response}");
+    assert_eq!(upstream.attempts(), 2, "首次同类历史错误即修复并重试：{response}");
     assert!(response.contains(r#"{"ok":true}"#));
     let captured = upstream.bodies();
-    assert_eq!(captured[0], body.as_bytes());
-    assert_eq!(captured[1], body.as_bytes(), "第二次发送必须保留原始字节，不能提前删除历史");
-    assert_eq!(serde_json::from_slice::<serde_json::Value>(&captured[2]).unwrap(), expected, "第三次仅删除失效推理，消息 id 仍保留");
+    assert_eq!(serde_json::from_slice::<serde_json::Value>(&captured[0]).unwrap(), codex_stripped(body), "首发剥离可省略 id");
+    assert_eq!(serde_json::from_slice::<serde_json::Value>(&captured[1]).unwrap(), expected, "修复版删除失效推理");
     let diagnostics = std::fs::read_to_string(fixture.dir.join("logs/diagnostics.jsonl")).unwrap();
     let repairs = diagnostics.lines().filter(|line| {
         serde_json::from_str::<serde_json::Value>(line).unwrap()["event"] == "repair_applied"
@@ -481,22 +499,25 @@ fn 重试边界_codex跨资源修复完整网页搜索时保留必需字段() {
         ("sse", 200, "text/event-stream", format!("data: {error}\n\n")),
     ] {
         let failure = upstream_reply(status, ct, &error_body);
-        let upstream = RetryUpstream::new(vec![failure.clone(), failure, upstream_reply(200, "application/json", r#"{"ok":true}"#)]);
+        let upstream = RetryUpstream::new(vec![failure, upstream_reply(200, "application/json", r#"{"ok":true}"#)]);
         let port = free_port();
         let mut fixture = Fixture::new(&format!("codex-web-search-{carrier}"), &upstream.url, port);
         fixture.gateway.start().unwrap();
         let response = responses_request(port, body, "codex");
-        assert_eq!(upstream.attempts(), 3, "{carrier} 完整搜索历史应在两次同类错误后安全修复：{response}");
+        assert_eq!(upstream.attempts(), 2, "{carrier} 完整搜索历史应在首次同类错误后安全修复：{response}");
         assert!(response.contains(r#"{"ok":true}"#));
         let captured = upstream.bodies();
-        assert_eq!(captured[0], body.as_bytes());
-        assert_eq!(captured[1], body.as_bytes());
-        assert_eq!(serde_json::from_slice::<serde_json::Value>(&captured[2]).unwrap(), expected, "{carrier} 删除推理和可省略的消息 id，但搜索 id/action/status/type 与新推理配置必须原样保留");
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&captured[0]).unwrap(), codex_stripped(body), "{carrier} 首发仅剥离可省略 id，搜索字段保持");
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&captured[1]).unwrap(), expected, "{carrier} 删除推理，但搜索 id/action/status/type 必须原样保留");
         let diagnostics = std::fs::read_to_string(fixture.dir.join("logs/diagnostics.jsonl")).unwrap();
         let repairs = diagnostics.lines().filter(|line| {
             serde_json::from_str::<serde_json::Value>(line).unwrap()["event"] == "repair_applied"
         }).count();
         assert_eq!(repairs, 1);
+        let enabled = diagnostics.lines().filter(|line| {
+            serde_json::from_str::<serde_json::Value>(line).unwrap()["event"] == "session_compat_enabled"
+        }).count();
+        assert_eq!(enabled, 1, "{carrier} 跨资源修复后登记会话，供后续请求预清理");
         for sensitive in ["fixture-only-not-a-key", "fixture ciphertext", "fixture prompt", "fixture query"] {
             assert!(!diagnostics.contains(sensitive));
         }
@@ -508,7 +529,7 @@ fn 重试边界_codex修复后的普通临时错误也计入三次发送上限()
     let error = r#"{"error":{"type":"invalid_request_error","message":"encrypted content could not be verified"}}"#;
     let body = r#" {"input":[{"type":"message","id":"msg_fixture","role":"user","content":"fixture prompt"},{"type":"reasoning","id":"rs_fixture","encrypted_content":"fixture ciphertext"}]} "#;
     let expected = serde_json::json!({"input": [
-        {"type": "message", "id": "msg_fixture", "role": "user", "content": "fixture prompt"}
+        {"type": "message", "role": "user", "content": "fixture prompt"}
     ]});
     for (name, temporary) in [
         ("503", upstream_reply(503, "application/json", r#"{"error":{"type":"server_error","message":"fixture temporary outage"}}"#)),
@@ -516,21 +537,20 @@ fn 重试边界_codex修复后的普通临时错误也计入三次发送上限()
     ] {
         let history = upstream_reply(400, "application/json", error);
         let upstream = RetryUpstream::new(vec![
-            history.clone(), history, temporary.clone(), temporary.clone(), temporary,
+            history, temporary.clone(), temporary.clone(), temporary,
             upstream_reply(200, "application/json", r#"{"ok":true}"#),
         ]);
         let port = free_port();
         let mut fixture = Fixture::new(&format!("codex-postrepair-{name}-cap"), &upstream.url, port);
         fixture.gateway.start().unwrap();
         let response = responses_request(port, body, "codex");
-        assert_eq!(upstream.attempts(), 5, "修复后的三次真实发送包含{name}，不能借用普通重试上限继续第六次：{response}");
+        assert_eq!(upstream.attempts(), 4, "修复后再发送三次，{name} 计入上限且不能借用普通重试继续：{response}");
         assert!(response.starts_with("HTTP/1.1 503"), "应有限结束并返回可重试的耗尽错误，而非读取第六条成功哨兵：{response}");
         assert!(!response.contains(r#"{"ok":true}"#));
         let captured = upstream.bodies();
-        assert_eq!(captured[0], body.as_bytes());
-        assert_eq!(captured[1], body.as_bytes());
-        assert_eq!(serde_json::from_slice::<serde_json::Value>(&captured[2]).unwrap(), expected);
-        assert!(captured[2..].iter().all(|sent| sent == &captured[2]), "三次修复版发送必须使用同一份冻结字节");
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&captured[0]).unwrap(), codex_stripped(body));
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&captured[1]).unwrap(), expected);
+        assert!(captured[1..].iter().all(|sent| sent == &captured[1]), "三次修复版发送必须使用同一份冻结字节");
         let diagnostics = std::fs::read_to_string(fixture.dir.join("logs/diagnostics.jsonl")).unwrap();
         let rows: Vec<serde_json::Value> = diagnostics.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
         assert_eq!(rows.iter().filter(|r| r["event"] == "repair_applied").count(), 1);
@@ -542,24 +562,23 @@ fn 重试边界_codex修复后的普通临时错误也计入三次发送上限()
 fn 重试边界_自定义工具历史可修复失效推理而不丢失调用记录() {
     let error = r#"{"error":{"type":"invalid_request_error","message":"encrypted content could not be verified"}}"#;
     let body = r#" {"model":"gpt-6.1-sol","store":false,"input":[{"type":"message","id":"msg_fixture","role":"user","content":"fixture prompt"},{"type":"reasoning","id":"rs_fixture","encrypted_content":"fixture ciphertext"},{"type":"custom_tool_call","id":"ct_fixture","call_id":"call_custom","name":"fixture_tool","input":"{\"id\":\"nested\",\"encrypted_content\":\"keep\"}"},{"type":"custom_tool_call_output","id":"cto_fixture","call_id":"call_custom","output":[{"type":"input_text","text":"fixture tool result"}]},{"type":"function_call","id":"fc_fixture","call_id":"call_function","name":"fixture_function","arguments":"{}"},{"type":"function_call_output","id":"fco_fixture","call_id":"call_function","output":"fixture function result"}]} "#;
-    let expected: serde_json::Value = serde_json::from_str(r#"{"model":"gpt-6.1-sol","store":false,"input":[{"type":"message","id":"msg_fixture","role":"user","content":"fixture prompt"},{"type":"custom_tool_call","id":"ct_fixture","call_id":"call_custom","name":"fixture_tool","input":"{\"id\":\"nested\",\"encrypted_content\":\"keep\"}"},{"type":"custom_tool_call_output","id":"cto_fixture","call_id":"call_custom","output":[{"type":"input_text","text":"fixture tool result"}]},{"type":"function_call","id":"fc_fixture","call_id":"call_function","name":"fixture_function","arguments":"{}"},{"type":"function_call_output","id":"fco_fixture","call_id":"call_function","output":"fixture function result"}]}"#).unwrap();
+    let expected: serde_json::Value = serde_json::from_str(r#"{"model":"gpt-6.1-sol","store":false,"input":[{"type":"message","role":"user","content":"fixture prompt"},{"type":"custom_tool_call","call_id":"call_custom","name":"fixture_tool","input":"{\"id\":\"nested\",\"encrypted_content\":\"keep\"}"},{"type":"custom_tool_call_output","call_id":"call_custom","output":[{"type":"input_text","text":"fixture tool result"}]},{"type":"function_call","call_id":"call_function","name":"fixture_function","arguments":"{}"},{"type":"function_call_output","call_id":"call_function","output":"fixture function result"}]}"#).unwrap();
     for (carrier, status, ct, error_body) in [
         ("http", 400, "application/json", error.to_string()),
         ("json", 200, "application/json", error.to_string()),
         ("sse", 200, "text/event-stream", format!("data: {error}\n\n")),
     ] {
         let failure = upstream_reply(status, ct, &error_body);
-        let upstream = RetryUpstream::new(vec![failure.clone(), failure, upstream_reply(200, "application/json", r#"{"ok":true}"#)]);
+        let upstream = RetryUpstream::new(vec![failure, upstream_reply(200, "application/json", r#"{"ok":true}"#)]);
         let port = free_port();
         let mut fixture = Fixture::new(&format!("custom-reasoning-{carrier}"), &upstream.url, port);
         fixture.gateway.start().unwrap();
         let response = responses_request(port, body, "codex");
-        assert_eq!(upstream.attempts(), 3, "{carrier} 完整的自定义工具历史应在两次同类错误后第三次修复：{response}");
+        assert_eq!(upstream.attempts(), 2, "{carrier} 完整的自定义工具历史应在首次同类错误后修复：{response}");
         assert!(response.contains(r#"{"ok":true}"#));
         let captured = upstream.bodies();
-        assert_eq!(captured[0], body.as_bytes());
-        assert_eq!(captured[1], body.as_bytes(), "{carrier} 第二次仍发送原始历史");
-        assert_eq!(serde_json::from_slice::<serde_json::Value>(&captured[2]).unwrap(), expected, "{carrier} 只删除失效推理，完整保留两类工具、调用编号、输入与结果");
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&captured[0]).unwrap(), codex_stripped(body), "{carrier} 首发剥离可省略 id");
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&captured[1]).unwrap(), expected, "{carrier} 只删除失效推理，完整保留两类工具、调用编号、输入与结果");
         let diagnostics = std::fs::read_to_string(fixture.dir.join("logs/diagnostics.jsonl")).unwrap();
         assert_eq!(diagnostics.lines().filter(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()["event"] == "repair_applied").count(), 1);
         for sensitive in ["fixture-only-not-a-key", "fixture ciphertext", "fixture prompt", "fixture tool result"] {
@@ -593,7 +612,7 @@ fn 重试边界_codex原样或修复后等待及读流期间取消不重放() {
         wait_retry_status(port, |s| s["activeRequests"] == 0);
         std::thread::sleep(Duration::from_millis(1200));
         assert_eq!(upstream.attempts(), sends, "{name} 取消后不再访问下一通道");
-        assert_eq!(upstream.bodies()[0], body.as_bytes());
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&upstream.bodies()[0]).unwrap(), codex_stripped(body));
     }
     // 明确 Codex 正在读已交付的流时取消，也应断开自己持有的上游连接。
     use std::sync::mpsc;
@@ -621,7 +640,7 @@ fn 重试边界_codex原样或修复后等待及读流期间取消不重放() {
             assert!(count > 0);
             request.extend_from_slice(&buf[..count]);
         }
-        assert_eq!(&request[header_end..], body.as_bytes());
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&request[header_end..]).unwrap(), codex_stripped(body));
         stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"fixture text\"}\n\n").unwrap();
         tx.send(()).unwrap();
         match stream.read(&mut buf) {
@@ -647,13 +666,14 @@ fn 重试边界_codex原样或修复后等待及读流期间取消不重放() {
 fn 重试边界_codex空回不绕过门槛且修复版冻结状态字段() {
     let stale = upstream_reply(400, "application/json", r#"{"error":{"type":"invalid_request_error","message":"encrypted content could not be verified"}}"#);
     let empty = upstream_reply(200, "text/event-stream", "");
+    let created = upstream_reply(200, "text/event-stream", "data: {\"type\":\"response.created\"}\n\n");
     let success = upstream_reply(200, "application/json", r#"{"ok":true}"#);
     let body = r#" {"input":[{"type":"message","id":"msg_fixture","status":"completed","role":"user","content":"fixture prompt"},{"type":"reasoning","id":"rs_fixture","encrypted_content":"fixture ciphertext"}]} "#;
-    let expected = serde_json::json!({"input": [{"type": "message", "id": "msg_fixture", "status": "completed", "role": "user", "content": "fixture prompt"}]});
-    for (name, replies, sends, repair_sends) in [
-        ("empty-only", vec![empty.clone(), empty.clone(), success.clone()], 3, 0),
-        ("empty-after-repair", vec![stale.clone(), stale.clone(), empty.clone(), empty, success.clone()], 5, 3),
-        ("status-after-repair", vec![stale.clone(), stale, upstream_reply(400, "application/json", r#"{"error":{"type":"invalid_request_error","message":"Unknown parameter: 'input[0].status'."}}"#), success], 3, 1),
+    let expected = serde_json::json!({"input": [{"type": "message", "status": "completed", "role": "user", "content": "fixture prompt"}]});
+    for (name, replies, sends, mode, expected_status) in [
+        ("empty-only", vec![created.clone(), created, success.clone()], 3, "untouched", "ok"),
+        ("empty-after-repair", vec![stale.clone(), stale.clone(), empty.clone(), empty, success.clone()], 4, "repaired", "503"),
+        ("status-after-repair", vec![stale.clone(), stale, upstream_reply(400, "application/json", r#"{"error":{"type":"invalid_request_error","message":"Unknown parameter: 'input[0].status'."}}"#), success], 3, "repaired", "400"),
     ] {
         let upstream = RetryUpstream::new(replies);
         let port = free_port();
@@ -662,24 +682,28 @@ fn 重试边界_codex空回不绕过门槛且修复版冻结状态字段() {
         let response = responses_request(port, body, "codex");
         assert_eq!(upstream.attempts(), sends, "{name} 不能追加形状或状态剥离：{response}");
         let captured = upstream.bodies();
-        if repair_sends == 0 {
-            assert!(captured.iter().all(|sent| sent == body.as_bytes()), "空回本身不满足明确历史错误门槛");
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&captured[0]).unwrap(), codex_stripped(body), "{name} 首发剥离可省略 id");
+        if mode == "untouched" {
+            assert!(captured.iter().all(|sent| {
+                serde_json::from_slice::<serde_json::Value>(sent).unwrap() == codex_stripped(body)
+            }), "{name} 空响应不触发 Codex 历史剥离");
         } else {
-            assert_eq!(captured[0], body.as_bytes());
-            assert_eq!(captured[1], body.as_bytes());
-            assert_eq!(serde_json::from_slice::<serde_json::Value>(&captured[2]).unwrap(), expected);
-            assert!(captured[2..].iter().all(|sent| sent == &captured[2]), "修复B冻结后不得移message id/type/status");
+            assert_eq!(serde_json::from_slice::<serde_json::Value>(&captured[1]).unwrap(), expected);
+            assert!(captured[1..].iter().all(|sent| sent == &captured[1]), "修复后冻结，不得再移 message id/type/status");
         }
-        if name == "status-after-repair" {
-            assert!(response.starts_with("HTTP/1.1 400"));
-            assert!(!response.contains(r#"{"ok":true}"#));
+        if expected_status == "ok" {
+            assert!(response.contains(r#"{"ok":true}"#), "{name}: {response}");
         } else {
-            assert!(response.contains(r#"{"ok":true}"#));
+            assert!(response.starts_with(&format!("HTTP/1.1 {expected_status}")), "{name}: {response}");
+            assert!(!response.contains(r#"{"ok":true}"#), "{name}: {response}");
         }
         let diagnostics = std::fs::read_to_string(fixture.dir.join("logs/diagnostics.jsonl")).unwrap();
         let rows: Vec<serde_json::Value> = diagnostics.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
-        assert_eq!(rows.iter().filter(|r| r["event"] == "repair_applied").count(), usize::from(repair_sends > 0));
-        assert!(!rows.iter().any(|r| r["event"] == "status_repair_applied" || r["event"] == "session_compat_enabled"));
+        let expected_repairs = if mode == "untouched" { 0 } else { 1 };
+        assert_eq!(rows.iter().filter(|r| r["event"] == "repair_applied").count(), expected_repairs, "{name} 修复次数固定");
+        assert!(!rows.iter().any(|r| r["event"] == "status_repair_applied"));
+        assert_eq!(rows.iter().filter(|r| r["event"] == "session_compat_enabled").count(), expected_repairs,
+            "只有确认的历史错误修复成功才登记会话，空回不能登记");
     }
     // 预算只改自建副本，首个历史错误后不足以支持下一次，不能延长原预算。
     let upstream = RetryUpstream::new(vec![upstream_reply(400, "application/json", r#"{"error":{"type":"invalid_request_error","message":"encrypted content could not be verified"}}"#)]);
@@ -692,7 +716,7 @@ fn 重试边界_codex空回不绕过门槛且修复版冻结状态字段() {
     let response = responses_request(port, body, "codex");
     assert!(response.starts_with("HTTP/1.1 503"));
     assert_eq!(upstream.attempts(), 1);
-    assert_eq!(upstream.bodies()[0], body.as_bytes());
+    assert_eq!(serde_json::from_slice::<serde_json::Value>(&upstream.bodies()[0]).unwrap(), codex_stripped(body));
     let diagnostics = std::fs::read_to_string(fixture.dir.join("logs/diagnostics.jsonl")).unwrap();
     assert!(!diagnostics.lines().any(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()["event"] == "repair_applied"));
 }
@@ -738,17 +762,20 @@ fn 重试边界_codex网页搜索缺失必需字段或未知动作时原样重�
         assert!(responses_request(port, &body, "codex").contains(r#"{"ok":true}"#), "{name} 安全检查拒绝仍可换通道成功");
         assert_eq!(upstream.attempts(), (index + 1) * 3);
         let captured = upstream.bodies();
-        assert!(captured[index * 3..].iter().all(|sent| sent == body.as_bytes()), "{name} 不得补字段、转成正文或删除必需搜索字段");
+        assert!(captured[index * 3..].iter().all(|sent| {
+            serde_json::from_slice::<serde_json::Value>(sent).unwrap() == codex_stripped(&body)
+        }), "{name} 不得补字段、转成正文或删除必需搜索字段");
     }
     let diagnostics = std::fs::read_to_string(fixture.dir.join("logs/diagnostics.jsonl")).unwrap();
-    assert!(!diagnostics.lines().any(|line| {
-        let r: serde_json::Value = serde_json::from_str(line).unwrap();
-        r["event"] == "repair_applied" || r["event"] == "session_compat_applied"
-    }));
+    let rows: Vec<serde_json::Value> = diagnostics.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+    assert!(!rows.iter().any(|r| r["event"] == "repair_applied"), "网页搜索不安全时不得做有损修复");
+    assert!(rows.iter()
+        .filter(|r| r["event"] == "session_compat_applied")
+        .all(|r| r["removedReasoning"] == 0), "只允许首发的无损 id 剥离");
 }
 
 #[test]
-fn 重试边界_codex新连接同会话不预清理而其他客户端保留缓存() {
+fn 重试边界_codex与其他客户端同会话新连接沿用兼容预清理() {
     let error = r#"{"error":{"type":"invalid_request_error","message":"The requested item was created under a different Azure OpenAI resource"}}"#;
     let body = r#" {"model":"gpt-6.1-sol","input":[{"type":"message","id":"msg_fixture","role":"user","content":"fixture prompt"},{"type":"reasoning","id":"rs_fixture","encrypted_content":"fixture ciphertext"}]} "#;
     let cleaned = serde_json::json!({"model": "gpt-6.1-sol", "input": [{"type": "message", "role": "user", "content": "fixture prompt"}]});
@@ -761,34 +788,30 @@ fn 重试边界_codex新连接同会话不预清理而其他客户端保留缓�
     ] {
         let failure = upstream_reply(400, "application/json", error);
         let success = upstream_reply(200, "application/json", r#"{"ok":true}"#);
-        let replies = if codex { vec![failure.clone(), failure, success.clone(), success] }
-            else { vec![failure, success.clone(), success] };
+        let replies = vec![failure, success.clone(), success];
         let upstream = RetryUpstream::new(replies);
         let port = free_port();
         let mut fixture = Fixture::new(&format!("codex-session-isolation-{name}"), &upstream.url, port);
         fixture.gateway.start().unwrap();
         let headers = [marker, ("X-Relay-Session-Id", "fixture-shared-session")];
         assert!(responses_request_with_headers(port, body, &headers).contains(r#"{"ok":true}"#));
-        let first_sends = if codex { 3 } else { 2 };
+        let first_sends = 2;
         assert_eq!(upstream.attempts(), first_sends);
         // 每次 helper 都创建新的客户端 TCP 连接，但保持会话名与鉴权完全相同。
         assert!(responses_request_with_headers(port, body, &headers).contains(r#"{"ok":true}"#));
         assert_eq!(upstream.attempts(), first_sends + 1);
         let captured = upstream.bodies();
-        assert_eq!(captured[0], body.as_bytes());
-        assert_eq!(serde_json::from_slice::<serde_json::Value>(&captured[first_sends - 1]).unwrap(), cleaned);
-        if codex {
-            assert_eq!(captured[1], body.as_bytes());
-            assert_eq!(captured[first_sends], body.as_bytes(), "{name} 上次修复不能影响新客户端请求首试");
-        } else {
-            assert_eq!(serde_json::from_slice::<serde_json::Value>(&captured[first_sends]).unwrap(), cleaned, "{name} 应保留既有缓存预清理");
-        }
+        let expected_first = if codex { codex_stripped(body) } else { serde_json::from_str(body).unwrap() };
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&captured[0]).unwrap(), expected_first, "{name} 首发仅 Codex 剥可省略 id");
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&captured[1]).unwrap(), cleaned, "{name} 首次跨资源错误后修复");
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&captured[first_sends]).unwrap(), cleaned, "{name} 后续请求首发前预清理");
         let diagnostics = std::fs::read_to_string(fixture.dir.join("logs/diagnostics.jsonl")).unwrap();
         let rows: Vec<serde_json::Value> = diagnostics.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
         let cached = rows.iter().filter(|r| r["event"] == "session_compat_applied").count();
         let enabled = rows.iter().filter(|r| r["event"] == "session_compat_enabled").count();
-        assert_eq!(cached, usize::from(!codex));
-        assert_eq!(enabled, usize::from(!codex));
+        // Codex 每次首发剥 id 各记一条，第二次再叠加预清理；其他客户端只有预清理一条。
+        assert_eq!(cached, if codex { 3 } else { 1 }, "{name} 预清理诊断数");
+        assert_eq!(enabled, 1, "{name} 跨资源修复登记会话");
         assert!(!diagnostics.contains("fixture-shared-session"));
         assert!(!diagnostics.contains("fixture-only-not-a-key"));
     }
@@ -804,6 +827,7 @@ fn 重试边界_codex冲突标记不进入新阶段但保留既有修复行为()
         ("codex-zcode", [("X-Relay-Client", "codex"), ("User-Agent", "zcode/1.0")], true),
         ("claude-codex", [("X-Relay-Client", "claude"), ("User-Agent", "codex_cli_rs/0.100.0")], false),
         ("ambiguous-ua", [("X-Relay-Client", "codex"), ("User-Agent", "codex_cli_rs/0.100.0 claude/1.0")], true),
+        ("unknown-codex", [("X-Relay-Client", "unknown"), ("User-Agent", "codex_cli_rs/0.100.0")], true),
     ] {
         for (history, body) in [("simple", simple), ("web", web)] {
             let failure = upstream_reply(400, "application/json", error);
@@ -816,16 +840,19 @@ fn 重试边界_codex冲突标记不进入新阶段但保留既有修复行为()
             fixture.gateway.start().unwrap();
             let response = responses_request_with_headers(port, body, &headers);
             let captured = upstream.bodies();
-            assert_eq!(captured[0], body.as_bytes());
+            let expected_first: serde_json::Value = serde_json::from_str(body).unwrap();
+            assert_eq!(captured[0], body.as_bytes(), "冲突或未知标记的首发必须原样保留");
             if history == "simple" {
-                assert_eq!(upstream.attempts(), 2, "{name} 既有即时修复不能被新两次门槛改变");
+                assert_eq!(upstream.attempts(), 2, "{name} 保留既有即时修复行为");
                 assert!(response.contains(r#"{"ok":true}"#));
                 assert_eq!(serde_json::from_slice::<serde_json::Value>(&captured[1]).unwrap(), serde_json::json!({
                     "input": [{"type": "message", "role": "user", "content": "fixture prompt"}]
                 }), "冲突标记允许旧分支即时删除可省略 id，不承诺完全禁止旧剥离");
             } else {
                 assert_eq!(upstream.attempts(), if legacy_codex { 3 } else { 1 });
-                assert!(captured.iter().all(|sent| sent == body.as_bytes()), "{name} 不得进入新网页搜索安全门");
+                assert!(captured.iter().all(|sent| {
+                    serde_json::from_slice::<serde_json::Value>(sent).unwrap() == expected_first
+                }), "{name} 不得进入新网页搜索安全门");
                 let diagnostics = std::fs::read_to_string(fixture.dir.join("logs/diagnostics.jsonl")).unwrap();
                 assert!(!diagnostics.lines().any(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()["event"] == "repair_applied"));
             }
@@ -834,7 +861,44 @@ fn 重试边界_codex冲突标记不进入新阶段但保留既有修复行为()
 }
 
 #[test]
-fn 重试边界_codex其他上游结果打断同类历史错误连续计数() {
+fn 重试边界_codex失效推理修复后同会话首发预清理且不污染其他会话() {
+    let body = r#"{"model":"fixture-model","input":[{"type":"message","id":"msg_first","role":"user","content":"first prompt"},{"type":"reasoning","id":"rs_first","encrypted_content":"first ciphertext"}]}"#;
+    let unrelated = r#"{"model":"fixture-model","input":[{"type":"message","id":"msg_other","role":"user","content":"other prompt"},{"type":"reasoning","id":"rs_other","encrypted_content":"other ciphertext"}]}"#;
+    let error = r#"{"error":{"type":"invalid_request_error","message":"encrypted content could not be verified"}}"#;
+    for explicit in [false, true] {
+        let success = upstream_reply(200, "application/json", r#"{"ok":true}"#);
+        let upstream = RetryUpstream::new(vec![upstream_reply(400, "application/json", error), success.clone(), success.clone(), success]);
+        let port = free_port();
+        let mut fixture = Fixture::new(&format!("stale-session-memory-{explicit}"), &upstream.url, port);
+        fixture.gateway.start().unwrap();
+        let mut headers = vec![("X-Relay-Client", "codex")];
+        if explicit { headers.push(("X-Relay-Session-Id", "fixture-first-session")); }
+        assert!(responses_request_with_headers(port, body, &headers).contains(r#"{"ok":true}"#));
+        assert_eq!(upstream.attempts(), 2, "首次失效推理错误即修复");
+        assert!(responses_request_with_headers(port, body, &headers).contains(r#"{"ok":true}"#));
+        assert_eq!(upstream.attempts(), 3, "同会话新连接不再先发送失效 reasoning");
+        if explicit { headers[1].1 = "fixture-other-session"; }
+        assert!(responses_request_with_headers(port, unrelated, &headers).contains(r#"{"ok":true}"#));
+        let captured = upstream.bodies();
+        let cleaned = serde_json::json!({"model":"fixture-model","input":[{"type":"message","role":"user","content":"first prompt"}]});
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&captured[0]).unwrap(), codex_stripped(body));
+        for sent in &captured[1..3] {
+            assert_eq!(serde_json::from_slice::<serde_json::Value>(sent).unwrap(), cleaned);
+        }
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&captured[3]).unwrap(), codex_stripped(unrelated), "未报错的其他会话必须保留 reasoning");
+        let diagnostics = std::fs::read_to_string(fixture.dir.join("logs/diagnostics.jsonl")).unwrap();
+        let rows: Vec<serde_json::Value> = diagnostics.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        let registered: Vec<_> = rows.iter().filter(|r| r["event"] == "session_compat_enabled").collect();
+        assert_eq!(registered.len(), 1);
+        assert_eq!(registered[0]["kind"], "stale_reasoning_item");
+        assert_eq!(registered[0]["source"], if explicit { "explicit_session" } else { "resource_lineage" });
+        assert!(!diagnostics.contains("first ciphertext"));
+        assert!(!diagnostics.contains("fixture-first-session"));
+    }
+}
+
+#[test]
+fn 重试边界_codex限流与永久错误不触发二次历史降级() {
     let stale = upstream_reply(400, "application/json", r#"{"error":{"type":"invalid_request_error","message":"encrypted content could not be verified"}}"#);
     let body = r#" {"input":[{"type":"message","id":"msg_fixture","role":"user","content":"fixture prompt"},{"type":"reasoning","id":"rs_fixture","encrypted_content":"fixture ciphertext"}]} "#;
     let hinted_limit = r#"{"error":{"type":"invalid_request_error","code":"rate_limit_exceeded","message":"encrypted content could not be verified"}}"#;
@@ -846,11 +910,16 @@ fn 重试边界_codex其他上游结果打断同类历史错误连续计数() {
     let mut fixture = Fixture::new("codex-429-history-text-reset", &upstream.url, port);
     fixture.gateway.start().unwrap();
     let response = responses_request(port, body, "codex");
-    assert_eq!(upstream.attempts(), 3, "带历史错误文案的429仍是限流，应打断连续计数：{response}");
+    assert_eq!(upstream.attempts(), 3, "带历史错误文案的429仍按限流处理，不再改写请求体：{response}");
     assert!(response.contains(r#"{"ok":true}"#));
-    assert!(upstream.bodies().iter().all(|sent| sent == body.as_bytes()), "HTTP429不能仅凭历史文案触发第二次历史错误或有损改写");
+    let repaired = serde_json::json!({"input": [{"type": "message", "role": "user", "content": "fixture prompt"}]});
+    let captured = upstream.bodies();
+    assert_eq!(serde_json::from_slice::<serde_json::Value>(&captured[0]).unwrap(), codex_stripped(body));
+    assert!(captured[1..].iter().all(|sent| {
+        serde_json::from_slice::<serde_json::Value>(sent).unwrap() == repaired
+    }), "首次历史错误修复后，限流重试沿用同一修复版");
     let diagnostics = std::fs::read_to_string(fixture.dir.join("logs/diagnostics.jsonl")).unwrap();
-    assert!(!diagnostics.lines().any(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()["event"] == "repair_applied"));
+    assert_eq!(diagnostics.lines().filter(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()["event"] == "repair_applied").count(), 1);
     for (carrier, ct) in [("json", "application/json"), ("sse", "text/event-stream")] {
         for (code, expected_sends, final_status) in [
             ("rate_limit_exceeded", 3, 200),
@@ -871,9 +940,13 @@ fn 重试边界_codex其他上游结果打断同类历史错误连续计数() {
             assert_eq!(upstream.attempts(), expected_sends, "{carrier}/{code} 明确错误码不能被历史文案覆盖：{response}");
             assert!(response.starts_with(&format!("HTTP/1.1 {final_status}")), "{carrier}/{code}: {response}");
             assert_eq!(response.contains(r#"{"ok":true}"#), expected_sends == 3);
-            assert!(upstream.bodies().iter().all(|sent| sent == body.as_bytes()), "{carrier}/{code} 不触发历史降级，必须保留原始字节");
+            let captured = upstream.bodies();
+            assert_eq!(serde_json::from_slice::<serde_json::Value>(&captured[0]).unwrap(), codex_stripped(body), "{carrier}/{code} 首发只剥离可省略 id");
+            assert!(captured[1..].iter().all(|sent| {
+                serde_json::from_slice::<serde_json::Value>(sent).unwrap() == repaired
+            }), "{carrier}/{code} 明确错误码不能触发再次历史改写");
             let diagnostics = std::fs::read_to_string(fixture.dir.join("logs/diagnostics.jsonl")).unwrap();
-            assert!(!diagnostics.lines().any(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()["event"] == "repair_applied"));
+            assert_eq!(diagnostics.lines().filter(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()["event"] == "repair_applied").count(), 1);
         }
     }
     for (name, interruption) in [
@@ -888,13 +961,13 @@ fn 重试边界_codex其他上游结果打断同类历史错误连续计数() {
         let mut fixture = Fixture::new(&format!("codex-streak-reset-{name}"), &upstream.url, port);
         fixture.gateway.start().unwrap();
         let response = responses_request(port, body, "codex");
-        assert_eq!(upstream.attempts(), 5, "{name} 中断后须重新连续两次历史错误才修复：{response}");
-        assert!(response.contains(r#"{"ok":true}"#));
+        assert_eq!(upstream.attempts(), 4, "{name} 修复后最多再发三次，不能继续第六次：{response}");
+        assert!(response.starts_with("HTTP/1.1 503"), "{name} 上限耗尽返回可重试错误：{response}");
         let captured = upstream.bodies();
-        assert!(captured[..4].iter().all(|sent| sent == body.as_bytes()), "{name} 第三、第四次不能沿用被打断的历史错误计数");
-        assert_eq!(serde_json::from_slice::<serde_json::Value>(&captured[4]).unwrap(), serde_json::json!({
-            "input": [{"type": "message", "id": "msg_fixture", "role": "user", "content": "fixture prompt"}]
-        }));
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&captured[0]).unwrap(), codex_stripped(body), "{name} 首发剥离 id");
+        assert!(captured[1..].iter().all(|sent| {
+            serde_json::from_slice::<serde_json::Value>(sent).unwrap() == repaired
+        }), "{name} 修复后不得再次改写");
         let diagnostics = std::fs::read_to_string(fixture.dir.join("logs/diagnostics.jsonl")).unwrap();
         assert_eq!(diagnostics.lines().filter(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()["event"] == "repair_applied").count(), 1);
     }
@@ -931,10 +1004,15 @@ fn 重试边界_codex缺失或重复工具结果时拒绝历史改写() {
         let response = responses_request(port, &body, "codex");
         assert_eq!(upstream.attempts(), 3, "{name} 不安全历史仍可有限原样重试：{response}");
         assert!(response.contains(r#"{"ok":true}"#));
-        assert!(upstream.bodies().iter().all(|sent| sent == body.as_bytes()), "{name} 工具结果缺失或重复时，不得删除推理或任何其他字段");
+        assert!(upstream.bodies().iter().all(|sent| {
+            serde_json::from_slice::<serde_json::Value>(sent).unwrap() == codex_stripped(&body)
+        }), "{name} 工具结果缺失或重复时，不得删除推理或任何其他字段");
         let diagnostics = std::fs::read_to_string(fixture.dir.join("logs/diagnostics.jsonl")).unwrap();
         let rows: Vec<serde_json::Value> = diagnostics.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
-        assert!(!rows.iter().any(|r| r["event"] == "repair_applied" || r["event"] == "session_compat_applied"));
+        assert!(!rows.iter().any(|r| r["event"] == "repair_applied"), "{name} 不得做有损历史改写");
+        assert!(rows.iter()
+            .filter(|r| r["event"] == "session_compat_applied")
+            .all(|r| r["removedReasoning"] == 0), "{name} 只允许首发的无损 id 剥离");
         for sensitive in ["fixture-only-not-a-key", "fixture ciphertext", "fixture input", "fixture prompt", "fixture first result", "fixture duplicate result"] {
             assert!(!diagnostics.contains(sensitive));
         }
@@ -962,11 +1040,16 @@ fn 重试边界_失效推理无法安全修复时保留完整历史换通道() {
             let response = responses_request(port, body, "codex");
             assert_eq!(upstream.attempts(), 2, "{history}/{carrier} 不安全改写不等于下一条通道也无法恢复：{response}");
             assert!(response.contains(r#"{"ok":true}"#));
-            assert!(upstream.bodies().iter().all(|sent| sent == body.as_bytes()), "{history}/{carrier} 未识别项、密文、引用和原始字节必须全部保留");
+            assert!(upstream.bodies().iter().all(|sent| {
+                serde_json::from_slice::<serde_json::Value>(sent).unwrap() == codex_stripped(body)
+            }), "{history}/{carrier} 未识别项、密文、引用必须保留，只允许剥离可省略 id");
             let diagnostics = std::fs::read_to_string(fixture.dir.join("logs/diagnostics.jsonl")).unwrap();
             let rows: Vec<serde_json::Value> = diagnostics.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
             assert!(rows.iter().any(|r| r["event"] == "codex_resource_retry" && r["kind"] == "stale_reasoning_item"));
-            assert!(!rows.iter().any(|r| r["event"] == "repair_applied" || r["event"] == "session_compat_applied"));
+            assert!(!rows.iter().any(|r| r["event"] == "repair_applied"), "{history}/{carrier} 不安全历史不得做有损修复");
+            assert!(rows.iter()
+                .filter(|r| r["event"] == "session_compat_applied")
+                .all(|r| r["removedReasoning"] == 0), "{history}/{carrier} 只允许首发的无损 id 剥离");
             for sensitive in ["fixture-only-not-a-key", "fixture reasoning", "fixture opaque history", "fixture prompt"] {
                 assert!(!diagnostics.contains(sensitive));
             }
@@ -1015,23 +1098,30 @@ fn 重试边界_失效推理保留历史重试受上限约束() {
             let mut fixture = Fixture::new(&format!("stale-limit-{history}-{carrier}"), &upstream.url, port);
             fixture.gateway.start().unwrap();
             let response = responses_request(port, body, "codex");
-            assert_eq!(upstream.attempts(), 5, "{history}/{carrier} 历史错误最多五次，不能借用默认总重试上限");
-            assert!(response.starts_with("HTTP/1.1 400"));
-            assert!(response.contains("stopping after 5 resource attempts"));
-            let captured = upstream.bodies();
-            assert_eq!(captured[0], body.as_bytes());
-            assert_eq!(captured[1], body.as_bytes());
+            let attempts = if repairable { 4 } else { 5 };
+            assert_eq!(upstream.attempts(), attempts, "{history}/{carrier} 可修复历史受三次重发上限，不可修复历史受五次资源上限");
             if repairable {
-                assert_eq!(serde_json::from_slice::<serde_json::Value>(&captured[2]).unwrap(), serde_json::json!({
-                    "model": "gpt-6.1-sol", "input": [{"type": "message", "id": "msg_fixture", "role": "user", "content": "fixture"}]
-                }));
-                assert!(captured[2..].iter().all(|sent| sent == &captured[2]), "后三次使用同一修复版");
+                assert!(response.starts_with("HTTP/1.1 503"), "{history}/{carrier} 修复版三次发送耗尽：{response}");
             } else {
-                assert!(captured.iter().all(|sent| sent == body.as_bytes()));
+                assert!(response.starts_with("HTTP/1.1 400"));
+                assert!(response.contains("stopping after 5 resource attempts"));
+            }
+            let captured = upstream.bodies();
+            assert_eq!(serde_json::from_slice::<serde_json::Value>(&captured[0]).unwrap(), codex_stripped(body));
+            if repairable {
+                assert_eq!(serde_json::from_slice::<serde_json::Value>(&captured[1]).unwrap(), serde_json::json!({
+                    "model": "gpt-6.1-sol", "input": [{"type": "message", "role": "user", "content": "fixture"}]
+                }));
+                assert!(captured[1..].iter().all(|sent| sent == &captured[1]), "首次修复后保持同一修复版");
+            } else {
+                assert!(captured.iter().all(|sent| {
+                    serde_json::from_slice::<serde_json::Value>(sent).unwrap() == codex_stripped(body)
+                }));
             }
             let diagnostics = std::fs::read_to_string(fixture.dir.join("logs/diagnostics.jsonl")).unwrap();
             let rows: Vec<serde_json::Value> = diagnostics.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
-            assert!(rows.iter().any(|r| r["event"] == "codex_resource_exhausted" && r["kind"] == "stale_reasoning_item" && r["resourceFailures"] == 5 && r["refusal"] == "resource_attempt_limit"));
+            let expected_failures = if repairable { 4 } else { 5 };
+            assert!(rows.iter().any(|r| r["event"] == "codex_resource_exhausted" && r["kind"] == "stale_reasoning_item" && r["resourceFailures"] == expected_failures && r["refusal"] == "resource_attempt_limit"));
             assert_eq!(rows.iter().filter(|r| r["event"] == "repair_applied").count(), usize::from(repairable));
             if !repairable {
                 assert_eq!(rows.iter().filter(|r| r["event"] == "repair_refused" && r["refusal"] == "unsafe_inline_history").count(), 1, "安全检查拒绝后当次不反复尝试改写");

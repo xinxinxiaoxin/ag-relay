@@ -1,27 +1,27 @@
 {
   "schemaVersion": 1,
   "target": "x86_64-pc-windows-msvc",
-  "verifiedAt": "2026-10-12",
+  "verifiedAt": "2026-10-16",
   "scope": "锁定安装的 npm 完整依赖树（含开发工具）、Windows cargo metadata 已解析依赖树（含构建/宏）、随包 Node、Rust 标准库和 WebView2Loader SDK。其他平台 npm 可选二进制单列排除；并非精确二进制 SBOM。",
   "inputs": [
     {
       "path": "package.json",
-      "sha256": "a89ae14483b0b18225a11bb086ef40af1693656307ed35f411382f77e1e85387",
+      "sha256": "4823499728e212a9313c522290b1d1164e978a2d22b0b43bdbff19e0f92b8fa4",
       "normalizeLf": true
     },
     {
       "path": "package-lock.json",
-      "sha256": "348cd46f30c86a09709dde905155e6d69f2be803bf4375c1691f95f86e33d0f0",
+      "sha256": "cc043810b58516f170fe137f61888f6f12c48b8b2d62e94bd408558f6722fda1",
       "normalizeLf": true
     },
     {
       "path": "src-tauri/Cargo.lock",
-      "sha256": "25cfa7433d799a7da34ae56e75adf44b19ee9a17b66198b9080b10cc8eb75cc8",
+      "sha256": "93c22e5497abeadb2bbd01349a20715b9200c93716fb98b60be3b6c60bcbf597",
       "normalizeLf": true
     },
     {
       "path": "src-tauri/Cargo.toml",
-      "sha256": "a2b8c809bf44c9f517762effdb07fe504751304b642b02e21eb4c712a177fd08",
+      "sha256": "cc7c62d020309179d8eec5cf0674fa60677288c305b48c5e4ad345736648f8b9",
       "normalizeLf": true
     },
     {
@@ -37,11 +37,11 @@
     "indexes": [
       {
         "path": "licenses/COMPONENTS.md",
-        "sha256": "834127b58c6a5f1f41a44c0937ea1142396ae11a9ac7eaf4b0adb314d524d180",
+        "sha256": "69dd1f6d7f64444b7f057a372f2bba4b045e858be924835f920f535cfaa97db2",
         "normalizeLf": true
       }
     ],
-    "review": "仅将两套完整安装器源码归档及 inventory.json/COMPONENTS.md 迁至本项目每次发布的同版来源附件；所有其他材料继续随安装包原样提供。Cargo.toml 仅增加 release 的 LTO、单 codegen unit 与体积优化，依赖声明、锁文件、版本及 Node 均未变化。"
+    "review": "两套完整安装器源码归档及 inventory.json/COMPONENTS.md 由每次发布的同版来源附件提供，其他许可材料继续随安装包提供。2026-10-16 新增 Windows 依赖 tauri-plugin-single-instance 2.5.4 与 tracing-attributes 0.1.31，已补齐原文与组件索引并刷新依赖输入指纹；修正单实例组件的 MIT 原文链接。产品版本与随包 Node 未变化。"
   },
   "components": [
     {
@@ -14158,6 +14158,39 @@
     },
     {
       "ecosystem": "cargo",
+      "name": "tauri-plugin-single-instance",
+      "version": "2.5.4",
+      "license": "Apache-2.0 OR MIT",
+      "scope": "Rust 普通依赖树（Windows x64）",
+      "source": "https://crates.io/api/v1/crates/tauri-plugin-single-instance/2.5.4/download",
+      "repository": "https://github.com/tauri-apps/plugins-workspace",
+      "vcs": {
+        "git": {
+          "sha1": "44293a5722efcaf27060504e63b17aeba721b40f"
+        },
+        "path_in_vcs": "plugins/single-instance"
+      },
+      "checksum": "561cd99484561bc39c954768e7b41a66cebbe1ac3d9d081c34361f740c489e2c",
+      "materials": [
+        {
+          "path": "licenses/texts/eb8a6c84630461b352badcab1dbe5d0168c56d377358b2b8c86b51003272d5ef.txt",
+          "sha256": "eb8a6c84630461b352badcab1dbe5d0168c56d377358b2b8c86b51003272d5ef",
+          "source": "https://crates.io/api/v1/crates/tauri-plugin-single-instance/2.5.4/download#LICENSE.spdx"
+        },
+        {
+          "path": "licenses/texts/0cec06e0e55fbc3dc5cee4fca9b607f66cb8f4e4dbcf3b3c013594dd156732e9.txt",
+          "sha256": "0cec06e0e55fbc3dc5cee4fca9b607f66cb8f4e4dbcf3b3c013594dd156732e9",
+          "source": "https://crates.io/api/v1/crates/tauri-plugin-single-instance/2.5.4/download#LICENSE_APACHE-2.0"
+        },
+        {
+          "path": "licenses/texts/b7f455413bfe5f9d7da501a4468d4c5f866a432c325947e98cc9535e8b26cd6d.txt",
+          "sha256": "b7f455413bfe5f9d7da501a4468d4c5f866a432c325947e98cc9535e8b26cd6d",
+          "source": "https://crates.io/api/v1/crates/tauri-plugin-single-instance/2.5.4/download#LICENSE_MIT"
+        }
+      ]
+    },
+    {
+      "ecosystem": "cargo",
       "name": "tauri-plugin-updater",
       "version": "2.13.3",
       "license": "Apache-2.0 OR MIT",
@@ -14931,6 +14964,29 @@
           "path": "licenses/texts/898b1ae9821e98daf8964c8d6c7f61641f5f5aa78ad500020771c0939ee0dea1.txt",
           "sha256": "898b1ae9821e98daf8964c8d6c7f61641f5f5aa78ad500020771c0939ee0dea1",
           "source": "https://crates.io/api/v1/crates/tracing/0.1.44/download#LICENSE"
+        }
+      ]
+    },
+    {
+      "ecosystem": "cargo",
+      "name": "tracing-attributes",
+      "version": "0.1.31",
+      "license": "MIT",
+      "scope": "Rust 构建/过程宏依赖树",
+      "source": "https://crates.io/api/v1/crates/tracing-attributes/0.1.31/download",
+      "repository": "https://github.com/tokio-rs/tracing",
+      "vcs": {
+        "git": {
+          "sha1": "55086231ec4aaeffcaab9932e696f40278f06bd1"
+        },
+        "path_in_vcs": "tracing-attributes"
+      },
+      "checksum": "7490cfa5ec963746568740651ac6781f701c9c5ea257c58e057f3ba8cf69e8da",
+      "materials": [
+        {
+          "path": "licenses/texts/898b1ae9821e98daf8964c8d6c7f61641f5f5aa78ad500020771c0939ee0dea1.txt",
+          "sha256": "898b1ae9821e98daf8964c8d6c7f61641f5f5aa78ad500020771c0939ee0dea1",
+          "source": "https://crates.io/api/v1/crates/tracing-attributes/0.1.31/download#LICENSE"
         }
       ]
     },

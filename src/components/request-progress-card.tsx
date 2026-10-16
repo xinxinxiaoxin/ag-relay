@@ -35,7 +35,7 @@ export function RequestProgressCard({ snapshot, onOpenLogs }: { snapshot: Gatewa
   const incomplete = snapshot.requestsTruncated || (count != null && count > (requests?.length ?? 0))
   return (
     <Card size="sm" className="min-w-0 gap-0 pb-0" role="region" aria-labelledby="request-progress-heading">
-      <CardHeader className="pb-3">
+      <CardHeader className="pb-2">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <CardTitle role="heading" aria-level={2} id="request-progress-heading" className="flex items-center gap-2 text-sm">
             <Activity className="size-4 text-muted-foreground" aria-hidden="true" />请求进展
@@ -43,7 +43,7 @@ export function RequestProgressCard({ snapshot, onOpenLogs }: { snapshot: Gatewa
           </CardTitle>
           <div className="flex items-center gap-3">
             <span className="text-[11px] text-muted-foreground" title="约每 3 秒刷新；无进展不代表卡死，不预计完成时间。">3 秒刷新</span>
-            {onOpenLogs && <Button variant="ghost" size="sm" onClick={onOpenLogs}>全部日志<ArrowRight aria-hidden="true" /></Button>}
+            {onOpenLogs && <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={onOpenLogs}>全部日志<ArrowRight aria-hidden="true" /></Button>}
           </div>
         </div>
       </CardHeader>

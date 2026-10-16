@@ -2,7 +2,7 @@
 
 此索引与 `inventory.json` 同源，列出锁定依赖及明确标注的预编译插件许可参照。参照版本不是旧 DLL 的实际解析版本；未决项保留在 `releaseBlockers`，正式检查不会将其当成已闭合。许可文件按内容 SHA-256 去重；同一原文可由多个组件引用，版权文字未改写。原始版本、仓库、下载完整性值、固定提交和取证例外详见 [核验清单](inventory.json)。
 
-快照日期：2026-10-12。目标：`x86_64-pc-windows-msvc`。共 724 项（npm 422，Rust crates 293，随包/工具链/安装器及参照记录9）。这包含构建/开发依赖，并非声称所有包都嵌入可执行文件。
+快照日期：2026-10-16。目标：`x86_64-pc-windows-msvc`。共 726 项（npm 422，Rust crates 295，随包/工具链/安装器及参照记录9）。这包含构建/开发依赖，并非声称所有包都嵌入可执行文件。
 
 原文链接在源码的 `licenses/` 与安装目录的 `licenses/third-party/` 内均可直接使用。MPL 源码 `.crate` 是完整 tar.gz 归档，可用支持 gzip 的归档工具阅读，无须执行其中脚本。
 
@@ -671,6 +671,7 @@
 | `tauri-build` | 2.7.2 | Apache-2.0 OR MIT | [LICENSE-APACHE-2.0](texts/0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594.txt) / [LICENSE-MIT](texts/9dd42ea92cff2ede5cd477cbfcce051b2d0115c0ac7f368ee88cb545055dff1d.txt) | [固定版本](https://crates.io/api/v1/crates/tauri-build/2.7.2/download) |
 | `tauri-codegen` | 2.7.2 | Apache-2.0 OR MIT | [LICENSE-APACHE-2.0](texts/0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594.txt) / [LICENSE-MIT](texts/9dd42ea92cff2ede5cd477cbfcce051b2d0115c0ac7f368ee88cb545055dff1d.txt) | [固定版本](https://crates.io/api/v1/crates/tauri-codegen/2.7.2/download) |
 | `tauri-macros` | 2.7.2 | Apache-2.0 OR MIT | [LICENSE-APACHE-2.0](texts/0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594.txt) / [LICENSE-MIT](texts/9dd42ea92cff2ede5cd477cbfcce051b2d0115c0ac7f368ee88cb545055dff1d.txt) | [固定版本](https://crates.io/api/v1/crates/tauri-macros/2.7.2/download) |
+| `tauri-plugin-single-instance` | 2.5.4 | Apache-2.0 OR MIT | [LICENSE.spdx](texts/eb8a6c84630461b352badcab1dbe5d0168c56d377358b2b8c86b51003272d5ef.txt) / [LICENSE_APACHE-2.0](texts/0cec06e0e55fbc3dc5cee4fca9b607f66cb8f4e4dbcf3b3c013594dd156732e9.txt) / [LICENSE_MIT](texts/b7f455413bfe5f9d7da501a4468d4c5f866a432c325947e98cc9535e8b26cd6d.txt) | [固定版本](https://crates.io/api/v1/crates/tauri-plugin-single-instance/2.5.4/download) |
 | `tauri-plugin-updater` | 2.13.3 | Apache-2.0 OR MIT | [LICENSE.spdx](texts/eb8a6c84630461b352badcab1dbe5d0168c56d377358b2b8c86b51003272d5ef.txt) / [LICENSE_APACHE-2.0](texts/0cec06e0e55fbc3dc5cee4fca9b607f66cb8f4e4dbcf3b3c013594dd156732e9.txt) / [LICENSE_MIT](texts/89ff9689dcf9dd53968785d05a26f7898bb169dbfcada8d032b3e68cf0d55607.txt) | [固定版本](https://crates.io/api/v1/crates/tauri-plugin-updater/2.13.3/download) |
 | `tauri-plugin` | 2.7.1 | Apache-2.0 OR MIT | [9dd42ea92cff2ede5cd477cbfcce051b2d0115c0ac7f368ee88cb545055dff1d.txt](texts/9dd42ea92cff2ede5cd477cbfcce051b2d0115c0ac7f368ee88cb545055dff1d.txt) / [0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594.txt](texts/0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594.txt) | [固定版本](https://crates.io/api/v1/crates/tauri-plugin/2.7.1/download) |
 | `tauri-runtime-wry` | 2.12.1 | Apache-2.0 OR MIT | [LICENSE-APACHE-2.0](texts/0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594.txt) / [LICENSE-MIT](texts/9dd42ea92cff2ede5cd477cbfcce051b2d0115c0ac7f368ee88cb545055dff1d.txt) | [固定版本](https://crates.io/api/v1/crates/tauri-runtime-wry/2.12.1/download) |
@@ -699,6 +700,7 @@
 | `tower-service` | 0.3.3 | MIT | [LICENSE](texts/4249c8e6c5ebb85f97c77e6457c6fafc1066406eb8f1ef61e796fbdc5ff18482.txt) | [固定版本](https://crates.io/api/v1/crates/tower-service/0.3.3/download) |
 | `tower` | 0.5.3 | MIT | [LICENSE](texts/4249c8e6c5ebb85f97c77e6457c6fafc1066406eb8f1ef61e796fbdc5ff18482.txt) | [固定版本](https://crates.io/api/v1/crates/tower/0.5.3/download) |
 | `tracing-core` | 0.1.36 | MIT | [LICENSE](texts/898b1ae9821e98daf8964c8d6c7f61641f5f5aa78ad500020771c0939ee0dea1.txt) / [LICENSE](texts/58545fed1565e42d687aecec6897d35c6d37ccb71479a137c0deb2203e125c79.txt) | [固定版本](https://crates.io/api/v1/crates/tracing-core/0.1.36/download) |
+| `tracing-attributes` | 0.1.31 | MIT | [LICENSE](texts/898b1ae9821e98daf8964c8d6c7f61641f5f5aa78ad500020771c0939ee0dea1.txt) | [固定版本](https://crates.io/api/v1/crates/tracing-attributes/0.1.31/download) |
 | `tracing` | 0.1.44 | MIT | [LICENSE](texts/898b1ae9821e98daf8964c8d6c7f61641f5f5aa78ad500020771c0939ee0dea1.txt) | [固定版本](https://crates.io/api/v1/crates/tracing/0.1.44/download) |
 | `tray-icon` | 0.25.1 | MIT OR Apache-2.0 | [LICENSE-APACHE](texts/a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2.txt) / [LICENSE-MIT](texts/2ab5537b8c0cb1d475e2145b6a7994b04e7c71e6e5bd836f7f9c47c221a5ad9a.txt) / [LICENSE.spdx](texts/6c1e5d0ccf5e8951401cb964036ae664d52fc8d1148173b53bc54fc534f5d404.txt) | [固定版本](https://crates.io/api/v1/crates/tray-icon/0.25.1/download) |
 | `try-lock` | 0.2.5 | MIT | [LICENSE](texts/c816a0749cdc6bf062a5111c159723de51b2bfac66a1dac2655abd9e6b1583eb.txt) | [固定版本](https://crates.io/api/v1/crates/try-lock/0.2.5/download) |

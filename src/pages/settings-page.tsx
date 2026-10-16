@@ -117,17 +117,17 @@ export function SettingsPage(props: SettingsPageProps & { update: UpdatePanelPro
   return (
     <section
       aria-labelledby={`${id}-heading`}
-      className="min-w-0 space-y-6 text-sm text-foreground"
+      className="min-w-0 space-y-4 text-sm text-foreground"
     >
       <header className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0 space-y-2">
           <h1
             id={`${id}-heading`}
-            className="text-[30px] font-semibold leading-9 tracking-[-0.025em]"
+            className="text-xl font-semibold tracking-tight"
           >
             偏好设置
           </h1>
-          <p className="text-sm leading-6 text-muted-foreground">
+          <p className="text-xs leading-5 text-muted-foreground">
             管理启动偏好，查看连接与退出方式。
           </p>
         </div>

@@ -65,6 +65,10 @@ const cfg = {
   minRetryWindowMs: num(process.env.PROXY_MIN_RETRY_WINDOW_MS, 30000),
   sessionCompat: process.env.PROXY_SESSION_COMPAT !== '0',
   codexResourceRetry: process.env.PROXY_CODEX_RESOURCE_RETRY !== '0',
+  // Codex 会把本地生成的 item id 一起回传（UUIDv7 / review_rollout_user / resp_..._msg 等），
+  // 上游按前缀校验会直接 400。对 Codex 的 /v1/responses 在首次发送前剥离可选 id 句柄；
+  // web_search_call 的编号是必需引用，item_reference 的 id 就是载荷，二者都保留。
+  codexStripIds: process.env.PROXY_CODEX_STRIP_IDS !== '0',
   sessionCompatTtlMs: num(process.env.PROXY_SESSION_COMPAT_TTL_MS, 86400000),
   sessionCompatMaxKeys: Math.floor(num(process.env.PROXY_SESSION_COMPAT_MAX_KEYS, 4096)),
   diagnosticsFile: process.env.PROXY_DIAGNOSTICS_FILE || fileURLToPath(new URL('./relay-diagnostics.jsonl', import.meta.url)),
@@ -335,12 +339,44 @@ function repairResponsesItems(bodyBuf, options = {}) {
   return { body: Buffer.from(JSON.stringify(obj), 'utf8'), removedReasoning, removedIds, removedTypes };
 }
 
+// Optional resource handles only. web_search_call ids are required references and
+// item_reference carries its id as payload, so neither may be touched.
+const CODEX_STRIPPABLE_ID_TYPES = new Set([
+  'message', 'reasoning', 'function_call', 'function_call_output',
+  'custom_tool_call', 'custom_tool_call_output',
+]);
+
+/**
+ * Proactive Codex sanitizer: drop optional item-id handles before the first upstream
+ * attempt. Content, call_id, tool output and reasoning encrypted_content are never
+ * modified; the reasoning items themselves are kept.
+ */
+function stripCodexItemIds(bodyBuf) {
+  let obj;
+  try { obj = JSON.parse(bodyBuf.toString('utf8')); }
+  catch { return null; }
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return null;
+  if (!Array.isArray(obj.input)) return null;
+  let removedIds = 0;
+  for (const item of obj.input) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+    const type = item.type === undefined && typeof item.role === 'string' ? 'message' : item.type;
+    if (!CODEX_STRIPPABLE_ID_TYPES.has(type)) continue;
+    if (Object.hasOwn(item, 'id')) {
+      delete item.id;
+      removedIds++;
+    }
+  }
+  if (!removedIds) return null;
+  return { body: Buffer.from(JSON.stringify(obj), 'utf8'), removedIds };
+}
+
 // Store only scoped hashes, never credentials, session names, or reasoning payloads.
 const compatibilityKeys = new Map();
 const fingerprint = (value) => createHash('sha256').update(value).digest('hex');
 
-function compatibilityIdentity(bodyBuf, headers, bypass = false) {
-  if (bypass || !cfg.sessionCompat) return null;
+function compatibilityIdentity(bodyBuf, headers) {
+  if (!cfg.sessionCompat) return null;
   let obj;
   try { obj = JSON.parse(bodyBuf.toString('utf8')); } catch { return null; }
   if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return null;
@@ -979,21 +1015,30 @@ async function handle(req, res, state) {
   let repairedStatus = false;
   let resourceFailures = 0;
   const isResponses = req.method === 'POST' && pathname === '/v1/responses';
+  const clientCodex = isResponses && strictCodex(headers);
   const codexResourceRetry = cfg.codexResourceRetry && isResponses && clientClass(headers) === 'codex';
-  const eligibleCodex = cfg.codexResourceRetry && isResponses && strictCodex(headers);
-  let historyKind = null;
-  let historyStreak = 0;
-  let historyThisAttempt = false;
+  const eligibleCodex = cfg.codexResourceRetry && clientCodex;
   let historyRepairChecked = false;
   let postRepairSends = 0;
   let frozenHistoryKind = null;
   diagnose('received', isResponses ? { shape: summarizeResponsesBody(body) } : {});
   if (isResponses) diagnose('request_profile', requestProfile(body, headers));
-  const compatibility = isResponses ? compatibilityIdentity(body, headers, eligibleCodex) : null;
+  // Codex uses the same resource-lineage session memory as Claude/ZCode: a confirmed
+  // history error registers the session, later requests strip reasoning before the first send.
+  const compatibility = isResponses ? compatibilityIdentity(body, headers) : null;
   delete headers['x-relay-session-id'];
   delete headers['x-relay-client'];
+  if (clientCodex && cfg.codexStripIds) {
+    const stripped = stripCodexItemIds(activeBody);
+    if (stripped) {
+      activeBody = stripped.body;
+      diagnose('session_compat_applied', { source: compatibility?.source ?? 'resource_lineage',
+        removedReasoning: 0, removedIds: stripped.removedIds });
+      log(`codex item ids stripped before first attempt: ${stripped.removedIds}`);
+    }
+  }
   if (knownCompatibility(compatibility)) {
-    const cleaned = repairResponsesItems(activeBody, { stripItemIds: true, dropReasoning: true, allowUnchanged: true });
+    const cleaned = repairResponsesItems(activeBody, { stripItemIds: true, dropReasoning: true, allowUnchanged: true, codexHistory: eligibleCodex });
     if (cleaned.error) {
       diagnose('session_compat_refused', { reason: 'unsafe_inline_history' });
       if (!codexResourceRetry) {
@@ -1064,11 +1109,6 @@ async function handle(req, res, state) {
     const reasoning = isReasoningItemError(message);
     if (!azure && !reasoning) return null;
     const kind = azure ? 'azure_resource_mismatch' : 'stale_reasoning_item';
-    if (eligibleCodex) {
-      historyThisAttempt = true;
-      historyStreak = historyKind === kind ? historyStreak + 1 : 1;
-      historyKind = kind;
-    }
     diagnose('item_error', { kind, source, status, shape: summarizeResponsesBody(activeBody) });
     // 两类历史错误都可能来自当前通道无法接续；无法安全改写不等于无法原样重试。
     if (codexResourceRetry && ++resourceFailures >= 5) {
@@ -1098,7 +1138,9 @@ async function handle(req, res, state) {
       return 'stop';
     };
     if (!isResponses) return fail('automatic item repair is restricted to POST /v1/responses', 'wrong_endpoint');
-    if (eligibleCodex && (historyRepairChecked || (historyStreak < 2 && !repairedItems))) {
+    // Claude parity for Codex: the first confirmed history error repairs and registers
+    // the session instead of waiting for a second consecutive same-kind failure.
+    if (eligibleCodex && historyRepairChecked) {
       lastReason = `${kind}: upstream could not access the retained response history`;
       if (ac.signal.aborted) return 'stop';
       if (attempt < maxAttempts && deadline - Date.now() >= cfg.minRetryWindowMs + cfg.deployDelayMs) {
@@ -1114,7 +1156,7 @@ async function handle(req, res, state) {
     const repaired = repairResponsesItems(activeBody, { stripItemIds: azure, dropReasoning: true, codexHistory: eligibleCodex });
     if (repaired.error) return fail(repaired.error);
     if (deadline - Date.now() < cfg.minRetryWindowMs + cfg.deployDelayMs) return fail('insufficient time budget for repair', 'time_budget');
-    if (azure && rememberCompatibility(compatibility)) {
+    if ((azure || eligibleCodex) && rememberCompatibility(compatibility)) {
       diagnose('session_compat_enabled', { kind, source: compatibility.source });
     }
     activeBody = repaired.body;
@@ -1175,7 +1217,7 @@ async function handle(req, res, state) {
     if (preserveResourceHistory && !eligibleCodex) return;
     preCommitFailures++;
     maxAttempts = Math.max(maxAttempts, cfg.deployMaxAttempts);
-    // Codex history repair requires two explicit same-kind errors; empty replies alone
+    // Codex history repair requires an explicit history error; empty replies alone
     // must neither trigger a lossy repair nor mutate the frozen/request-retained body.
     if (!isResponses || eligibleCodex) return;
     // 1 级无损，2 次失败就做。2 级要牺牲推理连续性，所以要多 4 次失败的证据，
@@ -1218,7 +1260,6 @@ async function handle(req, res, state) {
     }, waitMs);
 
     try {
-      historyThisAttempt = false;
       attemptCount = attempt;
       state.attempt = attempt;
       state.phase = 'waiting_headers';
@@ -1427,12 +1468,6 @@ async function handle(req, res, state) {
       if (attempt > 1) log(`attempt ${attempt}: recovered on a later route (previous failures: ${attempt - 1})`);
       return passthrough(res, 200, upstream.headers, buf);
     } finally {
-      // Every early continue (status repair, network, rate limit, empty stream, etc.) ends an
-      // attempt here; only an explicit history error can keep a consecutive-kind streak.
-      if (eligibleCodex && !historyThisAttempt) {
-        historyKind = null;
-        historyStreak = 0;
-      }
       clearTimeout(connectTimer);
       ac.signal.removeEventListener('abort', onParentAbort);
     }
