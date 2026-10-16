@@ -185,7 +185,27 @@ node scripts/release.mjs test-build --out C:\Temp\ag-relay-test-artifacts
 
 注：网关核心的四个 `.mjs` 与 `gateway-config.bat` 已由 `.gitattributes` 固定为不做换行符转换（`-text`），因此任何机器上检出内容与仓库内容一致、哈希唯一。此前 `.bat` 未固定：仓库内容为 LF、Windows 检出为 CRLF，两者哈希不同。下表 v0.2.0/v0.3.1 条目记录的是当时**磁盘检出**（CRLF）的值 `102865c8…`，属历史留档不回填；v0.3.2 及以后记录的是**仓库内容**（LF）的值 `9a8a483e…`。
 
-### v0.3.6（当前）
+### v0.3.7（当前）
+
+| 项 | 值 |
+| --- | --- |
+| 打包日期 | 2026-10-16 13:56（UTC+8） |
+| 本仓构建提交 | `d21462dd868b2316293cbffbd5efc61ac09ee678`（tag `v0.3.7`：仅 Codex 的两次确认后当次历史降级） |
+| 构建方式 | 维护者本机，生产更新签名；不运行安装器 |
+| 验证 | 隔离网关回归 29 项、诊断契约 17 项、默认配置 2 项、发布工具 35 项通过；1 项既有手动性能观察忽略；NSIS/MSI 更新签名与版本绑定、SHA-256、随包许可及本机路径隐私检查通过；未执行本机安装/升级 |
+| `relay-retry-proxy.mjs` sha256 | `3fdcb937602ab381535cfa57ae1cb4c97ca789153878b7f8e70cd93875fea476` |
+| `relay-supervisor.mjs` sha256 | `f2f030b46999f84afc77f7f92643075c1d1f1ddf7ad3c327fbd92f5593dff77c` |
+| `relay-start-check.mjs` sha256 | `bb54cc7255b4f570ba1bdcfda255f19f0ca0a70fa6d028d0ed4e44f8146037c4` |
+| `bounded-file-log.mjs` sha256 | `3841b877ce76e6ff37497bfbcd65e3dd4f478442dc7fff9eaf4b39612b25c205` |
+| `gateway-config.bat` sha256 | `9a8a483ec40f34fc59ef34284304c938f4a00b6813aa7486c2df501c7caf80ab` |
+| `ag-relay_0.3.7_x64-setup.exe` sha256 | `ccd3ed2dd93a9e2b2cb4c91f47a550f16079a3ce8eb0d808b34718c6831e71ac` |
+| `ag-relay_0.3.7_x64_zh-CN.msi` sha256 | `1e2f9c5c6e15b6238a41f86c16bc189c4ded62b64b154b787a8992d4201b6ca1` |
+| `third-party-sources.tar.gz` sha256 | `791bf7b4ac023e945abf88345f47488b7c7b5e9d258144d34c1c5d6947d3cb05` |
+| Release | [v0.3.7](https://github.com/xinxinxiaoxin/ag-relay/releases/tag/v0.3.7)（NSIS + MSI + 各自 `.sig` + `latest.json` + `SHA256SUMS` + 第三方源码附件） |
+
+本次仅收紧明确 Codex 请求的历史兼容恢复：连续两次同类错误后才执行一次安全剥离，修复版最多三次实际发送；新请求原样发送、不跨请求预清理。完整网页搜索的必需编号和工具配对保留，Claude 等其他客户端维持原处理。默认重试参数、超时和 402 行为未改。更新说明见 [v0.3.7](docs/releases/v0.3.7.md)。
+
+### v0.3.6（历史）
 
 | 项 | 值 |
 | --- | --- |
