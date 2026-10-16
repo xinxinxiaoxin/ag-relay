@@ -185,7 +185,27 @@ node scripts/release.mjs test-build --out C:\Temp\ag-relay-test-artifacts
 
 注：网关核心的四个 `.mjs` 与 `gateway-config.bat` 已由 `.gitattributes` 固定为不做换行符转换（`-text`），因此任何机器上检出内容与仓库内容一致、哈希唯一。此前 `.bat` 未固定：仓库内容为 LF、Windows 检出为 CRLF，两者哈希不同。下表 v0.2.0/v0.3.1 条目记录的是当时**磁盘检出**（CRLF）的值 `102865c8…`，属历史留档不回填；v0.3.2 及以后记录的是**仓库内容**（LF）的值 `9a8a483e…`。
 
-### v0.3.7（当前）
+### v0.3.8（当前）
+
+| 项 | 值 |
+| --- | --- |
+| 打包日期 | 2026-10-16 21:59（UTC+8） |
+| 本仓构建提交 | `b0594df86b331eef9d1007cd778927805ce02ca8`（tag `v0.3.8`：单实例加固、Codex 历史会话记忆与紧凑面板） |
+| 构建方式 | 维护者本机，生产更新签名；不运行安装器 |
+| 验证 | 隔离网关回归 30 项、诊断契约 17 项、主窗口唤起 2 项、单实例隔离 3 项（含三轮各五进程并发启动）、前端组件 9 项、窗口契约 6 项通过；1 项既有手动性能观察忽略；NSIS/MSI 更新签名与版本绑定、SHA-256、随包许可及本机路径隐私检查通过；未执行本机安装/升级 |
+| `relay-retry-proxy.mjs` sha256 | `dc77b56f1d4eaf19a52ce9f0d9243a2dfc57adf959c54968ef765de71c5ff901` |
+| `relay-supervisor.mjs` sha256 | `f2f030b46999f84afc77f7f92643075c1d1f1ddf7ad3c327fbd92f5593dff77c` |
+| `relay-start-check.mjs` sha256 | `bb54cc7255b4f570ba1bdcfda255f19f0ca0a70fa6d028d0ed4e44f8146037c4` |
+| `bounded-file-log.mjs` sha256 | `3841b877ce76e6ff37497bfbcd65e3dd4f478442dc7fff9eaf4b39612b25c205` |
+| `gateway-config.bat` sha256 | `9a8a483ec40f34fc59ef34284304c938f4a00b6813aa7486c2df501c7caf80ab` |
+| `ag-relay_0.3.8_x64-setup.exe` sha256 | `935a32eff096d0cde2cd2809a83db863185547528735be10c4ee0fb7122c24cc` |
+| `ag-relay_0.3.8_x64_zh-CN.msi` sha256 | `33c2279ffe15c189188f31199397c5f136a82981f08cd413acea317aa60a112c` |
+| `third-party-sources.tar.gz` sha256 | `636f6cf5ddbbaf26ef678282cc15b51f8f93c5f8c9a107508be3e8650ddc36f2` |
+| Release | [v0.3.8](https://github.com/xinxinxiaoxin/ag-relay/releases/tag/v0.3.8)（NSIS + MSI + 各自 `.sig` + `latest.json` + `SHA256SUMS` + 第三方源码附件） |
+
+本次补齐三处：重复启动改为唤起已有窗口，并堵住「互斥锁已存在、通知窗口未建好」时第二进程继续初始化的竞争；Codex 首次确认的历史错误即修复并登记会话，同一段对话之后的请求首发前预清理，同时收窄到严格识别才生效；默认窗口收紧为 1080×720，卡片改用更柔和的圆角与阴影。新增 `tauri-plugin-single-instance` 与 `tracing-attributes` 的许可取证，许可清单 726 个组件。更新说明见 [v0.3.8](docs/releases/v0.3.8.md)。
+
+### v0.3.7（历史）
 
 | 项 | 值 |
 | --- | --- |
