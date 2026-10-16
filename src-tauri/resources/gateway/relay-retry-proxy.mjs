@@ -221,6 +221,7 @@ function safeDiagnostic(record) {
 /**
  * Conservative stateless replay. Only inline message/function/custom-tool items have optional
  * item ids removed; never recurse into content, arguments, output, or call_id.
+ * In the opt-in Codex mode, complete web_search_call items retain their required ids.
  * Server-side history cannot be reconstructed or proven complete by this proxy.
  *
  * options:
@@ -229,15 +230,16 @@ function safeDiagnostic(record) {
  *   stripMessageType  – drop the redundant `type: "message"` tag (role/content stay)
  *   dropReasoning     – remove reasoning items entirely (the only lossy option)
  *   allowUnchanged    – return the original body instead of erroring when nothing changed
+ *   codexHistory      – validate and retain complete web-search history (default off)
  *
- * The id and type removals are lossless: an item id is a reference handle and the
- * message type tag is a label, so no prompt content is discarded. Only
+ * The id and type removals are lossless for the supported items with optional ids;
+ * the message type tag is a label, so no prompt content is discarded. Only
  * dropReasoning sacrifices reasoning continuity.
  */
 function repairResponsesItems(bodyBuf, options = {}) {
   const {
     stripItemIds = false, stripReasoningIds = false, stripMessageType = false,
-    dropReasoning = false, allowUnchanged = false,
+    dropReasoning = false, allowUnchanged = false, codexHistory = false,
   } = options;
   let obj;
   try { obj = JSON.parse(bodyBuf.toString('utf8')); }
@@ -254,6 +256,7 @@ function repairResponsesItems(bodyBuf, options = {}) {
   let removedTypes = 0;
   const input = [];
   const calls = new Map();
+  const completedCalls = new Set();
   for (const item of obj.input) {
     if (!item || typeof item !== 'object' || Array.isArray(item)) return { error: 'unsupported inline input item' };
     if (item.type === 'item_reference') return { error: 'item_reference requires server-side history; refusing to discard it' };
@@ -281,29 +284,47 @@ function repairResponsesItems(bodyBuf, options = {}) {
       calls.set(item.call_id, 'function_call');
     } else if (item.type === 'function_call_output') {
       if (!nonEmptyStr(item.call_id) || calls.get(item.call_id) !== 'function_call'
+          || (codexHistory && completedCalls.has(item.call_id))
           || !(typeof item.output === 'string' || Array.isArray(item.output))) {
         return { error: 'function_call_output lacks a preceding inline function_call or complete output' };
       }
+      if (codexHistory) completedCalls.add(item.call_id);
     } else if (item.type === 'custom_tool_call') {
       if (!nonEmptyStr(item.call_id) || !nonEmptyStr(item.name) || typeof item.input !== 'string'
           || calls.has(item.call_id)) return { error: 'custom_tool_call is incomplete or has a duplicate call_id' };
       calls.set(item.call_id, 'custom_tool_call');
     } else if (item.type === 'custom_tool_call_output') {
       if (!nonEmptyStr(item.call_id) || calls.get(item.call_id) !== 'custom_tool_call'
+          || (codexHistory && completedCalls.has(item.call_id))
           || !(typeof item.output === 'string' || Array.isArray(item.output))) {
         return { error: 'custom_tool_call_output lacks a preceding inline custom_tool_call or complete output' };
       }
+      if (codexHistory) completedCalls.add(item.call_id);
+    } else if (codexHistory && item.type === 'web_search_call') {
+      const action = item.action;
+      if (!nonEmptyStr(item.id) || !['in_progress', 'searching', 'completed', 'failed'].includes(item.status)
+          || !action || typeof action !== 'object' || Array.isArray(action)
+          || !(action.type === 'search' && nonEmptyStr(action.query)
+            || action.type === 'open_page' && nonEmptyStr(action.url)
+            || action.type === 'find_in_page' && nonEmptyStr(action.url) && nonEmptyStr(action.pattern))) {
+        return { error: 'web_search_call lacks a supported complete inline action' };
+      }
+      // Search ids are required, not optional resource handles. Preserve the whole item,
+      // including action extensions; never manufacture a call_id or turn it into text.
     } else {
       return { error: 'unsupported or reference-only input item; safe replay cannot be verified' };
     }
     if (Object.hasOwn(item, 'encrypted_content')) {
       return { error: 'encrypted_content on a non-reasoning item cannot be safely removed' };
     }
-    if (stripItemIds && Object.hasOwn(item, 'id')) {
+    if (stripItemIds && !(codexHistory && item.type === 'web_search_call') && Object.hasOwn(item, 'id')) {
       delete item.id;
       removedIds++;
     }
     input.push(item);
+  }
+  if (codexHistory && completedCalls.size !== calls.size) {
+    return { error: 'inline tool history is incomplete; a call lacks its output' };
   }
   if (!input.length) return { error: 'no inline message or function history would remain' };
   if (!removedReasoning && !removedIds && !removedTypes) {
@@ -318,8 +339,8 @@ function repairResponsesItems(bodyBuf, options = {}) {
 const compatibilityKeys = new Map();
 const fingerprint = (value) => createHash('sha256').update(value).digest('hex');
 
-function compatibilityIdentity(bodyBuf, headers) {
-  if (!cfg.sessionCompat) return null;
+function compatibilityIdentity(bodyBuf, headers, bypass = false) {
+  if (bypass || !cfg.sessionCompat) return null;
   let obj;
   try { obj = JSON.parse(bodyBuf.toString('utf8')); } catch { return null; }
   if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return null;
@@ -551,6 +572,15 @@ function clientClass(headers) {
   if (/^codex(?:_cli_rs|_vscode|_desktop)?(?:\/|\s|$)/.test(ua.trim())) return 'codex';
   return 'other';
 }
+// Recovery eligibility must not inherit the diagnostic classifier's explicit-header precedence.
+// Recognized non-Codex markers, including a conflicting UA, keep the existing paths.
+function strictCodex(headers) {
+  const explicit = String(headers['x-relay-client'] || '').trim().toLowerCase();
+  const ua = String(headers['user-agent'] || '').trim().toLowerCase();
+  if ((explicit && explicit !== 'codex') || /claude|zcode/.test(ua)) return false;
+  return explicit === 'codex' || /^codex(?:_cli_rs|_vscode|_desktop)?(?:\/|\s|$)/.test(ua);
+}
+
 function requestProfile(bodyBuf, headers) {
   let obj;
   try { obj = JSON.parse(bodyBuf.toString('utf8')); } catch { return { body: 'invalid_json' }; }
@@ -950,9 +980,16 @@ async function handle(req, res, state) {
   let resourceFailures = 0;
   const isResponses = req.method === 'POST' && pathname === '/v1/responses';
   const codexResourceRetry = cfg.codexResourceRetry && isResponses && clientClass(headers) === 'codex';
+  const eligibleCodex = cfg.codexResourceRetry && isResponses && strictCodex(headers);
+  let historyKind = null;
+  let historyStreak = 0;
+  let historyThisAttempt = false;
+  let historyRepairChecked = false;
+  let postRepairSends = 0;
+  let frozenHistoryKind = null;
   diagnose('received', isResponses ? { shape: summarizeResponsesBody(body) } : {});
   if (isResponses) diagnose('request_profile', requestProfile(body, headers));
-  const compatibility = isResponses ? compatibilityIdentity(body, headers) : null;
+  const compatibility = isResponses ? compatibilityIdentity(body, headers, eligibleCodex) : null;
   delete headers['x-relay-session-id'];
   delete headers['x-relay-client'];
   if (knownCompatibility(compatibility)) {
@@ -975,6 +1012,9 @@ async function handle(req, res, state) {
   let maxAttempts = cfg.maxAttempts;
   const deadline = Date.now() + cfg.totalBudgetMs;
   const outOfBudget = () => Date.now() >= deadline;
+  // A capped attempt must not spend another backoff interval before discovering the cap.
+  const retrySleep = (ms) => eligibleCodex && repairedItems && postRepairSends >= 3
+    ? Promise.resolve() : sleep(ms, ac.signal);
   // 大请求（长对话）要等更久才等到首个响应头
   const attemptTimeoutMs = connectTimeoutFor(body.length);
   log(`incoming ${req.method} ${req.url} body=${(body.length / 1024).toFixed(0)}KB ` +
@@ -990,7 +1030,7 @@ async function handle(req, res, state) {
       return 'stop';
     };
     if (!isResponses) return refuse('wrong_endpoint');
-    if (repairedStatus) return refuse('repair_exhausted');
+    if (repairedStatus || (eligibleCodex && historyRepairChecked)) return refuse('repair_exhausted');
     if (status !== 400 && status !== 200) return refuse('unexpected_status');
     let obj;
     try { obj = JSON.parse(activeBody.toString('utf8')); }
@@ -1012,11 +1052,23 @@ async function handle(req, res, state) {
   };
 
   // Called uniformly for HTTP errors, pre-commit SSE errors and 200 JSON errors.
-  const handleItemError = (message, attempt, source, status) => {
+  const handleItemError = (message, attempt, source, status, errorCode) => {
+    if (eligibleCodex) {
+      const info = { code: errorCode, message };
+      // A throttled/failing route can quote history errors without confirming that the
+      // history caused this attempt. Keep its original recovery classification instead.
+      if ((status !== 400 && status !== 200) || isPermanentError(info) || isQuotaError(info)
+          || isRetryableError(info) || isDeploymentError(info)) return null;
+    }
     const azure = isAzureResourceError(message);
     const reasoning = isReasoningItemError(message);
     if (!azure && !reasoning) return null;
     const kind = azure ? 'azure_resource_mismatch' : 'stale_reasoning_item';
+    if (eligibleCodex) {
+      historyThisAttempt = true;
+      historyStreak = historyKind === kind ? historyStreak + 1 : 1;
+      historyKind = kind;
+    }
     diagnose('item_error', { kind, source, status, shape: summarizeResponsesBody(activeBody) });
     // 两类历史错误都可能来自当前通道无法接续；无法安全改写不等于无法原样重试。
     if (codexResourceRetry && ++resourceFailures >= 5) {
@@ -1046,8 +1098,20 @@ async function handle(req, res, state) {
       return 'stop';
     };
     if (!isResponses) return fail('automatic item repair is restricted to POST /v1/responses', 'wrong_endpoint');
+    if (eligibleCodex && (historyRepairChecked || (historyStreak < 2 && !repairedItems))) {
+      lastReason = `${kind}: upstream could not access the retained response history`;
+      if (ac.signal.aborted) return 'stop';
+      if (attempt < maxAttempts && deadline - Date.now() >= cfg.minRetryWindowMs + cfg.deployDelayMs) {
+        diagnose('codex_resource_retry', { kind, source, status, resourceFailures });
+        return 'retry';
+      }
+      diagnose('codex_resource_exhausted', { kind, source, status, refusal: 'time_budget' });
+      sendRetryable(res, 503, lastReason, attempt);
+      return 'stop';
+    }
     if (repairedItems) return fail('single item-repair attempt exhausted', 'repair_exhausted');
-    const repaired = repairResponsesItems(activeBody, { stripItemIds: azure, dropReasoning: true });
+    if (eligibleCodex) historyRepairChecked = true;
+    const repaired = repairResponsesItems(activeBody, { stripItemIds: azure, dropReasoning: true, codexHistory: eligibleCodex });
     if (repaired.error) return fail(repaired.error);
     if (deadline - Date.now() < cfg.minRetryWindowMs + cfg.deployDelayMs) return fail('insufficient time budget for repair', 'time_budget');
     if (azure && rememberCompatibility(compatibility)) {
@@ -1055,9 +1119,10 @@ async function handle(req, res, state) {
     }
     activeBody = repaired.body;
     repairedItems = true;
+    if (eligibleCodex) frozenHistoryKind = kind;
     repairCount++;
     diagnose('repair_applied', { kind, source, status, removedIds: repaired.removedIds, removedReasoning: repaired.removedReasoning });
-    maxAttempts = Math.max(maxAttempts, attempt + 1);
+    maxAttempts = Math.max(maxAttempts, attempt + (eligibleCodex ? 3 : 1));
     log(`attempt ${attempt}: ${kind}: removed item ids=${repaired.removedIds}, reasoning=${repaired.removedReasoning}; single repair retry (reasoning continuity may be lost)`);
     return 'retry';
   };
@@ -1107,10 +1172,12 @@ async function handle(req, res, state) {
     return true;
   };
   const notePreCommitFailure = (attempt, source) => {
-    if (preserveResourceHistory) return;
+    if (preserveResourceHistory && !eligibleCodex) return;
     preCommitFailures++;
     maxAttempts = Math.max(maxAttempts, cfg.deployMaxAttempts);
-    if (!isResponses) return;
+    // Codex history repair requires two explicit same-kind errors; empty replies alone
+    // must neither trigger a lossy repair nor mutate the frozen/request-retained body.
+    if (!isResponses || eligibleCodex) return;
     // 1 级无损，2 次失败就做。2 级要牺牲推理连续性，所以要多 4 次失败的证据，
     // 且只在 1 级确实改动过请求体时才做 —— 若 1 级无可改之处，说明形状假设不成立，
     // 那是与形状无关的真实限流，不该拿推理连续性去赌。
@@ -1126,6 +1193,11 @@ async function handle(req, res, state) {
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     if (ac.signal.aborted || res.destroyed) return;
+    if (eligibleCodex && repairedItems && postRepairSends >= 3) {
+      diagnose('codex_resource_exhausted', { kind: frozenHistoryKind, resourceFailures,
+        refusal: 'resource_attempt_limit' });
+      return sendRetryable(res, 503, lastReason, attemptCount);
+    }
     // 剩余预算不足以支撑「再等一次 + 还可能再重试」时，就别开新尝试了：
     // 否则只会白等到客户端自己超时。
     const remaining = deadline - Date.now();
@@ -1146,6 +1218,7 @@ async function handle(req, res, state) {
     }, waitMs);
 
     try {
+      historyThisAttempt = false;
       attemptCount = attempt;
       state.attempt = attempt;
       state.phase = 'waiting_headers';
@@ -1158,6 +1231,8 @@ async function handle(req, res, state) {
         // 它的空闲连接会被下一次重试捡走（test/retry-fresh-connection.mjs 可复现），所以一律用
         // `connection: close`。代价是每条请求多一次握手（相对 20–40 秒的请求可忽略）。
         // `connection` 是逐跳头，站点看到的其它请求头与指纹没有任何变化。
+        // Count actual fetch calls, even when no HTTP response arrives (network failure).
+        if (eligibleCodex && repairedItems) postRepairSends++;
         upstream = await fetch(target, {
           method: req.method,
           headers: { ...headers, connection: 'close' },
@@ -1178,7 +1253,7 @@ async function handle(req, res, state) {
         log(`attempt ${attempt}: ${lastReason}`);
         // 连接超时/失败属于通道抖动：放宽次数、缩短间隔，快速换通道
         maxAttempts = Math.max(maxAttempts, cfg.deployMaxAttempts);
-        if (attempt < maxAttempts) { await sleep(cfg.deployDelayMs, ac.signal); continue; }
+        if (attempt < maxAttempts) { await retrySleep(cfg.deployDelayMs); continue; }
         return sendRetryable(res, 502, lastReason, attempt);
       } finally {
         clearTimeout(connectTimer);   // 已拿到响应头，后续由 peek 的读取超时接管
@@ -1195,15 +1270,18 @@ async function handle(req, res, state) {
         try { errorInfo = errorInfoFromJson(JSON.parse(text)); errorMessage = errorInfo?.message || ''; } catch { /* not an error envelope */ }
         const statusAction = handleStatusError(errorMessage, attempt, 'http_error', upstream.status);
         if (statusAction === 'stop') return;
-        if (statusAction === 'retry') { await sleep(cfg.deployDelayMs, ac.signal); continue; }
-        const itemAction = handleItemError(httpErrorMessage(text), attempt, 'http_error', upstream.status);
+        if (statusAction === 'retry') { await retrySleep(cfg.deployDelayMs); continue; }
+        const itemAction = handleItemError(httpErrorMessage(text), attempt, 'http_error', upstream.status, errorInfo?.code);
         if (itemAction === 'stop') return;
-        if (itemAction === 'retry') { await sleep(cfg.deployDelayMs, ac.signal); continue; }
+        if (itemAction === 'retry') { await retrySleep(cfg.deployDelayMs); continue; }
 
         // 「找不到部署」是通道抖动，优先按可重试处理（换通道重试有机会命中）。
         const isDeploy = DEPLOYMENT_TEXT.test(text);
         // 其余 5xx 里混着确定性错误：内容被审核拦、模型/参数不对等，重试纯属白烧额度。
-        if (isDeterministicError(errorInfo) || (!isDeploy && isDeterministicBodyError(text))) {
+        // For scoped Codex recovery, a parsed invalid_request_error envelope is not
+        // itself evidence of a permanent failure; classify its message and code instead.
+        const deterministicBody = isDeterministicBodyError(eligibleCodex && errorInfo ? errorMessage : text);
+        if (isDeterministicError(errorInfo) || (!isDeploy && deterministicBody)) {
           lastReason = `HTTP ${upstream.status} deterministic error: ${snippet(buf)}`;
           log(`attempt ${attempt}: ${lastReason}`);
           log('  -> deterministic error, not retrying');
@@ -1217,12 +1295,12 @@ async function handle(req, res, state) {
           maxAttempts = Math.max(maxAttempts, cfg.deployMaxAttempts);
           if (attempt < maxAttempts) {
             log('  -> deployment missing on this route, retrying for another route');
-            await sleep(cfg.deployDelayMs, ac.signal);
+            await retrySleep(cfg.deployDelayMs);
             continue;
           }
           return sendRetryable(res, 429, lastReason, attempt);
         }
-        if (attempt < maxAttempts) { await sleep(backoffMs(attempt), ac.signal); continue; }
+        if (attempt < maxAttempts) { await retrySleep(backoffMs(attempt)); continue; }
         return sendRetryable(res, upstream.status === 429 ? 429 : 503, lastReason, attempt);
       }
 
@@ -1255,10 +1333,10 @@ async function handle(req, res, state) {
         }
         const statusAction = handleStatusError(outcome.errorMessage, attempt, 'sse_precommit', upstream.status);
         if (statusAction === 'stop') return;
-        if (statusAction === 'retry') { await sleep(cfg.deployDelayMs, ac.signal); continue; }
-        const itemAction = handleItemError(outcome.errorMessage, attempt, 'sse_precommit', upstream.status);
+        if (statusAction === 'retry') { await retrySleep(cfg.deployDelayMs); continue; }
+        const itemAction = handleItemError(outcome.errorMessage, attempt, 'sse_precommit', upstream.status, outcome.errorCode);
         if (itemAction === 'stop') return;
-        if (itemAction === 'retry') { await sleep(cfg.deployDelayMs, ac.signal); continue; }
+        if (itemAction === 'retry') { await retrySleep(cfg.deployDelayMs); continue; }
         if (outcome.permanent) {                // 确认的确定性错误：不重试，直接失败
           log(outcome.quota
             ? '  -> quota exhausted, not retrying (switch model or wait for the pool to refill)'
@@ -1269,7 +1347,7 @@ async function handle(req, res, state) {
           maxAttempts = Math.max(maxAttempts, cfg.deployMaxAttempts);
           if (attempt < maxAttempts) {
             log('  -> deployment missing on this route, retrying for another route');
-            await sleep(cfg.deployDelayMs, ac.signal);
+            await retrySleep(cfg.deployDelayMs);
             continue;
           }
         }
@@ -1277,14 +1355,14 @@ async function handle(req, res, state) {
           notePreCommitFailure(attempt, 'sse_precommit');
           if (attempt < maxAttempts) {
             log('  -> upstream closed the stream with no content, retrying for another route');
-            await sleep(cfg.deployDelayMs, ac.signal);
+            await retrySleep(cfg.deployDelayMs);
             continue;
           }
         }
         // 200 流内可重试错误（生产实测 154/154 都是 rate_limit_exceeded）刻意不做形状修复：
         // 实测把 item id 和 reasoning 都摘干净之后，请求仍然被限流 5~21 次 —— 形状不是触发条件，
         // 再改请求体只是白白损失推理连续性。这里保持纯重试。
-        if (attempt < maxAttempts) { await sleep(backoffMs(attempt), ac.signal); continue; }
+        if (attempt < maxAttempts) { await retrySleep(backoffMs(attempt)); continue; }
         return sendRetryable(res, 429, lastReason, attempt);
       }
 
@@ -1299,10 +1377,10 @@ async function handle(req, res, state) {
       if (info) {
         const statusAction = handleStatusError(info.message, attempt, 'json_error', upstream.status);
         if (statusAction === 'stop') return;
-        if (statusAction === 'retry') { await sleep(cfg.deployDelayMs, ac.signal); continue; }
-        const itemAction = handleItemError(info.message, attempt, 'json_error', upstream.status);
+        if (statusAction === 'retry') { await retrySleep(cfg.deployDelayMs); continue; }
+        const itemAction = handleItemError(info.message, attempt, 'json_error', upstream.status, info.code);
         if (itemAction === 'stop') return;
-        if (itemAction === 'retry') { await sleep(cfg.deployDelayMs, ac.signal); continue; }
+        if (itemAction === 'retry') { await retrySleep(cfg.deployDelayMs); continue; }
       }
       if (info && isQuotaError(info)) {         // 配额耗尽：不重试，返回 402
         lastReason = `HTTP 200 but body was an error: ${info.code || ''} ${info.message}`;
@@ -1322,7 +1400,7 @@ async function handle(req, res, state) {
         maxAttempts = Math.max(maxAttempts, cfg.deployMaxAttempts);
         if (attempt < maxAttempts) {
           log('  -> deployment missing on this route, retrying for another route');
-          await sleep(cfg.deployDelayMs, ac.signal);
+          await retrySleep(cfg.deployDelayMs);
           continue;
         }
         return sendRetryable(res, 429, lastReason, attempt);
@@ -1330,7 +1408,7 @@ async function handle(req, res, state) {
       if (info && isRetryableError(info)) {
         lastReason = `HTTP 200 but body was an error: ${info.code || ''} ${info.message}`;
         log(`attempt ${attempt}: ${lastReason}`);
-        if (attempt < maxAttempts) { await sleep(backoffMs(attempt), ac.signal); continue; }
+        if (attempt < maxAttempts) { await retrySleep(backoffMs(attempt)); continue; }
         return sendRetryable(res, 429, lastReason, attempt);
       }
 
@@ -1340,7 +1418,7 @@ async function handle(req, res, state) {
         notePreCommitFailure(attempt, 'json_empty');
         if (attempt < maxAttempts) {
           log('  -> upstream closed the stream with no content, retrying for another route');
-          await sleep(cfg.deployDelayMs, ac.signal);
+          await retrySleep(cfg.deployDelayMs);
           continue;
         }
         return sendRetryable(res, 429, lastReason, attempt);
@@ -1349,6 +1427,12 @@ async function handle(req, res, state) {
       if (attempt > 1) log(`attempt ${attempt}: recovered on a later route (previous failures: ${attempt - 1})`);
       return passthrough(res, 200, upstream.headers, buf);
     } finally {
+      // Every early continue (status repair, network, rate limit, empty stream, etc.) ends an
+      // attempt here; only an explicit history error can keep a consecutive-kind streak.
+      if (eligibleCodex && !historyThisAttempt) {
+        historyKind = null;
+        historyStreak = 0;
+      }
       clearTimeout(connectTimer);
       ac.signal.removeEventListener('abort', onParentAbort);
     }

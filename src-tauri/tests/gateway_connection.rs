@@ -409,12 +409,133 @@ fn wait_retry_status(port: u16, check: impl Fn(&serde_json::Value) -> bool) {
 }
 
 fn responses_request(port: u16, body: &str, client: &str) -> String {
+    responses_request_with_headers(port, body, &[("X-Relay-Client", client)])
+}
+
+fn responses_request_with_headers(port: u16, body: &str, headers: &[(&str, &str)]) -> String {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
-    stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
-    write!(stream, "POST /v1/responses HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer fixture-only-not-a-key\r\nContent-Type: application/json\r\nX-Relay-Client: {client}\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(15))).unwrap();
+    write!(stream, "POST /v1/responses HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer fixture-only-not-a-key\r\nContent-Type: application/json\r\n").unwrap();
+    for (key, value) in headers {
+        assert!(!key.contains(['\r', '\n']) && !value.contains(['\r', '\n']));
+        write!(stream, "{key}: {value}\r\n").unwrap();
+    }
+    write!(stream, "Content-Length: {}\r\n\r\n{body}", body.len()).unwrap();
     let mut response = String::new();
     stream.read_to_string(&mut response).unwrap();
     response
+}
+
+#[test]
+fn 重试边界_codex同类历史错误两次原样后第三次才修复() {
+    let error = r#"{"error":{"type":"invalid_request_error","message":"encrypted content could not be verified"}}"#;
+    let body = r#" {"model":"gpt-6.1-sol","store":false,"input":[{"type":"message","id":"msg_fixture","role":"user","content":"fixture prompt"},{"type":"reasoning","id":"rs_fixture","encrypted_content":"fixture ciphertext"}]} "#;
+    let expected = serde_json::json!({
+        "model": "gpt-6.1-sol", "store": false,
+        "input": [{"type": "message", "id": "msg_fixture", "role": "user", "content": "fixture prompt"}]
+    });
+    let failure = upstream_reply(400, "application/json", error);
+    let upstream = RetryUpstream::new(vec![failure.clone(), failure, upstream_reply(200, "application/json", r#"{"ok":true}"#)]);
+    let port = free_port();
+    let mut fixture = Fixture::new("codex-two-original-http", &upstream.url, port);
+    fixture.gateway.start().unwrap();
+    let response = responses_request(port, body, "codex");
+    assert_eq!(upstream.attempts(), 3, "同类历史错误应先发两次原始请求，再发一次修复版：{response}");
+    assert!(response.contains(r#"{"ok":true}"#));
+    let captured = upstream.bodies();
+    assert_eq!(captured[0], body.as_bytes());
+    assert_eq!(captured[1], body.as_bytes(), "第二次发送必须保留原始字节，不能提前删除历史");
+    assert_eq!(serde_json::from_slice::<serde_json::Value>(&captured[2]).unwrap(), expected, "第三次仅删除失效推理，消息 id 仍保留");
+    let diagnostics = std::fs::read_to_string(fixture.dir.join("logs/diagnostics.jsonl")).unwrap();
+    let repairs = diagnostics.lines().filter(|line| {
+        serde_json::from_str::<serde_json::Value>(line).unwrap()["event"] == "repair_applied"
+    }).count();
+    assert_eq!(repairs, 1, "当次请求只有一次修复");
+}
+
+#[test]
+fn 重试边界_codex跨资源修复完整网页搜索时保留必需字段() {
+    let error = r#"{"error":{"type":"invalid_request_error","message":"The requested item was created under a different Azure OpenAI resource"}}"#;
+    let body = r#" {"model":"gpt-6.1-sol","store":false,"reasoning":{"effort":"high"},"input":[{"type":"message","id":"msg_fixture","role":"user","content":"fixture prompt"},{"type":"reasoning","id":"rs_fixture","encrypted_content":"fixture ciphertext"},{"type":"web_search_call","id":"ws_search","status":"completed","action":{"type":"search","query":"fixture query","sources":[{"type":"url","url":"https://example.invalid/fixture"}]}},{"type":"web_search_call","id":"ws_open","status":"in_progress","action":{"type":"open_page","url":"https://example.invalid/fixture"}},{"type":"web_search_call","id":"ws_find","status":"searching","action":{"type":"find_in_page","url":"https://example.invalid/fixture","pattern":"fixture"}},{"type":"web_search_call","id":"ws_failed","status":"failed","action":{"type":"search","query":"fixture failed query"}},{"type":"function_call","id":"fc_fixture","call_id":"call_function","name":"fixture_function","arguments":"{\"id\":\"nested_id\"}"},{"type":"function_call_output","id":"fco_fixture","call_id":"call_function","output":"fixture function result"},{"type":"custom_tool_call","id":"ct_fixture","call_id":"call_custom","name":"fixture_tool","input":"{\"encrypted_content\":\"nested_keep\"}"},{"type":"custom_tool_call_output","id":"cto_fixture","call_id":"call_custom","output":[{"type":"input_text","text":"fixture tool result"}]}]} "#;
+    let expected = serde_json::json!({
+        "model": "gpt-6.1-sol", "store": false, "reasoning": {"effort": "high"},
+        "input": [
+            {"type": "message", "role": "user", "content": "fixture prompt"},
+            {"type": "web_search_call", "id": "ws_search", "status": "completed",
+             "action": {"type": "search", "query": "fixture query", "sources": [{"type": "url", "url": "https://example.invalid/fixture"}]}},
+            {"type": "web_search_call", "id": "ws_open", "status": "in_progress",
+             "action": {"type": "open_page", "url": "https://example.invalid/fixture"}},
+            {"type": "web_search_call", "id": "ws_find", "status": "searching",
+             "action": {"type": "find_in_page", "url": "https://example.invalid/fixture", "pattern": "fixture"}},
+            {"type": "web_search_call", "id": "ws_failed", "status": "failed",
+             "action": {"type": "search", "query": "fixture failed query"}},
+            {"type": "function_call", "call_id": "call_function", "name": "fixture_function", "arguments": "{\"id\":\"nested_id\"}"},
+            {"type": "function_call_output", "call_id": "call_function", "output": "fixture function result"},
+            {"type": "custom_tool_call", "call_id": "call_custom", "name": "fixture_tool", "input": "{\"encrypted_content\":\"nested_keep\"}"},
+            {"type": "custom_tool_call_output", "call_id": "call_custom", "output": [{"type": "input_text", "text": "fixture tool result"}]}
+        ]
+    });
+    for (carrier, status, ct, error_body) in [
+        ("http", 400, "application/json", error.to_string()),
+        ("json", 200, "application/json", error.to_string()),
+        ("sse", 200, "text/event-stream", format!("data: {error}\n\n")),
+    ] {
+        let failure = upstream_reply(status, ct, &error_body);
+        let upstream = RetryUpstream::new(vec![failure.clone(), failure, upstream_reply(200, "application/json", r#"{"ok":true}"#)]);
+        let port = free_port();
+        let mut fixture = Fixture::new(&format!("codex-web-search-{carrier}"), &upstream.url, port);
+        fixture.gateway.start().unwrap();
+        let response = responses_request(port, body, "codex");
+        assert_eq!(upstream.attempts(), 3, "{carrier} 完整搜索历史应在两次同类错误后安全修复：{response}");
+        assert!(response.contains(r#"{"ok":true}"#));
+        let captured = upstream.bodies();
+        assert_eq!(captured[0], body.as_bytes());
+        assert_eq!(captured[1], body.as_bytes());
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&captured[2]).unwrap(), expected, "{carrier} 删除推理和可省略的消息 id，但搜索 id/action/status/type 与新推理配置必须原样保留");
+        let diagnostics = std::fs::read_to_string(fixture.dir.join("logs/diagnostics.jsonl")).unwrap();
+        let repairs = diagnostics.lines().filter(|line| {
+            serde_json::from_str::<serde_json::Value>(line).unwrap()["event"] == "repair_applied"
+        }).count();
+        assert_eq!(repairs, 1);
+        for sensitive in ["fixture-only-not-a-key", "fixture ciphertext", "fixture prompt", "fixture query"] {
+            assert!(!diagnostics.contains(sensitive));
+        }
+    }
+}
+
+#[test]
+fn 重试边界_codex修复后的普通临时错误也计入三次发送上限() {
+    let error = r#"{"error":{"type":"invalid_request_error","message":"encrypted content could not be verified"}}"#;
+    let body = r#" {"input":[{"type":"message","id":"msg_fixture","role":"user","content":"fixture prompt"},{"type":"reasoning","id":"rs_fixture","encrypted_content":"fixture ciphertext"}]} "#;
+    let expected = serde_json::json!({"input": [
+        {"type": "message", "id": "msg_fixture", "role": "user", "content": "fixture prompt"}
+    ]});
+    for (name, temporary) in [
+        ("503", upstream_reply(503, "application/json", r#"{"error":{"type":"server_error","message":"fixture temporary outage"}}"#)),
+        ("429", upstream_reply(429, "application/json", r#"{"error":{"code":"rate_limit_exceeded","message":"fixture rate limit"}}"#)),
+    ] {
+        let history = upstream_reply(400, "application/json", error);
+        let upstream = RetryUpstream::new(vec![
+            history.clone(), history, temporary.clone(), temporary.clone(), temporary,
+            upstream_reply(200, "application/json", r#"{"ok":true}"#),
+        ]);
+        let port = free_port();
+        let mut fixture = Fixture::new(&format!("codex-postrepair-{name}-cap"), &upstream.url, port);
+        fixture.gateway.start().unwrap();
+        let response = responses_request(port, body, "codex");
+        assert_eq!(upstream.attempts(), 5, "修复后的三次真实发送包含{name}，不能借用普通重试上限继续第六次：{response}");
+        assert!(response.starts_with("HTTP/1.1 503"), "应有限结束并返回可重试的耗尽错误，而非读取第六条成功哨兵：{response}");
+        assert!(!response.contains(r#"{"ok":true}"#));
+        let captured = upstream.bodies();
+        assert_eq!(captured[0], body.as_bytes());
+        assert_eq!(captured[1], body.as_bytes());
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&captured[2]).unwrap(), expected);
+        assert!(captured[2..].iter().all(|sent| sent == &captured[2]), "三次修复版发送必须使用同一份冻结字节");
+        let diagnostics = std::fs::read_to_string(fixture.dir.join("logs/diagnostics.jsonl")).unwrap();
+        let rows: Vec<serde_json::Value> = diagnostics.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        assert_eq!(rows.iter().filter(|r| r["event"] == "repair_applied").count(), 1);
+        assert!(rows.iter().any(|r| r["event"] == "codex_resource_exhausted" && r["refusal"] == "resource_attempt_limit"));
+    }
 }
 
 #[test]
@@ -427,19 +548,394 @@ fn 重试边界_自定义工具历史可修复失效推理而不丢失调用记�
         ("json", 200, "application/json", error.to_string()),
         ("sse", 200, "text/event-stream", format!("data: {error}\n\n")),
     ] {
-        let upstream = RetryUpstream::new(vec![upstream_reply(status, ct, &error_body), upstream_reply(200, "application/json", r#"{"ok":true}"#)]);
+        let failure = upstream_reply(status, ct, &error_body);
+        let upstream = RetryUpstream::new(vec![failure.clone(), failure, upstream_reply(200, "application/json", r#"{"ok":true}"#)]);
         let port = free_port();
         let mut fixture = Fixture::new(&format!("custom-reasoning-{carrier}"), &upstream.url, port);
         fixture.gateway.start().unwrap();
         let response = responses_request(port, body, "codex");
-        assert_eq!(upstream.attempts(), 2, "{carrier} 完整的自定义工具历史不能阻断既有推理修复：{response}");
+        assert_eq!(upstream.attempts(), 3, "{carrier} 完整的自定义工具历史应在两次同类错误后第三次修复：{response}");
         assert!(response.contains(r#"{"ok":true}"#));
         let captured = upstream.bodies();
         assert_eq!(captured[0], body.as_bytes());
-        assert_eq!(serde_json::from_slice::<serde_json::Value>(&captured[1]).unwrap(), expected, "{carrier} 只删除失效推理，完整保留两类工具、调用编号、输入与结果");
+        assert_eq!(captured[1], body.as_bytes(), "{carrier} 第二次仍发送原始历史");
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&captured[2]).unwrap(), expected, "{carrier} 只删除失效推理，完整保留两类工具、调用编号、输入与结果");
         let diagnostics = std::fs::read_to_string(fixture.dir.join("logs/diagnostics.jsonl")).unwrap();
-        assert!(diagnostics.contains("repair_applied"));
+        assert_eq!(diagnostics.lines().filter(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()["event"] == "repair_applied").count(), 1);
         for sensitive in ["fixture-only-not-a-key", "fixture ciphertext", "fixture prompt", "fixture tool result"] {
+            assert!(!diagnostics.contains(sensitive));
+        }
+    }
+}
+
+#[test]
+fn 重试边界_codex原样或修复后等待及读流期间取消不重放() {
+    let body = r#" {"input":[{"type":"message","id":"msg_fixture","role":"user","content":"fixture prompt"},{"type":"reasoning","id":"rs_fixture","encrypted_content":"fixture ciphertext"}]} "#;
+    let history = upstream_reply(400, "application/json", r#"{"error":{"type":"invalid_request_error","message":"encrypted content could not be verified"}}"#);
+    for (name, replies, sends) in [
+        ("original-wait", vec![history.clone()], 1),
+        ("repaired-wait", vec![history.clone(), history.clone(), upstream_reply(503, "application/json", r#"{"error":{"code":"server_error"}}"#)], 3),
+    ] {
+        let upstream = RetryUpstream::new(replies);
+        let port = free_port();
+        let mut fixture = Fixture::new(&format!("codex-cancel-{name}"), &upstream.url, port);
+        fixture.gateway.start().unwrap();
+        let mut client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        write!(client, "POST /v1/responses HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nX-Relay-Client: codex\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(6);
+        while upstream.attempts() < sends {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        std::thread::sleep(Duration::from_millis(25));
+        client.shutdown(std::net::Shutdown::Both).unwrap();
+        drop(client);
+        wait_retry_status(port, |s| s["activeRequests"] == 0);
+        std::thread::sleep(Duration::from_millis(1200));
+        assert_eq!(upstream.attempts(), sends, "{name} 取消后不再访问下一通道");
+        assert_eq!(upstream.bodies()[0], body.as_bytes());
+    }
+    // 明确 Codex 正在读已交付的流时取消，也应断开自己持有的上游连接。
+    use std::sync::mpsc;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+    let (tx, rx) = mpsc::channel();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        let mut request = Vec::new();
+        let mut buf = [0; 4096];
+        let header_end = loop {
+            let count = stream.read(&mut buf).unwrap();
+            assert!(count > 0);
+            request.extend_from_slice(&buf[..count]);
+            if let Some(index) = request.windows(4).position(|w| w == b"\r\n\r\n") { break index + 4; }
+        };
+        let headers = String::from_utf8_lossy(&request[..header_end]);
+        let length = headers.lines().find_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            key.eq_ignore_ascii_case("content-length").then(|| value.trim().parse::<usize>().unwrap())
+        }).unwrap();
+        while request.len() < header_end + length {
+            let count = stream.read(&mut buf).unwrap();
+            assert!(count > 0);
+            request.extend_from_slice(&buf[..count]);
+        }
+        assert_eq!(&request[header_end..], body.as_bytes());
+        stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"fixture text\"}\n\n").unwrap();
+        tx.send(()).unwrap();
+        match stream.read(&mut buf) {
+            Ok(0) => true,
+            Err(e) => matches!(e.kind(), std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted),
+            _ => false,
+        }
+    });
+    let port = free_port();
+    let mut fixture = Fixture::new("codex-cancel-reading-stream", &url, port);
+    fixture.gateway.start().unwrap();
+    let mut client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    write!(client, "POST /v1/responses HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nX-Relay-Client: codex\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
+    rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    wait_retry_status(port, |s| s["requests"][0]["phase"] == "text_output");
+    client.shutdown(std::net::Shutdown::Both).unwrap();
+    drop(client);
+    assert!(server.join().unwrap(), "取消须立即关闭隔离上游流，不等读取超时");
+    wait_retry_status(port, |s| s["activeRequests"] == 0);
+}
+
+#[test]
+fn 重试边界_codex空回不绕过门槛且修复版冻结状态字段() {
+    let stale = upstream_reply(400, "application/json", r#"{"error":{"type":"invalid_request_error","message":"encrypted content could not be verified"}}"#);
+    let empty = upstream_reply(200, "text/event-stream", "");
+    let success = upstream_reply(200, "application/json", r#"{"ok":true}"#);
+    let body = r#" {"input":[{"type":"message","id":"msg_fixture","status":"completed","role":"user","content":"fixture prompt"},{"type":"reasoning","id":"rs_fixture","encrypted_content":"fixture ciphertext"}]} "#;
+    let expected = serde_json::json!({"input": [{"type": "message", "id": "msg_fixture", "status": "completed", "role": "user", "content": "fixture prompt"}]});
+    for (name, replies, sends, repair_sends) in [
+        ("empty-only", vec![empty.clone(), empty.clone(), success.clone()], 3, 0),
+        ("empty-after-repair", vec![stale.clone(), stale.clone(), empty.clone(), empty, success.clone()], 5, 3),
+        ("status-after-repair", vec![stale.clone(), stale, upstream_reply(400, "application/json", r#"{"error":{"type":"invalid_request_error","message":"Unknown parameter: 'input[0].status'."}}"#), success], 3, 1),
+    ] {
+        let upstream = RetryUpstream::new(replies);
+        let port = free_port();
+        let mut fixture = Fixture::new(&format!("codex-frozen-body-{name}"), &upstream.url, port);
+        fixture.gateway.start().unwrap();
+        let response = responses_request(port, body, "codex");
+        assert_eq!(upstream.attempts(), sends, "{name} 不能追加形状或状态剥离：{response}");
+        let captured = upstream.bodies();
+        if repair_sends == 0 {
+            assert!(captured.iter().all(|sent| sent == body.as_bytes()), "空回本身不满足明确历史错误门槛");
+        } else {
+            assert_eq!(captured[0], body.as_bytes());
+            assert_eq!(captured[1], body.as_bytes());
+            assert_eq!(serde_json::from_slice::<serde_json::Value>(&captured[2]).unwrap(), expected);
+            assert!(captured[2..].iter().all(|sent| sent == &captured[2]), "修复B冻结后不得移message id/type/status");
+        }
+        if name == "status-after-repair" {
+            assert!(response.starts_with("HTTP/1.1 400"));
+            assert!(!response.contains(r#"{"ok":true}"#));
+        } else {
+            assert!(response.contains(r#"{"ok":true}"#));
+        }
+        let diagnostics = std::fs::read_to_string(fixture.dir.join("logs/diagnostics.jsonl")).unwrap();
+        let rows: Vec<serde_json::Value> = diagnostics.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        assert_eq!(rows.iter().filter(|r| r["event"] == "repair_applied").count(), usize::from(repair_sends > 0));
+        assert!(!rows.iter().any(|r| r["event"] == "status_repair_applied" || r["event"] == "session_compat_enabled"));
+    }
+    // 预算只改自建副本，首个历史错误后不足以支持下一次，不能延长原预算。
+    let upstream = RetryUpstream::new(vec![upstream_reply(400, "application/json", r#"{"error":{"type":"invalid_request_error","message":"encrypted content could not be verified"}}"#)]);
+    let port = free_port();
+    let mut fixture = Fixture::new("codex-short-history-budget", &upstream.url, port);
+    let script = fixture.dir.join("gateway/relay-retry-proxy.mjs");
+    let original = std::fs::read_to_string(&script).unwrap();
+    std::fs::write(script, original.replacen('\n', "\nprocess.env.PROXY_TOTAL_BUDGET_MS = '1000';\n", 1)).unwrap();
+    fixture.gateway.start().unwrap();
+    let response = responses_request(port, body, "codex");
+    assert!(response.starts_with("HTTP/1.1 503"));
+    assert_eq!(upstream.attempts(), 1);
+    assert_eq!(upstream.bodies()[0], body.as_bytes());
+    let diagnostics = std::fs::read_to_string(fixture.dir.join("logs/diagnostics.jsonl")).unwrap();
+    assert!(!diagnostics.lines().any(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()["event"] == "repair_applied"));
+}
+
+#[test]
+fn 重试边界_codex网页搜索缺失必需字段或未知动作时原样重试() {
+    let valid = serde_json::json!({"type": "web_search_call", "id": "ws_fixture", "status": "completed", "action": {"type": "search", "query": "fixture query"}});
+    let mut cases = Vec::new();
+    for field in ["id", "status", "action", "type"] {
+        let mut item = valid.clone();
+        item.as_object_mut().unwrap().remove(field);
+        cases.push((format!("missing-{field}"), item));
+    }
+    for (name, action) in [
+        ("missing-action-type", serde_json::json!({"query": "fixture query"})),
+        ("missing-search-query", serde_json::json!({"type": "search"})),
+        ("missing-open-url", serde_json::json!({"type": "open_page"})),
+        ("missing-find-pattern", serde_json::json!({"type": "find_in_page", "url": "https://example.invalid/fixture"})),
+        ("missing-find-url", serde_json::json!({"type": "find_in_page", "pattern": "fixture"})),
+        ("empty-search-query", serde_json::json!({"type": "search", "query": ""})),
+        ("unknown-action", serde_json::json!({"type": "future_action", "query": "fixture query"})),
+    ] {
+        let mut item = valid.clone();
+        item["action"] = action;
+        cases.push((name.to_string(), item));
+    }
+    let mut item = valid;
+    item["status"] = serde_json::json!("future_status");
+    cases.push(("unknown-status".to_string(), item));
+    let failure = upstream_reply(400, "application/json", r#"{"error":{"type":"invalid_request_error","message":"The requested item was created under a different Azure OpenAI resource"}}"#);
+    let success = upstream_reply(200, "application/json", r#"{"ok":true}"#);
+    let replies = cases.iter().flat_map(|_| [failure.clone(), failure.clone(), success.clone()]).collect();
+    let upstream = RetryUpstream::new(replies);
+    let port = free_port();
+    let mut fixture = Fixture::new("codex-incomplete-web-search", &upstream.url, port);
+    fixture.gateway.start().unwrap();
+    for (index, (name, item)) in cases.into_iter().enumerate() {
+        let obj = serde_json::json!({"input": [
+            {"type": "message", "id": "msg_fixture", "role": "user", "content": "fixture prompt"},
+            {"type": "reasoning", "id": "rs_fixture", "encrypted_content": "fixture ciphertext"}, item
+        ]});
+        let body = format!(" {obj} ");
+        assert!(responses_request(port, &body, "codex").contains(r#"{"ok":true}"#), "{name} 安全检查拒绝仍可换通道成功");
+        assert_eq!(upstream.attempts(), (index + 1) * 3);
+        let captured = upstream.bodies();
+        assert!(captured[index * 3..].iter().all(|sent| sent == body.as_bytes()), "{name} 不得补字段、转成正文或删除必需搜索字段");
+    }
+    let diagnostics = std::fs::read_to_string(fixture.dir.join("logs/diagnostics.jsonl")).unwrap();
+    assert!(!diagnostics.lines().any(|line| {
+        let r: serde_json::Value = serde_json::from_str(line).unwrap();
+        r["event"] == "repair_applied" || r["event"] == "session_compat_applied"
+    }));
+}
+
+#[test]
+fn 重试边界_codex新连接同会话不预清理而其他客户端保留缓存() {
+    let error = r#"{"error":{"type":"invalid_request_error","message":"The requested item was created under a different Azure OpenAI resource"}}"#;
+    let body = r#" {"model":"gpt-6.1-sol","input":[{"type":"message","id":"msg_fixture","role":"user","content":"fixture prompt"},{"type":"reasoning","id":"rs_fixture","encrypted_content":"fixture ciphertext"}]} "#;
+    let cleaned = serde_json::json!({"model": "gpt-6.1-sol", "input": [{"type": "message", "role": "user", "content": "fixture prompt"}]});
+    for (name, marker, codex) in [
+        ("explicit-codex", ("X-Relay-Client", "codex"), true),
+        ("ua-codex", ("User-Agent", "codex_cli_rs/0.100.0"), true),
+        ("claude", ("X-Relay-Client", "claude"), false),
+        ("zcode", ("X-Relay-Client", "zcode"), false),
+        ("unknown", ("User-Agent", "fixture-unknown/1.0"), false),
+    ] {
+        let failure = upstream_reply(400, "application/json", error);
+        let success = upstream_reply(200, "application/json", r#"{"ok":true}"#);
+        let replies = if codex { vec![failure.clone(), failure, success.clone(), success] }
+            else { vec![failure, success.clone(), success] };
+        let upstream = RetryUpstream::new(replies);
+        let port = free_port();
+        let mut fixture = Fixture::new(&format!("codex-session-isolation-{name}"), &upstream.url, port);
+        fixture.gateway.start().unwrap();
+        let headers = [marker, ("X-Relay-Session-Id", "fixture-shared-session")];
+        assert!(responses_request_with_headers(port, body, &headers).contains(r#"{"ok":true}"#));
+        let first_sends = if codex { 3 } else { 2 };
+        assert_eq!(upstream.attempts(), first_sends);
+        // 每次 helper 都创建新的客户端 TCP 连接，但保持会话名与鉴权完全相同。
+        assert!(responses_request_with_headers(port, body, &headers).contains(r#"{"ok":true}"#));
+        assert_eq!(upstream.attempts(), first_sends + 1);
+        let captured = upstream.bodies();
+        assert_eq!(captured[0], body.as_bytes());
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&captured[first_sends - 1]).unwrap(), cleaned);
+        if codex {
+            assert_eq!(captured[1], body.as_bytes());
+            assert_eq!(captured[first_sends], body.as_bytes(), "{name} 上次修复不能影响新客户端请求首试");
+        } else {
+            assert_eq!(serde_json::from_slice::<serde_json::Value>(&captured[first_sends]).unwrap(), cleaned, "{name} 应保留既有缓存预清理");
+        }
+        let diagnostics = std::fs::read_to_string(fixture.dir.join("logs/diagnostics.jsonl")).unwrap();
+        let rows: Vec<serde_json::Value> = diagnostics.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        let cached = rows.iter().filter(|r| r["event"] == "session_compat_applied").count();
+        let enabled = rows.iter().filter(|r| r["event"] == "session_compat_enabled").count();
+        assert_eq!(cached, usize::from(!codex));
+        assert_eq!(enabled, usize::from(!codex));
+        assert!(!diagnostics.contains("fixture-shared-session"));
+        assert!(!diagnostics.contains("fixture-only-not-a-key"));
+    }
+}
+
+#[test]
+fn 重试边界_codex冲突标记不进入新阶段但保留既有修复行为() {
+    let error = r#"{"error":{"type":"invalid_request_error","message":"The requested item was created under a different Azure OpenAI resource"}}"#;
+    let simple = r#" {"input":[{"type":"message","id":"msg_fixture","role":"user","content":"fixture prompt"},{"type":"reasoning","encrypted_content":"fixture ciphertext"}]} "#;
+    let web = r#" {"input":[{"type":"message","id":"msg_fixture","role":"user","content":"fixture prompt"},{"type":"reasoning","encrypted_content":"fixture ciphertext"},{"type":"web_search_call","id":"ws_fixture","status":"completed","action":{"type":"search","query":"fixture query"}}]} "#;
+    for (name, headers, legacy_codex) in [
+        ("codex-claude", [("X-Relay-Client", "codex"), ("User-Agent", "claude-desktop/1.0")], true),
+        ("codex-zcode", [("X-Relay-Client", "codex"), ("User-Agent", "zcode/1.0")], true),
+        ("claude-codex", [("X-Relay-Client", "claude"), ("User-Agent", "codex_cli_rs/0.100.0")], false),
+        ("ambiguous-ua", [("X-Relay-Client", "codex"), ("User-Agent", "codex_cli_rs/0.100.0 claude/1.0")], true),
+    ] {
+        for (history, body) in [("simple", simple), ("web", web)] {
+            let failure = upstream_reply(400, "application/json", error);
+            let success = upstream_reply(200, "application/json", r#"{"ok":true}"#);
+            let replies = if history == "simple" { vec![failure, success] }
+                else { vec![failure.clone(), failure, success] };
+            let upstream = RetryUpstream::new(replies);
+            let port = free_port();
+            let mut fixture = Fixture::new(&format!("codex-conflict-{name}-{history}"), &upstream.url, port);
+            fixture.gateway.start().unwrap();
+            let response = responses_request_with_headers(port, body, &headers);
+            let captured = upstream.bodies();
+            assert_eq!(captured[0], body.as_bytes());
+            if history == "simple" {
+                assert_eq!(upstream.attempts(), 2, "{name} 既有即时修复不能被新两次门槛改变");
+                assert!(response.contains(r#"{"ok":true}"#));
+                assert_eq!(serde_json::from_slice::<serde_json::Value>(&captured[1]).unwrap(), serde_json::json!({
+                    "input": [{"type": "message", "role": "user", "content": "fixture prompt"}]
+                }), "冲突标记允许旧分支即时删除可省略 id，不承诺完全禁止旧剥离");
+            } else {
+                assert_eq!(upstream.attempts(), if legacy_codex { 3 } else { 1 });
+                assert!(captured.iter().all(|sent| sent == body.as_bytes()), "{name} 不得进入新网页搜索安全门");
+                let diagnostics = std::fs::read_to_string(fixture.dir.join("logs/diagnostics.jsonl")).unwrap();
+                assert!(!diagnostics.lines().any(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()["event"] == "repair_applied"));
+            }
+        }
+    }
+}
+
+#[test]
+fn 重试边界_codex其他上游结果打断同类历史错误连续计数() {
+    let stale = upstream_reply(400, "application/json", r#"{"error":{"type":"invalid_request_error","message":"encrypted content could not be verified"}}"#);
+    let body = r#" {"input":[{"type":"message","id":"msg_fixture","role":"user","content":"fixture prompt"},{"type":"reasoning","id":"rs_fixture","encrypted_content":"fixture ciphertext"}]} "#;
+    let hinted_limit = r#"{"error":{"type":"invalid_request_error","code":"rate_limit_exceeded","message":"encrypted content could not be verified"}}"#;
+    let upstream = RetryUpstream::new(vec![
+        stale.clone(), upstream_reply(429, "application/json", hinted_limit),
+        upstream_reply(200, "application/json", r#"{"ok":true}"#),
+    ]);
+    let port = free_port();
+    let mut fixture = Fixture::new("codex-429-history-text-reset", &upstream.url, port);
+    fixture.gateway.start().unwrap();
+    let response = responses_request(port, body, "codex");
+    assert_eq!(upstream.attempts(), 3, "带历史错误文案的429仍是限流，应打断连续计数：{response}");
+    assert!(response.contains(r#"{"ok":true}"#));
+    assert!(upstream.bodies().iter().all(|sent| sent == body.as_bytes()), "HTTP429不能仅凭历史文案触发第二次历史错误或有损改写");
+    let diagnostics = std::fs::read_to_string(fixture.dir.join("logs/diagnostics.jsonl")).unwrap();
+    assert!(!diagnostics.lines().any(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()["event"] == "repair_applied"));
+    for (carrier, ct) in [("json", "application/json"), ("sse", "text/event-stream")] {
+        for (code, expected_sends, final_status) in [
+            ("rate_limit_exceeded", 3, 200),
+            ("server_error", 3, 200),
+            ("insufficient_quota", 2, 402),
+            ("invalid_api_key", 2, 400),
+        ] {
+            let envelope = serde_json::json!({"error": {
+                "type": "invalid_request_error", "code": code,
+                "message": "encrypted content could not be verified"
+            }}).to_string();
+            let error_body = if carrier == "sse" { format!("data: {envelope}\n\n") } else { envelope };
+            let upstream = RetryUpstream::new(vec![stale.clone(), upstream_reply(200, ct, &error_body), upstream_reply(200, "application/json", r#"{"ok":true}"#)]);
+            let port = free_port();
+            let mut fixture = Fixture::new(&format!("codex-error-code-streak-{carrier}-{code}"), &upstream.url, port);
+            fixture.gateway.start().unwrap();
+            let response = responses_request(port, body, "codex");
+            assert_eq!(upstream.attempts(), expected_sends, "{carrier}/{code} 明确错误码不能被历史文案覆盖：{response}");
+            assert!(response.starts_with(&format!("HTTP/1.1 {final_status}")), "{carrier}/{code}: {response}");
+            assert_eq!(response.contains(r#"{"ok":true}"#), expected_sends == 3);
+            assert!(upstream.bodies().iter().all(|sent| sent == body.as_bytes()), "{carrier}/{code} 不触发历史降级，必须保留原始字节");
+            let diagnostics = std::fs::read_to_string(fixture.dir.join("logs/diagnostics.jsonl")).unwrap();
+            assert!(!diagnostics.lines().any(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()["event"] == "repair_applied"));
+        }
+    }
+    for (name, interruption) in [
+        ("different-kind", upstream_reply(400, "application/json", r#"{"error":{"type":"invalid_request_error","message":"The requested item was created under a different Azure OpenAI resource"}}"#)),
+        ("429", upstream_reply(429, "application/json", r#"{"error":{"code":"rate_limit_exceeded"}}"#)),
+        ("network-close", String::new()), // 假上游已收完整请求后直接断连，不碰系统网络。
+        ("empty-json", upstream_reply(200, "application/json", r#"{"choices":[{"message":{"content":""}}]}"#)),
+        ("empty-sse", upstream_reply(200, "text/event-stream", "")),
+    ] {
+        let upstream = RetryUpstream::new(vec![stale.clone(), interruption, stale.clone(), stale.clone(), upstream_reply(200, "application/json", r#"{"ok":true}"#)]);
+        let port = free_port();
+        let mut fixture = Fixture::new(&format!("codex-streak-reset-{name}"), &upstream.url, port);
+        fixture.gateway.start().unwrap();
+        let response = responses_request(port, body, "codex");
+        assert_eq!(upstream.attempts(), 5, "{name} 中断后须重新连续两次历史错误才修复：{response}");
+        assert!(response.contains(r#"{"ok":true}"#));
+        let captured = upstream.bodies();
+        assert!(captured[..4].iter().all(|sent| sent == body.as_bytes()), "{name} 第三、第四次不能沿用被打断的历史错误计数");
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&captured[4]).unwrap(), serde_json::json!({
+            "input": [{"type": "message", "id": "msg_fixture", "role": "user", "content": "fixture prompt"}]
+        }));
+        let diagnostics = std::fs::read_to_string(fixture.dir.join("logs/diagnostics.jsonl")).unwrap();
+        assert_eq!(diagnostics.lines().filter(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()["event"] == "repair_applied").count(), 1);
+    }
+}
+
+#[test]
+fn 重试边界_codex缺失或重复工具结果时拒绝历史改写() {
+    let error = r#"{"error":{"type":"invalid_request_error","message":"encrypted content could not be verified"}}"#;
+    for (name, tools) in [
+        ("missing-output", serde_json::json!([
+            {"type": "custom_tool_call", "id": "ct_fixture", "call_id": "call_fixture", "name": "fixture_tool", "input": "fixture input"}
+        ])),
+        ("duplicate-output", serde_json::json!([
+            {"type": "custom_tool_call", "id": "ct_fixture", "call_id": "call_fixture", "name": "fixture_tool", "input": "fixture input"},
+            {"type": "custom_tool_call_output", "call_id": "call_fixture", "output": "fixture first result"},
+            {"type": "custom_tool_call_output", "call_id": "call_fixture", "output": "fixture duplicate result"}
+        ])),
+        ("compaction", serde_json::json!([{"type": "compaction", "encrypted_content": "fixture opaque history"}])),
+        ("item-reference", serde_json::json!([{"type": "item_reference", "id": "msg_remote"}])),
+        ("nonreasoning-ciphertext", serde_json::json!([{"type": "message", "role": "assistant", "content": "fixture history", "encrypted_content": "fixture opaque history"}])),
+        ("orphan-output", serde_json::json!([{"type": "custom_tool_call_output", "call_id": "missing_call", "output": "fixture result"}])),
+        ("wrong-tool-kind", serde_json::json!([
+            {"type": "function_call", "call_id": "call_fixture", "name": "fixture_function", "arguments": "{}"},
+            {"type": "custom_tool_call_output", "call_id": "call_fixture", "output": "fixture result"}
+        ])),
+    ] {
+        let body = format!(" {{\"model\":\"gpt-6.1-sol\",\"input\":[{{\"type\":\"message\",\"id\":\"msg_fixture\",\"role\":\"user\",\"content\":\"fixture prompt\"}},{{\"type\":\"reasoning\",\"id\":\"rs_fixture\",\"encrypted_content\":\"fixture ciphertext\"}},{}]}} ",
+            tools.as_array().unwrap().iter().map(serde_json::Value::to_string).collect::<Vec<_>>().join(","));
+        let failure = upstream_reply(400, "application/json", error);
+        let upstream = RetryUpstream::new(vec![failure.clone(), failure, upstream_reply(200, "application/json", r#"{"ok":true}"#)]);
+        let port = free_port();
+        let mut fixture = Fixture::new(&format!("codex-incomplete-tools-{name}"), &upstream.url, port);
+        fixture.gateway.start().unwrap();
+        let response = responses_request(port, &body, "codex");
+        assert_eq!(upstream.attempts(), 3, "{name} 不安全历史仍可有限原样重试：{response}");
+        assert!(response.contains(r#"{"ok":true}"#));
+        assert!(upstream.bodies().iter().all(|sent| sent == body.as_bytes()), "{name} 工具结果缺失或重复时，不得删除推理或任何其他字段");
+        let diagnostics = std::fs::read_to_string(fixture.dir.join("logs/diagnostics.jsonl")).unwrap();
+        let rows: Vec<serde_json::Value> = diagnostics.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        assert!(!rows.iter().any(|r| r["event"] == "repair_applied" || r["event"] == "session_compat_applied"));
+        for sensitive in ["fixture-only-not-a-key", "fixture ciphertext", "fixture input", "fixture prompt", "fixture first result", "fixture duplicate result"] {
             assert!(!diagnostics.contains(sensitive));
         }
     }
@@ -505,25 +1001,43 @@ fn 重试边界_退避期间取消后不再访问上游() {
 #[test]
 fn 重试边界_失效推理保留历史重试受上限约束() {
     let error = r#"{"error":{"type":"invalid_request_error","message":"encrypted content could not be decrypted"}}"#;
-    let body = r#"{"model":"gpt-6.1-sol","input":[{"type":"reasoning","id":"rs_fixture","encrypted_content":"fixture reasoning"},{"type":"compaction","encrypted_content":"fixture opaque history"},{"role":"user","content":"fixture"}]}"#;
-    for (carrier, status, ct, error_body) in [
-        ("http", 400, "application/json", error.to_string()),
-        ("json", 200, "application/json", error.to_string()),
-        ("sse", 200, "text/event-stream", format!("data: {error}\n\n")),
+    for (history, body, repairable) in [
+        ("opaque", r#"{"model":"gpt-6.1-sol","input":[{"type":"reasoning","id":"rs_fixture","encrypted_content":"fixture reasoning"},{"type":"compaction","encrypted_content":"fixture opaque history"},{"role":"user","content":"fixture"}]}"#, false),
+        ("inline", r#" {"model":"gpt-6.1-sol","input":[{"type":"reasoning","id":"rs_fixture","encrypted_content":"fixture reasoning"},{"type":"message","id":"msg_fixture","role":"user","content":"fixture"}]} "#, true),
     ] {
-        let upstream = RetryUpstream::new(vec![upstream_reply(status, ct, &error_body)]);
-        let port = free_port();
-        let mut fixture = Fixture::new(&format!("stale-limit-{carrier}"), &upstream.url, port);
-        fixture.gateway.start().unwrap();
-        let response = responses_request(port, body, "codex");
-        assert_eq!(upstream.attempts(), 5, "{carrier} 相同资源错误最多尝试五次，不能用默认总重试上限反复等待");
-        assert!(response.starts_with("HTTP/1.1 400"));
-        assert!(response.contains("stopping after 5 resource attempts"));
-        assert!(upstream.bodies().iter().all(|sent| sent == body.as_bytes()));
-        let diagnostics = std::fs::read_to_string(fixture.dir.join("logs/diagnostics.jsonl")).unwrap();
-        let rows: Vec<serde_json::Value> = diagnostics.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
-        assert!(rows.iter().any(|r| r["event"] == "codex_resource_exhausted" && r["kind"] == "stale_reasoning_item" && r["resourceFailures"] == 5 && r["refusal"] == "resource_attempt_limit"));
-        assert!(!diagnostics.contains("fixture reasoning"));
+        for (carrier, status, ct, error_body) in [
+            ("http", 400, "application/json", error.to_string()),
+            ("json", 200, "application/json", error.to_string()),
+            ("sse", 200, "text/event-stream", format!("data: {error}\n\n")),
+        ] {
+            let upstream = RetryUpstream::new(vec![upstream_reply(status, ct, &error_body)]);
+            let port = free_port();
+            let mut fixture = Fixture::new(&format!("stale-limit-{history}-{carrier}"), &upstream.url, port);
+            fixture.gateway.start().unwrap();
+            let response = responses_request(port, body, "codex");
+            assert_eq!(upstream.attempts(), 5, "{history}/{carrier} 历史错误最多五次，不能借用默认总重试上限");
+            assert!(response.starts_with("HTTP/1.1 400"));
+            assert!(response.contains("stopping after 5 resource attempts"));
+            let captured = upstream.bodies();
+            assert_eq!(captured[0], body.as_bytes());
+            assert_eq!(captured[1], body.as_bytes());
+            if repairable {
+                assert_eq!(serde_json::from_slice::<serde_json::Value>(&captured[2]).unwrap(), serde_json::json!({
+                    "model": "gpt-6.1-sol", "input": [{"type": "message", "id": "msg_fixture", "role": "user", "content": "fixture"}]
+                }));
+                assert!(captured[2..].iter().all(|sent| sent == &captured[2]), "后三次使用同一修复版");
+            } else {
+                assert!(captured.iter().all(|sent| sent == body.as_bytes()));
+            }
+            let diagnostics = std::fs::read_to_string(fixture.dir.join("logs/diagnostics.jsonl")).unwrap();
+            let rows: Vec<serde_json::Value> = diagnostics.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+            assert!(rows.iter().any(|r| r["event"] == "codex_resource_exhausted" && r["kind"] == "stale_reasoning_item" && r["resourceFailures"] == 5 && r["refusal"] == "resource_attempt_limit"));
+            assert_eq!(rows.iter().filter(|r| r["event"] == "repair_applied").count(), usize::from(repairable));
+            if !repairable {
+                assert_eq!(rows.iter().filter(|r| r["event"] == "repair_refused" && r["refusal"] == "unsafe_inline_history").count(), 1, "安全检查拒绝后当次不反复尝试改写");
+            }
+            assert!(!diagnostics.contains("fixture reasoning"));
+        }
     }
 }
 
@@ -671,6 +1185,17 @@ fn 重试边界_内容下发后不重新生成_成功流不改写内容() {
         assert!(response.contains(&body), "{name} 必须保留流内容和终止事件");
         assert_eq!(upstream.attempts(), 1, "已下发内容后不得重放整个请求");
     }
+    let ending = r#"{"type":"error","error":{"type":"invalid_request_error","message":"encrypted content could not be verified"}}"#;
+    let stream_body = format!("data: {{\"type\":\"response.output_text.delta\",\"delta\":\"fixture text\"}}\n\ndata: {ending}\n\n");
+    let upstream = RetryUpstream::new(vec![upstream_reply(200, "text/event-stream", &stream_body)]);
+    let port = free_port();
+    let mut fixture = Fixture::new("codex-committed-history-error", &upstream.url, port);
+    fixture.gateway.start().unwrap();
+    let body = r#" {"input":[{"type":"message","role":"user","content":"fixture prompt"},{"type":"reasoning","encrypted_content":"fixture ciphertext"}]} "#;
+    let response = responses_request(port, body, "codex");
+    assert!(response.contains(&stream_body), "Codex内容交付后的历史错误必须随原流传递");
+    assert_eq!(upstream.attempts(), 1, "新增Codex分支不能重放已交付内容");
+    assert_eq!(upstream.bodies()[0], body.as_bytes());
 }
 
 
