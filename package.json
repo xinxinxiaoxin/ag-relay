@@ -8,6 +8,8 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
+    "release:build": "node scripts/release.mjs build",
+    "release:upload": "node scripts/release.mjs upload",
     "preview": "vite preview",
     "tauri": "tauri",
     "smoke": "powershell -ExecutionPolicy Bypass -File scripts/smoke.ps1"

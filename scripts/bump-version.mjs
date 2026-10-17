@@ -91,5 +91,5 @@ console.log(`版本号已统一为 ${next}：`);
 for (const change of changes) console.log(`  ${change.file}: ${change.from} → ${next}`);
 console.log('\n下一步（详见 docs/release-runbook.md）：');
 console.log('  1) 重新核验许可清单：先证明依赖集合未变，再刷新输入指纹');
-console.log('  2) node scripts/release.mjs preflight');
-console.log('  3) 打 tag、触发发布工作流，最后在 GitHub 上点一次发布审批');
+console.log(`  2) 写好 docs/releases/v${next}.md 后运行 npm run release:build`);
+console.log(`  3) 提交并推送 v${next} tag 后运行 npm run release:upload，核对草稿再公开`);

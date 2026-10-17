@@ -152,23 +152,10 @@ node scripts/release.mjs test-build --out C:\Temp\ag-relay-test-artifacts
 
 ### 正式发布门槛
 
-逐步操作手册见 **[发布一个版本的完整流程](docs/release-runbook.md)**（改版本号、刷许可指纹、预检、本机构建、上传发布各一步）；本小节说明门槛本身。
+- `npm run release:build`：在维护者本机用生产密钥签名，按当前版本读取更新说明、整理产物。
+- `npm run release:upload`：复核产物并创建或补齐 GitHub 草稿；不自动提交、打 tag、推送或公开。
 
-当前状态（2026-10-13）：生产签名密钥已生成并保存在维护者本机、仓库之外，公钥与更新端点已提交，`v0.3.0`／`v0.3.1`／`v0.3.2` 已按本文流程发布，仓库已公开。**发布只在维护者本机用私钥构建**，不经云端流水线。安装、启动、网关托管、连接设置持久化、实时活动刷新与应用内升级已在本机实测通过。**仍待完成的是独立 Windows Sandbox/VM 中的干净机器安装与升级验收**，以及可选的 Authenticode 代码签名（见本小节末）。
-
-发布前逐项确认：
-
-1. 维护者在可信离线环境生成并备份正式 Tauri 签名密钥，只把**公钥内容**提交到 `src-tauri/tauri.conf.json` 的 `plugins.updater.pubkey`。不要把私钥、密码或 `.env` 提交/随包分发。私钥是后续所有更新的信任根：**丢失后无法再通过应用内更新升级，只能让用户手动重装**，务必备份到仓库之外的安全位置。
-2. 将 `endpoints` 设置为 `https://github.com/xinxinxiaoxin/ag-relay/releases/latest/download/latest.json`，保留 `requireSignedVersion=true`，不得打开不安全 TLS 或允许降级。公钥变更需设计旧版本信任迁移，不能随意换钥。
-3. 发布构建必须在维护者本机用私钥完成：私钥经环境变量 `TAURI_SIGNING_PRIVATE_KEY` 提供给当前进程，脚本不读 `.env`、不回显密钥，也不使用云端 secret。仓库及 Release 必须能被用户匿名读取——私有仓库的 404 不能伪装成“没有更新”，也不向客户端嵌入 GitHub token。**是否把版本公开由维护者在 Release 创建这一步决定。**
-4. 同步 `package.json`、`package-lock.json`、`Cargo.toml`、`Cargo.lock`、`tauri.conf.json` 版本；补齐所有 `LICENSE`、`THIRD_PARTY_NOTICES.md`、`licenses/**`（含实际 NSIS/WiX 及插件运行时材料）；正式预检强制按实际 Rust 版本及 `--installer-runtime` 核对许可。发布前完成源码/历史/资产敏感信息复核，结论记在[公开前敏感信息复核报告](docs/security/spec19-prepublication-audit.md)。
-5. 在独立 Windows Sandbox/VM 实测无系统 Node 安装启动、旧版升级、数据保留及安全排空更新。本机已实测「安装 → 启动 → 网关托管 → 设置持久化 → 实时活动刷新」，但**干净机器与完整升级链路仍须在隔离环境中逐条确认**。逐条步骤、判定标准与证据留存见[真实 Windows 成品验收清单](docs/windows-acceptance-checklist.md)。
-
-隔离验收使用独立 Windows 用户、AppData、安装目录和端口，不连接现用上游服务。至少验证：检查更新显示版本/说明但未确认不下载；独立测试签名新版升级；超过排空预算的合成长请求不断流、提示稍后再试且不安装；篡改字节验签失败且不停机；更新前运行/停止两种状态重开后分别恢复；设置和日志保留；UAC 拒绝、取消安装或旧版重开不得误报成功；窗口/托盘退出不能绕过更新事务的安全排空。上述每条的可执行步骤、判定标准与证据位置见[真实 Windows 成品验收清单](docs/windows-acceptance-checklist.md)；此人工验收不由只读 smoke 自动完成。
-
-发布流程在维护者本机完成：先执行 `node scripts/release.mjs preflight`，通过后运行 `node scripts/release.mjs build --out <新空目录> --notes <UTF-8更新说明文件>`；私钥仅通过当前进程环境提供，不读 `.env`、不回显密钥、不上传云端。随后用 `gh release create` 新建 Release 上传全部资产（不要覆盖已有 tag/Release）。
-
-发布资产包括 NSIS `.exe`、MSI `.msi`、各自 `.sig`、UTF-8 可读 `latest.json`、同版 `third-party-sources.tar.gz` 与 `SHA256SUMS`。来源附件由本项目每次发布提供，包含完整许可取证库和固定第三方源码；正式复核会拒绝缺失、错版、内部篡改或额外文件。清单使用 `windows-x86_64-nsis` / `windows-x86_64-msi`，嵌入签名内容而非签名路径；应用按原安装器选择。Tauri updater 签名与 Windows Authenticode 是两件事：此流程未配置 Authenticode 证书，不能承诺“已验证发布者”或无 SmartScreen 警告。
+版本与许可准备、密钥约定、确认公开步骤见 **[发布一个版本的完整流程](docs/release-runbook.md)**。这两个入口减少手工步骤，不承诺 Rust 编译加速；沿用现有 target 缓存与并发参数，不改 CI。
 
 ## 网关核心如何维护与重打包
 

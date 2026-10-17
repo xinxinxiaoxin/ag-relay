@@ -6,7 +6,7 @@
   "inputs": [
     {
       "path": "package.json",
-      "sha256": "6bfdd3098e650edfbb6a4deb703ca285d425ea5e8c453cbd62e4a12bd7650e2e",
+      "sha256": "b85f16ceeec8a0628883ba670d150322abf8b192c6b608d1c55765bd25a91d7c",
       "normalizeLf": true
     },
     {

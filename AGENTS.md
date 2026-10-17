@@ -10,6 +10,10 @@ AG Relay —— 本地重试网关的完整桌面应用，由**本仓自主维�
 
 Issues 与 specs 以 GitHub issue 形式存放于 `xinxinxiaoxin/ag-relay`，通过 `gh` CLI 操作。详见 `docs/agents/issue-tracker.md`。
 
+### 本地打包与发布
+
+用户要求打包、上传或发布时，先读 `docs/release-runbook.md`。由 agent 按用户授权范围完成准备、执行与结果核对，不要求用户记命令或手工操作。较大改动需要适配时，优先维护既有发布入口；适配与授权规则见该文档。
+
 ### Domain docs
 
 单上下文（single-context）：仓库根一个 `GLOSSARY.md` + `docs/adr/`。详见 `docs/agents/domain.md`。

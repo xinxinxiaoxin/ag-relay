@@ -12,11 +12,33 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 const configPath = path.join(root, 'src-tauri/tauri.conf.json');
 const endpoint = 'https://github.com/xinxinxiaoxin/ag-relay/releases/latest/download/latest.json';
+const repository = 'xinxinxiaoxin/ag-relay';
 
-function preflight(file = configPath, { signing = true, inputs = true } = {}) {
+export function releasePaths(version, options = {}) {
+  installerNames(version);
+  return {
+    out: options.out ?? path.join(root, 'release-artifacts', `v${version}`),
+    notes: options.notes ?? path.join(root, 'docs/releases', `v${version}.md`),
+  };
+}
+
+export function signingEnvironment(pubkey, { env = process.env, home = os.homedir() } = {}) {
+  const result = { ...env };
+  if (result.TAURI_SIGNING_PRIVATE_KEY?.trim()) return result;
+  const key = path.join(home, '.ag-relay-signing', 'ag-relay.key');
+  if (!fs.existsSync(key)) return result;
+  if (!fs.existsSync(`${key}.pub`) || fs.readFileSync(`${key}.pub`, 'utf8').trim() !== pubkey?.trim()) {
+    throw new Error('本机原签名公钥与发布配置不一致；未开始构建');
+  }
+  result.TAURI_SIGNING_PRIVATE_KEY = key;
+  result.TAURI_SIGNING_PRIVATE_KEY_PASSWORD ??= '';
+  return result;
+}
+
+function preflight(file = configPath, { signing = true, inputs = true, env = process.env } = {}) {
   const config = JSON.parse(fs.readFileSync(file, 'utf8'));
   if (!config.plugins?.updater?.pubkey?.trim()) throw new Error('生产更新公钥尚未配置；拒绝正式发布');
-  if (signing && !process.env.TAURI_SIGNING_PRIVATE_KEY?.trim()) throw new Error('必须通过环境提供 TAURI_SIGNING_PRIVATE_KEY；拒绝正式发布');
+  if (signing && !env.TAURI_SIGNING_PRIVATE_KEY?.trim()) throw new Error('未找到本机原签名；必须通过环境提供 TAURI_SIGNING_PRIVATE_KEY；拒绝正式发布');
   const updater = config.plugins.updater;
   if (JSON.stringify(updater.endpoints) !== JSON.stringify([endpoint])
       || updater.requireSignedVersion !== true || updater.allowDowngrades || updater['allow-downgrades']
@@ -113,6 +135,33 @@ export function stage(configFile, bundleDir, out, notesFile, testOnly, {
   }
 }
 
+function github(args, { input, allowNotFound = false } = {}) {
+  const result = spawnSync('gh', args, { cwd: root, encoding: 'utf8', input, windowsHide: true });
+  if (allowNotFound && result.status === 1 && result.stderr?.trim() === 'release not found') return null;
+  if (result.status !== 0) throw new Error(result.stderr?.trim() || result.error?.message || 'GitHub 命令失败');
+  return result.stdout;
+}
+
+export function upload(file, artifacts, { verifyArtifacts = verify, runGh = github } = {}) {
+  verifyArtifacts(file, artifacts, true);
+  const manifest = JSON.parse(fs.readFileSync(path.join(artifacts, 'latest.json'), 'utf8'));
+  const tag = `v${manifest.version}`;
+  const response = runGh(['release', 'view', tag, '--repo', repository, '--json', 'isDraft,assets,url'], { allowNotFound: true });
+  const existing = response === null ? null : JSON.parse(response);
+  if (existing && !existing.isDraft) throw new Error(`${tag} 已公开，不覆盖已发布版本`);
+  const names = fs.readdirSync(artifacts).sort();
+  const present = new Map((existing?.assets ?? []).map(asset => [asset.name, asset]));
+  for (const name of names.filter(name => present.has(name))) {
+    const digest = `sha256:${createHash('sha256').update(fs.readFileSync(path.join(artifacts, name))).digest('hex')}`;
+    if (present.get(name).digest !== digest) throw new Error(`草稿文件 ${name} 的校验值与本地产物不一致，未覆盖`);
+  }
+  const url = existing ? existing.url : runGh(['release', 'create', tag, '--repo', repository,
+    '--draft', '--verify-tag', '--title', `AG Relay ${manifest.version}`, '--notes-file', '-'], { input: manifest.notes }).trim();
+  const missing = names.filter(name => !present.has(name));
+  if (missing.length) runGh(['release', 'upload', tag, '--repo', repository, ...missing.map(name => path.resolve(artifacts, name))]);
+  return { tag, url: url || `https://github.com/${repository}/releases/tag/${tag}`, uploaded: missing.length };
+}
+
 // ADR-0005：安装与卸载都不得替应用强停进程、不得由 Restart Manager 重启、不得重启系统、不得降级。
 // 产物生成前静态校验配置与安装器模板/hooks 确实声明了该策略；只写注释不算数，缺失即 fail-closed。
 function assertInstallerSafetyPolicy(config) {
@@ -202,15 +251,21 @@ function auditPaths(file) {
 }
 
 function build(options, testOnly) {
-  const config = testOnly ? JSON.parse(fs.readFileSync(configPath, 'utf8')) : preflight();
+  const storedConfig = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+  if (!testOnly) options = { ...options, ...releasePaths(storedConfig.version, options) };
   if (process.platform !== 'win32' || process.arch !== 'x64') throw new Error('仅支持 Windows x64 构建');
-  if (!options.out || fs.existsSync(options.out)) throw new Error('--out 必须是一个尚不存在的新目录');
-  if (!testOnly && !options.notes) throw new Error('正式构建需要 --notes 更新说明文件');
+  if (!options.out || fs.existsSync(options.out)) throw new Error('--out 必须是一个尚不存在的新目录；已有产物可直接运行 npm run release:upload，无需重新打包');
+  if (!testOnly && (!fs.existsSync(options.notes) || !fs.statSync(options.notes).isFile())) {
+    throw new Error(`找不到更新说明文件：${options.notes}`);
+  }
+  const signingEnv = testOnly ? process.env : signingEnvironment(storedConfig.plugins?.updater?.pubkey);
+  const config = testOnly ? storedConfig : preflight(configPath, { env: signingEnv });
   if (testOnly) checkBuildInputs(config);
+  fs.mkdirSync(path.dirname(path.resolve(options.out)), { recursive: true });
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'ag-relay-build-'));
   const tauri = path.join(root, 'node_modules/@tauri-apps/cli/tauri.js');
   // WiX 会把 sidecar 中转为临时目录下的 node.exe；必须隔离 TEMP/TMP，不能共用用户临时文件。
-  const env = { ...process.env, CARGO_BUILD_JOBS: '2', TEMP: temp, TMP: temp, TMPDIR: temp,
+  const env = { ...signingEnv, CARGO_BUILD_JOBS: '2', TEMP: temp, TMP: temp, TMPDIR: temp,
     AG_RELAY_TEST_DISTRIBUTION: testOnly ? '1' : '0' };
   // 仅影响本次构建子进程；编码形式避免 Windows 含空格路径被 Cargo 拆成多个参数。
   const inheritedFlags = env.CARGO_ENCODED_RUSTFLAGS !== undefined
@@ -274,7 +329,8 @@ function main() {
       production: { type: 'boolean', default: false }, binary: { type: 'string' },
     } });
     if (positionals[0] === 'preflight') {
-      preflight(values.config);
+      const settings = JSON.parse(fs.readFileSync(values.config || configPath, 'utf8'));
+      preflight(values.config, { env: signingEnvironment(settings.plugins?.updater?.pubkey) });
       console.log('发布前置检查通过');
     } else if (positionals[0] === 'build' || positionals[0] === 'test-build') {
       if (values.config) throw new Error('构建只能使用仓库已审核配置，测试密钥由 test-build 独立生成');
@@ -289,11 +345,17 @@ function main() {
       } finally {
         fs.rmSync(temp, { recursive: true, force: true });
       }
+    } else if (positionals[0] === 'upload') {
+      if (values.config) throw new Error('上传只能使用仓库已审核配置');
+      const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+      const result = upload(configPath, values.artifacts || releasePaths(config.version).out);
+      console.log(`草稿已就绪，本次上传 ${result.uploaded} 个文件，尚未公开：${result.url}`);
+      console.log(`确认后公开：gh release edit ${result.tag} --repo ${repository} --draft=false --latest`);
     } else if (positionals[0] === 'audit-paths') {
       auditPaths(values.binary);
     } else if (positionals[0] === 'verify') {
       verify(values.config, values.artifacts, values.production);
-    } else throw new Error('用法：node scripts/release.mjs preflight|build|test-build|test-manifest|verify|audit-paths；构建/清单需 --out，验签需 --config 与 --artifacts');
+    } else throw new Error('用法：node scripts/release.mjs preflight|build|upload|test-build|test-manifest|verify|audit-paths；build 默认使用当前版本目录，upload 可用 --artifacts 指定已有产物');
   } catch (error) {
     console.error(error.message);
     process.exitCode = 1;

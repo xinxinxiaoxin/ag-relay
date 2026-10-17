@@ -57,7 +57,9 @@ function run(args, env = {}) {
   return spawnSync(process.execPath, [cli, ...args], {
     cwd: root,
     encoding: 'utf8',
-    env: { ...process.env, TAURI_SIGNING_PRIVATE_KEY: '', TAURI_SIGNING_PRIVATE_KEY_PASSWORD: '', ...env },
+    env: { ...process.env,
+      ...(['preflight', 'build'].includes(args[0]) ? { HOME: temp, USERPROFILE: temp } : {}),
+      TAURI_SIGNING_PRIVATE_KEY: '', TAURI_SIGNING_PRIVATE_KEY_PASSWORD: '', ...env },
   });
 }
 
