@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "profiles": {
+    "codex": {
+      "maxAttempts": 110,
+      "baseDelayMs": 500,
+      "maxDelayMs": 1000,
+      "totalBudgetMs": 300000,
+      "historyMode": "on_error",
+      "historyConfirmations": 1,
+      "stripItemIds": true,
+      "rememberSession": true,
+      "repairStatus": true,
+      "retryHistory": true,
+      "emptyResponseRepair": false,
+      "emptyResponseDropReasoning": false,
+      "emptyResponseNormalizeAfter": 2,
+      "emptyResponseReasoningAfter": 6
+    },
+    "general": {
+      "maxAttempts": 110,
+      "baseDelayMs": 500,
+      "maxDelayMs": 1000,
+      "totalBudgetMs": 300000,
+      "historyMode": "on_error",
+      "historyConfirmations": 1,
+      "stripItemIds": false,
+      "rememberSession": true,
+      "repairStatus": true,
+      "retryHistory": false,
+      "emptyResponseRepair": true,
+      "emptyResponseDropReasoning": true,
+      "emptyResponseNormalizeAfter": 2,
+      "emptyResponseReasoningAfter": 6
+    }
+  }
+}

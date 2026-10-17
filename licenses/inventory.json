@@ -1,27 +1,27 @@
 {
   "schemaVersion": 1,
   "target": "x86_64-pc-windows-msvc",
-  "verifiedAt": "2026-10-16",
+  "verifiedAt": "2026-10-17",
   "scope": "锁定安装的 npm 完整依赖树（含开发工具）、Windows cargo metadata 已解析依赖树（含构建/宏）、随包 Node、Rust 标准库和 WebView2Loader SDK。其他平台 npm 可选二进制单列排除；并非精确二进制 SBOM。",
   "inputs": [
     {
       "path": "package.json",
-      "sha256": "4823499728e212a9313c522290b1d1164e978a2d22b0b43bdbff19e0f92b8fa4",
+      "sha256": "6bfdd3098e650edfbb6a4deb703ca285d425ea5e8c453cbd62e4a12bd7650e2e",
       "normalizeLf": true
     },
     {
       "path": "package-lock.json",
-      "sha256": "cc043810b58516f170fe137f61888f6f12c48b8b2d62e94bd408558f6722fda1",
+      "sha256": "7947eace9023fd48a412caec753e8876f66d598cd790c5004d2a0dda5ce2b1b6",
       "normalizeLf": true
     },
     {
       "path": "src-tauri/Cargo.lock",
-      "sha256": "93c22e5497abeadb2bbd01349a20715b9200c93716fb98b60be3b6c60bcbf597",
+      "sha256": "3451ee591ef8d0b2906452e046a74fb5b4bc1dfed23974ef486a7cd58ab497e4",
       "normalizeLf": true
     },
     {
       "path": "src-tauri/Cargo.toml",
-      "sha256": "cc7c62d020309179d8eec5cf0674fa60677288c305b48c5e4ad345736648f8b9",
+      "sha256": "3a093358a0cba4e018775a99d3a66b4d85d9cbe8326f1e26a2909b0f64f0e7c6",
       "normalizeLf": true
     },
     {
@@ -41,7 +41,7 @@
         "normalizeLf": true
       }
     ],
-    "review": "两套完整安装器源码归档及 inventory.json/COMPONENTS.md 由每次发布的同版来源附件提供，其他许可材料继续随安装包提供。2026-10-16 新增 Windows 依赖 tauri-plugin-single-instance 2.5.4 与 tracing-attributes 0.1.31，已补齐原文与组件索引并刷新依赖输入指纹；修正单实例组件的 MIT 原文链接。产品版本与随包 Node 未变化。"
+    "review": "两套完整安装器源码归档及 inventory.json/COMPONENTS.md 由每次发布的同版来源附件提供，其他许可材料继续随安装包提供。2026-10-16 新增 Windows 依赖 tauri-plugin-single-instance 2.5.4 与 tracing-attributes 0.1.31，已补齐原文与组件索引并刷新依赖输入指纹；修正单实例组件的 MIT 原文链接。2026-10-17 产品版本改为 0.3.9；已逐项确认四份清单仅产品版本变化，295 项 Windows Rust 解析依赖、422 个已安装 npm 包及锁定树中 74 个排除的平台包均与许可记录一致，仅刷新四份清单输入指纹，随包 Node 和第三方依赖未变。"
   },
   "components": [
     {

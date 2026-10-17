@@ -5,6 +5,7 @@
 <div id="root"></div>
 <div style="position:fixed;bottom:7px;left:50%;transform:translateX(-50%);z-index:9999;font:11px sans-serif;color:#666;pointer-events:none">隔离界面验证 · 模拟数据 · 不连接真实网关</div>
 <script type="module">
+  import policyDefaults from './policy-settings.json'
   // 只用于 Vite 开发验收，不进入生产入口。所有 IPC 在这里拦截，未知操作直接失败。
   const params = new URLSearchParams(location.search)
   const listeners = new Map()
@@ -19,7 +20,10 @@
     case 'truncated': status.activeRequests = 101; status.requestsTruncated = true; break
   }
   const calls = []
-  window.__agUiFixture = { status, calls }
+  const policy = { defaults: structuredClone(policyDefaults), saved: structuredClone(policyDefaults), active: structuredClone(policyDefaults), activeRevision: 'fixture-policy-1', restartRequired: false, activeSupported: params.get('policy') !== 'legacy' }
+  if (params.get('policy') === 'saved') { policy.saved.profiles.codex.maxAttempts = 90; policy.restartRequired = true }
+  const policyView = () => ({ ...structuredClone(policy), active: status.available && policy.activeSupported ? structuredClone(policy.active) : null, activeRevision: status.available && policy.activeSupported ? policy.activeRevision : null, activeSupported: status.available && policy.activeSupported, restartRequired: status.available && policy.restartRequired })
+  window.__agUiFixture = { status, calls, policy }
   window.__TAURI__ = {
     app: { getVersion: async () => '0.3.4' },
     event: { listen: async (name, callback) => { listeners.set(name, callback); return () => { if (listeners.get(name) === callback) listeners.delete(name) } } },
@@ -32,6 +36,24 @@
       calls.push({ command, args })
       switch (command) {
         case 'get_status': return structuredClone(status)
+        case 'get_policy_settings':
+          if (params.get('policy') === 'error') throw new Error('模拟策略文件损坏')
+          return policyView()
+        case 'save_policy_settings':
+          if (params.get('policy_save') === 'fail') throw new Error('模拟磁盘不可写')
+          if (!args?.settings || Object.keys(args).length !== 1) throw new Error('策略保存命令参数无效')
+          policy.saved = structuredClone(args.settings)
+          policy.restartRequired = JSON.stringify(policy.saved) !== JSON.stringify(policy.active)
+          return policyView()
+        case 'restart_gateway':
+          if (params.get('restart') === 'timeout') return { kind: 'timeout' }
+          if (params.get('restart') === 'fail') return { kind: 'failed', detail: '模拟启动失败，未声称应用成功' }
+          if (!status.available) return { kind: 'not_running' }
+          policy.active = structuredClone(policy.saved)
+          policy.activeRevision = `fixture-policy-${calls.length}`
+          policy.activeSupported = true
+          policy.restartRequired = false
+          return { kind: 'restarted' }
         case 'get_close_request': return closeRequest
         case 'get_connection_settings': return { saved: { upstream: 'http://fixture.invalid', port: 18787 }, active: { upstream: 'http://fixture.invalid', port: 18787 }, restartRequired: false, endpoint: 'http://127.0.0.1:18787' }
         case 'get_recent_activity': return []

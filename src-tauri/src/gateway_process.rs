@@ -33,8 +33,9 @@ use windows_sys::Win32::System::JobObjects::{
 
 use std::os::windows::io::AsRawHandle;
 
-use crate::gateway_env::gateway_env_pairs_with_settings;
 use crate::connection_settings::ConnectionSettings;
+use crate::gateway_env::{gateway_env_pairs_with_policy, gateway_env_pairs_with_settings};
+use crate::policy_settings::PolicySettings;
 
 /// 无窗口创建标志（MSDN CREATE_NO_WINDOW）。
 /// 实测：子进程拥有一个隐藏控制台（可 AttachConsole），CTRL_C 广播可达。
@@ -95,6 +96,7 @@ pub enum GatewayError {
     PortAlreadyInUse { host: String, port: u16 },
     SpawnFailed(String),
     JobSetupFailed(&'static str),
+    InvalidPolicy(String),
 }
 
 impl fmt::Display for GatewayError {
@@ -105,8 +107,12 @@ impl fmt::Display for GatewayError {
                 write!(f, "网关脚本缺失：{}", p.display())
             }
             GatewayError::PortAlreadyInUse { host, port } => {
-                write!(f, "端口 {host}:{port} 已被占用，网关可能已在运行，为避免重复拉起未执行启动")
+                write!(
+                    f,
+                    "端口 {host}:{port} 已被占用，网关可能已在运行，为避免重复拉起未执行启动"
+                )
             }
+            GatewayError::InvalidPolicy(why) => write!(f, "策略设置无效：{why}"),
             GatewayError::SpawnFailed(why) => write!(f, "拉起网关进程失败：{why}"),
             GatewayError::JobSetupFailed(why) => {
                 write!(f, "进程树兜底（Job Object）建立失败：{why}")
@@ -342,7 +348,30 @@ pub fn start_gateway_process(paths: &GatewayPaths) -> Result<ManagedChild, Gatew
     start_gateway_process_with_settings(paths, &ConnectionSettings::default())
 }
 
-pub fn start_gateway_process_with_settings(paths: &GatewayPaths, settings: &ConnectionSettings) -> Result<ManagedChild, GatewayError> {
+pub fn start_gateway_process_with_settings(
+    paths: &GatewayPaths,
+    settings: &ConnectionSettings,
+) -> Result<ManagedChild, GatewayError> {
+    let extra_env = gateway_env_pairs_with_settings(&paths.diagnostics_file, settings);
+    start_gateway_process_with_env(paths, settings, &extra_env)
+}
+
+/// 桌面受管入口：通过 env_clear 后的显式 extra_env 把完整策略交给 supervisor。
+pub fn start_gateway_process_with_policy(
+    paths: &GatewayPaths,
+    settings: &ConnectionSettings,
+    policy: &PolicySettings,
+) -> Result<ManagedChild, GatewayError> {
+    let extra_env = gateway_env_pairs_with_policy(&paths.diagnostics_file, settings, policy)
+        .map_err(GatewayError::InvalidPolicy)?;
+    start_gateway_process_with_env(paths, settings, &extra_env)
+}
+
+fn start_gateway_process_with_env(
+    paths: &GatewayPaths,
+    settings: &ConnectionSettings,
+    extra_env: &[(String, String)],
+) -> Result<ManagedChild, GatewayError> {
     if port_in_use(settings.host(), settings.port()) {
         return Err(GatewayError::PortAlreadyInUse {
             host: settings.host().to_string(),
@@ -350,8 +379,12 @@ pub fn start_gateway_process_with_settings(paths: &GatewayPaths, settings: &Conn
         });
     }
     let supervisor_script = paths.gateway_dir.join("relay-supervisor.mjs");
-    let extra_env = gateway_env_pairs_with_settings(&paths.diagnostics_file, settings);
-    spawn_managed(&paths.node_exe, &supervisor_script, &paths.gateway_dir, &extra_env)
+    spawn_managed(
+        &paths.node_exe,
+        &supervisor_script,
+        &paths.gateway_dir,
+        extra_env,
+    )
 }
 
 // ---------------------------------------------------------------------------

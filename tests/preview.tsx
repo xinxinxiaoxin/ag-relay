@@ -6,6 +6,8 @@ import '../src/index.css'
 import App from '../src/App'
 import type { UpdateView } from '../src/lib/update'
 import type { CloseRequest } from '../src/lib/window'
+import type { PolicySettings, PolicySettingsView } from '../src/lib/types'
+import policyDefaults from './fixtures/policy-settings.json'
 
 // 只有此独立 HTML 加载模拟桥；生产入口不引用本文件。禁止在原生窗口里运行。
 if ('__TAURI__' in globalThis || '__TAURI_INTERNALS__' in globalThis) throw new Error('隔离 fixture 只能在普通浏览器中运行。')
@@ -72,6 +74,11 @@ const finish = async (action: string) => {
   pendingClose = null
 }
 const connection = { saved: { upstream: 'https://fixture.invalid', port: 18787 }, active: null, restartRequired: false, endpoint: 'http://127.0.0.1:18787' }
+let policyGateway = 'stopped'
+let policyRestart = 'success'
+let policySaveFails = false
+const policy: PolicySettingsView = { defaults: structuredClone(policyDefaults) as PolicySettings, saved: structuredClone(policyDefaults) as PolicySettings, active: structuredClone(policyDefaults) as PolicySettings, activeRevision: 'fixture-policy-1', restartRequired: false, activeSupported: true }
+const policyView = (): PolicySettingsView => ({ ...structuredClone(policy), active: policyGateway === 'running' ? policy.active : null, activeRevision: policyGateway === 'running' ? policy.activeRevision : null, activeSupported: policyGateway === 'running', restartRequired: policyGateway !== 'stopped' && policy.restartRequired })
 
 Object.assign(globalThis, { __TAURI__: {
   app: { getVersion: async () => '0.3.3' },
@@ -102,7 +109,26 @@ Object.assign(globalThis, { __TAURI__: {
         if (args.action === 'tray' && !pendingClose.trayAvailable) throw new Error('托盘不可用（隔离模拟）')
         return finish(String(args.action))
       case 'quit_app': return finish('quit_app')
-      case 'get_status': return { available: false, version: null, activeRequests: null, uptimeText: null, owner: 'none' }
+      case 'get_status': return { available: policyGateway !== 'stopped', version: policyGateway === 'stopped' ? null : 'fixture-policy', activeRequests: policyGateway === 'stopped' ? null : 0, uptimeText: null, owner: policyGateway === 'stopped' ? 'none' : 'window' }
+      case 'get_policy_settings': return policyView()
+      case 'save_policy_settings':
+        if (policySaveFails) throw new Error('模拟策略保存失败：目录不可写')
+        policy.saved = structuredClone(args.settings as PolicySettings)
+        policy.restartRequired = JSON.stringify(policy.saved) !== JSON.stringify(policy.active)
+        log = '仅保存了策略；没有重启网关'
+        repaint()
+        return policyView()
+      case 'restart_gateway':
+        log = `模拟安全重启：${policyRestart}`
+        repaint()
+        if (policyGateway === 'stopped') return { kind: 'not_running' }
+        if (policyRestart === 'timeout') return { kind: 'timeout' }
+        if (policyRestart === 'failure') return { kind: 'failed', detail: '模拟重启失败' }
+        policy.active = structuredClone(policy.saved)
+        policy.activeRevision = `fixture-policy-${fixtureRevision}`
+        policy.restartRequired = false
+        policyGateway = 'running'
+        return { kind: 'restarted' }
       case 'get_connection_settings': return connection
       case 'get_autostart': return { enabled: false, exe_path: null, notes: ['隔离模拟，不写注册表'] }
       case 'get_recent_activity': return []
@@ -134,6 +160,9 @@ export function Fixture() {
     <aside aria-label="隔离模拟控制台" className="border-b-2 border-amber-700 bg-amber-100 px-3 py-2 text-xs text-amber-950">
       <strong className="block">隔离模拟验收 · 真实 App / 组件 · 不访问网关、不下载、不安装、不退出</strong>
       <div className="mt-2 flex flex-wrap items-center gap-2">
+        <label>策略网关 <select id="fixture-policy-gateway" className={controlClass} value={policyGateway} onChange={event => { policyGateway = event.target.value; repaint() }}><option value="stopped">未运行</option><option value="running">支持策略的核心</option><option value="legacy">旧核心未知</option></select></label>
+        <label>重启结果 <select id="fixture-policy-restart" className={controlClass} value={policyRestart} onChange={event => { policyRestart = event.target.value; repaint() }}><option value="success">成功</option><option value="timeout">排空超时</option><option value="failure">失败</option></select></label>
+        <label><input id="fixture-policy-save-fails" type="checkbox" checked={policySaveFails} onChange={event => { policySaveFails = event.target.checked; repaint() }} />模拟策略保存失败</label>
         <label>更新场景 <select id="fixture-scenario" className={controlClass} value={selected} onChange={event => { selected = event.target.value as Scenario; update = makeView(selected); repaint() }}>
           {Object.entries(scenarios).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
         </select></label>

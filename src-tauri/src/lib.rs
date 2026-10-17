@@ -10,6 +10,7 @@ pub mod bounded_log;
 pub mod autostart;
 pub mod autostart_commands;
 pub mod connection_settings;
+pub mod policy_settings;
 pub mod gateway_activity;
 pub mod gateway_commands;
 pub mod gateway_connection;
@@ -72,6 +73,8 @@ pub fn run() {
             update_commands::confirm_update,
             gateway_commands::get_connection_settings,
             gateway_commands::save_connection_settings,
+            gateway_commands::get_policy_settings,
+            gateway_commands::save_policy_settings,
             gateway_commands::start_gateway,
             gateway_commands::stop_gateway,
             gateway_status::get_status,

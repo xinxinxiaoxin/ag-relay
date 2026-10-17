@@ -4,6 +4,7 @@ use crate::{
     gateway_connection::{ConnectionError, ConnectionSettingsView, GatewayConnection},
     gateway_control,
     gateway_process::{resolve_paths, GatewayPaths, GATEWAY_PORT, STOP_TIMEOUT},
+    policy_settings::{PolicySettings, PolicySettingsStore, PolicySettingsView},
 };
 use serde::Serialize;
 use std::sync::{
@@ -58,9 +59,10 @@ pub fn with_connection<T>(
             .app_data_dir()
             .map_err(|_| ConnectionError::Failed("无法解析设置目录".into()))?;
         let paths = resolve_runtime_paths(app)?;
-        *guard = Some(GatewayConnection::new(
+        *guard = Some(GatewayConnection::new_with_policy_store(
             paths,
             ConnectionSettingsStore::new(app_data.join("connection-settings.json")),
+            PolicySettingsStore::new(app_data.join("policy-settings.json")),
         ));
     }
     let connection = guard.as_mut().unwrap();
@@ -99,6 +101,19 @@ pub fn save_connection_settings(
     port: u32,
 ) -> Result<ConnectionSettingsView, String> {
     with_user_connection(&app, |gw| gw.save(&upstream, port)).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_policy_settings(app: AppHandle) -> Result<PolicySettingsView, String> {
+    with_connection(&app, |gw| gw.policy_settings()).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn save_policy_settings(
+    app: AppHandle,
+    settings: PolicySettings,
+) -> Result<PolicySettingsView, String> {
+    with_user_connection(&app, |gw| gw.save_policy(&settings)).map_err(|e| e.to_string())
 }
 
 #[derive(Debug, Serialize)]

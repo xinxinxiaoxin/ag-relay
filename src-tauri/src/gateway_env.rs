@@ -66,6 +66,22 @@ pub fn gateway_env_pairs_with_settings(
     pairs
 }
 
+/// 受管启动显式注入完整策略；旧 17 项环境契约及无策略入口保持不变。
+/// spawn_managed 在 env_clear 后逐项添加此列表，supervisor 再自然传给核心。
+pub fn gateway_env_pairs_with_policy(
+    diagnostics_file: &Path,
+    settings: &crate::connection_settings::ConnectionSettings,
+    policy: &crate::policy_settings::PolicySettings,
+) -> Result<Vec<(String, String)>, String> {
+    policy.validate()?;
+    let mut pairs = gateway_env_pairs_with_settings(diagnostics_file, settings);
+    pairs.push((
+        "PROXY_POLICY_JSON".into(),
+        serde_json::to_string(policy).map_err(|_| "无法编码策略启动配置")?,
+    ));
+    Ok(pairs)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -131,7 +147,12 @@ mod tests {
             let table = gateway_env_table();
             assert_eq!(table.len(), 17, "必须恰好 17 项（漏一项或多一项都不合格）");
             for (i, (name, value)) in EXPECTED_17.iter().enumerate() {
-                assert_eq!(table[i], (*name, *value), "第 {} 项与笔记第 1 节不一致", i + 1);
+                assert_eq!(
+                    table[i],
+                    (*name, *value),
+                    "第 {} 项与笔记第 1 节不一致",
+                    i + 1
+                );
             }
             return;
         }
@@ -162,7 +183,8 @@ mod tests {
 
     #[test]
     fn 装配的环境对包含全部17项与诊断路径() {
-        let diag = PathBuf::from(r"C:\Users\x\AppData\Roaming\ag-relay\logs\relay-diagnostics.jsonl");
+        let diag =
+            PathBuf::from(r"C:\Users\x\AppData\Roaming\ag-relay\logs\relay-diagnostics.jsonl");
         let pairs = gateway_env_pairs(&diag);
 
         for (name, value) in EXPECTED_17.iter() {

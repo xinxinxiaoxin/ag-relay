@@ -78,6 +78,71 @@ const cfg = {
     .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean),
 };
 
+// Strategy settings are an immutable launch snapshot. Without the optional envelope,
+// standalone users keep their existing environment defaults and compatibility gates.
+function defaultPolicyProfile(codex) {
+  return {
+    maxAttempts: cfg.maxAttempts, baseDelayMs: cfg.baseDelayMs,
+    maxDelayMs: cfg.maxDelayMs, totalBudgetMs: cfg.totalBudgetMs,
+    historyMode: 'on_error', historyConfirmations: 1,
+    stripItemIds: codex && cfg.codexStripIds, rememberSession: cfg.sessionCompat,
+    repairStatus: true, retryHistory: codex && cfg.codexResourceRetry,
+    emptyResponseRepair: !codex, emptyResponseDropReasoning: !codex,
+    emptyResponseNormalizeAfter: 2, emptyResponseReasoningAfter: 6,
+  };
+}
+
+function compilePolicy(raw) {
+  const reject = (field) => { throw new Error(`Invalid PROXY_POLICY_JSON: ${field}`); };
+  const object = (value, keys, field) => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)
+        || Object.keys(value).some(key => !keys.includes(key))) reject(field);
+  };
+  let value;
+  try { value = JSON.parse(raw); } catch { reject('invalid JSON'); }
+  object(value, ['schemaVersion', 'profiles'], 'settings');
+  if (value.schemaVersion !== undefined && value.schemaVersion !== 1) reject('schemaVersion');
+  const profiles = value.profiles === undefined ? {} : value.profiles;
+  object(profiles, ['codex', 'general'], 'profiles');
+  const result = { schemaVersion: 1, profiles: {} };
+  for (const name of ['codex', 'general']) {
+    const defaults = defaultPolicyProfile(name === 'codex');
+    const overrides = profiles[name] === undefined ? {} : profiles[name];
+    object(overrides, Object.keys(defaults), `profiles.${name}`);
+    const profile = { ...defaults, ...overrides };
+    const integer = (key, min, max) => {
+      if (!Number.isSafeInteger(profile[key]) || profile[key] < min || profile[key] > max) reject(`${name}.${key}`);
+    };
+    integer('maxAttempts', 1, 1000);
+    integer('baseDelayMs', 1, 300000);
+    integer('maxDelayMs', 1, 300000);
+    integer('totalBudgetMs', 1000, 3600000);
+    integer('historyConfirmations', 1, name === 'codex' ? 4 : 1000);
+    integer('emptyResponseNormalizeAfter', 1, 1000);
+    integer('emptyResponseReasoningAfter', 1, 1000);
+    if (!['off', 'on_error', 'always'].includes(profile.historyMode)) reject(`${name}.historyMode`);
+    for (const key of ['stripItemIds', 'rememberSession', 'repairStatus', 'retryHistory',
+      'emptyResponseRepair', 'emptyResponseDropReasoning']) {
+      if (typeof profile[key] !== 'boolean') reject(`${name}.${key}`);
+    }
+    if (profile.baseDelayMs > profile.maxDelayMs) reject(`${name}.delayRange`);
+    if (profile.historyConfirmations > profile.maxAttempts) reject(`${name}.historyConfirmations`);
+    if (profile.emptyResponseReasoningAfter <= profile.emptyResponseNormalizeAfter
+        || (profile.emptyResponseDropReasoning && !profile.emptyResponseRepair)) reject(`${name}.emptyResponseStages`);
+    if (name === 'codex' && (profile.emptyResponseRepair || profile.emptyResponseDropReasoning)
+        || name === 'general' && (profile.stripItemIds || profile.retryHistory)) reject(`${name}.unsupportedModule`);
+    result.profiles[name] = Object.freeze(profile);
+  }
+  Object.freeze(result.profiles);
+  return Object.freeze(result);
+}
+
+const hasPolicySettings = process.env.PROXY_POLICY_JSON !== undefined;
+const policySettings = hasPolicySettings ? compilePolicy(process.env.PROXY_POLICY_JSON) : {
+  schemaVersion: 1, profiles: { codex: defaultPolicyProfile(true), general: defaultPolicyProfile(false) },
+};
+const policyRevision = createHash('sha256').update(JSON.stringify(policySettings)).digest('hex');
+
 const startedAt = new Date().toISOString();
 const loadedVersion = createHash('sha256').update(readFileSync(fileURLToPath(import.meta.url))).digest('hex');
 const activeRequests = new Map();
@@ -248,9 +313,10 @@ function safeDiagnostic(record) {
 function repairResponsesItems(bodyBuf, options = {}) {
   const {
     stripItemIds = false, stripReasoningIds = false, stripMessageType = false,
-    dropReasoning = false, allowUnchanged = false, codexHistory = false,
+    dropReasoning = false, allowUnchanged = false, codexHistory = false, requireCompleteTools = false,
   } = options;
   const statelessSearch = codexHistory && dropReasoning && stripItemIds;
+  const completeTools = codexHistory || requireCompleteTools;
   let obj;
   try { obj = JSON.parse(bodyBuf.toString('utf8')); }
   catch { return { error: 'request is not valid JSON' }; }
@@ -298,22 +364,22 @@ function repairResponsesItems(bodyBuf, options = {}) {
       calls.set(item.call_id, 'function_call');
     } else if (item.type === 'function_call_output') {
       if (!nonEmptyStr(item.call_id) || calls.get(item.call_id) !== 'function_call'
-          || (codexHistory && completedCalls.has(item.call_id))
+          || (completeTools && completedCalls.has(item.call_id))
           || !(typeof item.output === 'string' || Array.isArray(item.output))) {
         return { error: 'function_call_output lacks a preceding inline function_call or complete output' };
       }
-      if (codexHistory) completedCalls.add(item.call_id);
+      if (completeTools) completedCalls.add(item.call_id);
     } else if (item.type === 'custom_tool_call') {
       if (!nonEmptyStr(item.call_id) || !nonEmptyStr(item.name) || typeof item.input !== 'string'
           || calls.has(item.call_id)) return { error: 'custom_tool_call is incomplete or has a duplicate call_id' };
       calls.set(item.call_id, 'custom_tool_call');
     } else if (item.type === 'custom_tool_call_output') {
       if (!nonEmptyStr(item.call_id) || calls.get(item.call_id) !== 'custom_tool_call'
-          || (codexHistory && completedCalls.has(item.call_id))
+          || (completeTools && completedCalls.has(item.call_id))
           || !(typeof item.output === 'string' || Array.isArray(item.output))) {
         return { error: 'custom_tool_call_output lacks a preceding inline custom_tool_call or complete output' };
       }
-      if (codexHistory) completedCalls.add(item.call_id);
+      if (completeTools) completedCalls.add(item.call_id);
     } else if (codexHistory && item.type === 'web_search_call') {
       const action = item.action;
       if ((!statelessSearch && !nonEmptyStr(item.id)) || !['in_progress', 'searching', 'completed', 'failed'].includes(item.status)
@@ -338,7 +404,7 @@ function repairResponsesItems(bodyBuf, options = {}) {
     }
     input.push(item);
   }
-  if (codexHistory && completedCalls.size !== calls.size) {
+  if (completeTools && completedCalls.size !== calls.size) {
     return { error: 'inline tool history is incomplete; a call lacks its output' };
   }
   if (!input.length) return { error: 'no inline message or function history would remain' };
@@ -391,8 +457,8 @@ const compatibilityKeys = new Map();
 const codexCompatibilityKeys = new Map();
 const fingerprint = (value) => createHash('sha256').update(value).digest('hex');
 
-function compatibilityIdentity(bodyBuf, headers) {
-  if (!cfg.sessionCompat) return null;
+function compatibilityIdentity(bodyBuf, headers, enabled = cfg.sessionCompat) {
+  if (!enabled) return null;
   let obj;
   try { obj = JSON.parse(bodyBuf.toString('utf8')); } catch { return null; }
   if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return null;
@@ -494,10 +560,10 @@ const snippet = (b) => String(b).replace(/\s+/g, ' ').slice(0, 160);
  * 小请求 30s（快速失败、换通道重试很划算）；
  * 大请求即长上下文，预填充本来就慢，按每 MB 放宽，上限为总预算。
  */
-function connectTimeoutFor(bodyBytes) {
+function connectTimeoutFor(bodyBytes, totalBudgetMs = cfg.totalBudgetMs) {
   const mb = Math.max(0, bodyBytes) / (1024 * 1024);
   const scaled = cfg.connectTimeoutMs + mb * cfg.connectTimeoutPerMbMs;
-  return Math.max(1000, Math.min(cfg.totalBudgetMs, scaled));
+  return Math.max(1000, Math.min(totalBudgetMs, scaled));
 }
 
 /**
@@ -527,8 +593,8 @@ const sleep = (ms, signal) => new Promise((resolve) => {
   const timer = setTimeout(finish, ms);
   signal.addEventListener('abort', finish, { once: true });
 });
-const backoffMs = (attempt) =>
-  Math.min(cfg.maxDelayMs, Math.round(cfg.baseDelayMs * 2 ** (attempt - 1) * (1 + Math.random() * 0.3)));
+const backoffMs = (attempt, policy = cfg) =>
+  Math.min(policy.maxDelayMs, Math.round(policy.baseDelayMs * 2 ** (attempt - 1) * (1 + Math.random() * 0.3)));
 
 function joinUrl(origin, path) {
   const o = origin.replace(/\/+$/, '');
@@ -775,9 +841,9 @@ function passthrough(res, status, headers, buf) {
  * attempts 为实际发起过的尝试次数（预算/连接失败会提前收手，可能小于 cfg.maxAttempts），
  * 只有拿不到真实次数时才回退到配置上限。type/code 保持可重试标识，不改变客户端重试行为。
  */
-function sendRetryable(res, status, reason, attempts) {
+function sendRetryable(res, status, reason, attempts, policy = cfg) {
   if (res.headersSent) { try { res.end(); } catch { /* ignore */ } return; }
-  const used = Number.isSafeInteger(attempts) && attempts > 0 ? attempts : cfg.maxAttempts;
+  const used = Number.isSafeInteger(attempts) && attempts > 0 ? attempts : policy.maxAttempts;
   const payload = JSON.stringify({
     error: {
       message: `relay-retry-proxy: local retry exhausted after ${used} attempts (${reason})`,
@@ -787,7 +853,7 @@ function sendRetryable(res, status, reason, attempts) {
   });
   res.writeHead(status, {
     'content-type': 'application/json; charset=utf-8',
-    'retry-after': String(Math.max(1, Math.round(cfg.baseDelayMs / 1000))),
+    'retry-after': String(Math.max(1, Math.round(policy.baseDelayMs / 1000))),
     'content-length': Buffer.byteLength(payload),
   });
   res.end(payload);
@@ -1028,12 +1094,17 @@ async function handle(req, res, state) {
   let activeBody = body;
   let repairedItems = false; // one shared repair allowance, including legacy reasoning errors
   let preserveResourceHistory = false;
+  let preflightRefused = false;
   let repairedStatus = false;
   let resourceFailures = 0;
+  const historyErrorCounts = new Map();
   const isResponses = req.method === 'POST' && pathname === '/v1/responses';
   const clientCodex = isResponses && strictCodex(headers);
-  const codexResourceRetry = cfg.codexResourceRetry && isResponses && clientClass(headers) === 'codex';
-  const eligibleCodex = cfg.codexResourceRetry && clientCodex;
+  // Classification must not change when a user disables a recovery action.
+  const eligibleCodex = clientCodex && (hasPolicySettings || cfg.codexResourceRetry);
+  const policy = isResponses ? policySettings.profiles[eligibleCodex ? 'codex' : 'general'] : defaultPolicyProfile(false);
+  const codexResourceRetry = isResponses && clientClass(headers) === 'codex'
+    && (hasPolicySettings ? policySettings.profiles.codex.retryHistory : cfg.codexResourceRetry);
   let historyRepairChecked = false;
   let postRepairSends = 0;
   let frozenHistoryKind = null;
@@ -1041,47 +1112,69 @@ async function handle(req, res, state) {
   if (isResponses) diagnose('request_profile', requestProfile(body, headers));
   // Keep Codex fallback memory separate; other clients retain their existing policy.
   const compatibilityCache = eligibleCodex ? codexCompatibilityKeys : compatibilityKeys;
-  const compatibility = isResponses ? compatibilityIdentity(body, headers) : null;
+  const compatibility = isResponses ? compatibilityIdentity(body, headers,
+    policy.rememberSession && policy.historyMode === 'on_error') : null;
   delete headers['x-relay-session-id'];
   delete headers['x-relay-client'];
-  if (clientCodex && cfg.codexStripIds) {
-    const stripped = stripCodexItemIds(activeBody);
-    if (stripped) {
-      activeBody = stripped.body;
-      diagnose('session_compat_applied', { source: compatibility?.source ?? 'resource_lineage',
-        removedReasoning: 0, removedIds: stripped.removedIds });
-      log(`codex item ids stripped before first attempt: ${stripped.removedIds}`);
-    }
-  }
-  if (knownCompatibility(compatibility, compatibilityCache)) {
-    const cleaned = repairResponsesItems(activeBody, { stripItemIds: true, dropReasoning: true, allowUnchanged: true, codexHistory: eligibleCodex });
+  if (isResponses && policy.historyMode === 'always') {
+    // Commit the entire candidate or none of it, including the optional ID cleanup.
+    // An unsupported reference must keep the caller's original bytes intact.
+    const cleaned = repairResponsesItems(body, {
+      stripItemIds: true, dropReasoning: true, allowUnchanged: true, codexHistory: eligibleCodex,
+      requireCompleteTools: true,
+    });
     if (cleaned.error) {
-      diagnose('session_compat_refused', { reason: 'unsafe_inline_history' });
-      if (!codexResourceRetry) {
-        return sendPermanent(res, 'Session compatibility requires complete inline message and tool history; server-side references or unsupported items cannot be discarded.');
-      }
-      diagnose('codex_session_passthrough', { reason: 'unsafe_inline_history' });
+      preflightRefused = true;
+      preserveResourceHistory = true;
+      log('policy preflight: unsupported history retained unchanged');
     } else {
       activeBody = cleaned.body;
-      rememberCompatibility(compatibility, compatibilityCache);
-      repairedItems = true;
-      diagnose('session_compat_applied', { source: compatibility.source,
-        removedReasoning: cleaned.removedReasoning, removedIds: cleaned.removedIds });
+      repairedItems = !!(cleaned.removedIds || cleaned.removedReasoning);
+      historyRepairChecked = eligibleCodex;
+      if (repairedItems) repairCount++;
+      log(`policy preflight: removed ids=${cleaned.removedIds}, reasoning=${cleaned.removedReasoning}`);
+    }
+  } else {
+    if (clientCodex && (hasPolicySettings ? policy.stripItemIds : cfg.codexStripIds)) {
+      const stripped = stripCodexItemIds(activeBody);
+      if (stripped) {
+        activeBody = stripped.body;
+        diagnose('session_compat_applied', { source: compatibility?.source ?? 'resource_lineage',
+          removedReasoning: 0, removedIds: stripped.removedIds });
+        log(`codex item ids stripped before first attempt: ${stripped.removedIds}`);
+      }
+    }
+    if (knownCompatibility(compatibility, compatibilityCache)) {
+      const cleaned = repairResponsesItems(activeBody, { stripItemIds: true, dropReasoning: true, allowUnchanged: true, codexHistory: eligibleCodex });
+      if (cleaned.error) {
+        diagnose('session_compat_refused', { reason: 'unsafe_inline_history' });
+        if (!codexResourceRetry) {
+          return sendPermanent(res, 'Session compatibility requires complete inline message and tool history; server-side references or unsupported items cannot be discarded.');
+        }
+        diagnose('codex_session_passthrough', { reason: 'unsafe_inline_history' });
+      } else {
+        activeBody = cleaned.body;
+        rememberCompatibility(compatibility, compatibilityCache);
+        repairedItems = true;
+        diagnose('session_compat_applied', { source: compatibility.source,
+          removedReasoning: cleaned.removedReasoning, removedIds: cleaned.removedIds });
+      }
     }
   }
   // 上限可随着「通道类抖动」动态放宽
-  let maxAttempts = cfg.maxAttempts;
-  const deadline = Date.now() + cfg.totalBudgetMs;
+  let maxAttempts = policy.maxAttempts;
+  const deadline = Date.now() + policy.totalBudgetMs;
   const outOfBudget = () => Date.now() >= deadline;
   // A capped attempt must not spend another backoff interval before discovering the cap.
   const retrySleep = (ms) => eligibleCodex && repairedItems && postRepairSends >= 3
     ? Promise.resolve() : sleep(ms, ac.signal);
   // 大请求（长对话）要等更久才等到首个响应头
-  const attemptTimeoutMs = connectTimeoutFor(body.length);
+  const attemptTimeoutMs = connectTimeoutFor(body.length, policy.totalBudgetMs);
   log(`incoming ${req.method} ${req.url} body=${(body.length / 1024).toFixed(0)}KB ` +
-      `waitHeader=${Math.round(attemptTimeoutMs / 1000)}s budget=${Math.round(cfg.totalBudgetMs / 1000)}s`);
+      `waitHeader=${Math.round(attemptTimeoutMs / 1000)}s budget=${Math.round(policy.totalBudgetMs / 1000)}s`);
 
   const handleStatusError = (message, attempt, source, status) => {
+    if (!policy.repairStatus) return null;
     const match = /^Unknown parameter: ['"]input\[(\d+)\]\.status['"]\.(?:\s*\[trace_id=[^\]\r\n]+\])?\s*$/.exec(String(message || ''));
     if (!match) return null;
     const index = Number(match[1]);
@@ -1114,7 +1207,7 @@ async function handle(req, res, state) {
 
   // Called uniformly for HTTP errors, pre-commit SSE errors and 200 JSON errors.
   const handleItemError = (message, attempt, source, status, errorCode) => {
-    if (eligibleCodex) {
+    if (eligibleCodex || (hasPolicySettings && isResponses)) {
       const info = { code: errorCode, message };
       // A throttled/failing route can quote history errors without confirming that the
       // history caused this attempt. Keep its original recovery classification instead.
@@ -1129,7 +1222,7 @@ async function handle(req, res, state) {
     const kind = azure ? 'azure_resource_mismatch' : 'stale_reasoning_item';
     diagnose('item_error', { kind, source, status, shape: summarizeResponsesBody(activeBody) });
     // 两类历史错误都可能来自当前通道无法接续；无法安全改写不等于无法原样重试。
-    if (codexResourceRetry && ++resourceFailures >= 5) {
+    if ((codexResourceRetry || (hasPolicySettings && eligibleCodex)) && ++resourceFailures >= 5) {
       diagnose('codex_resource_exhausted', { kind, source, status, resourceFailures, refusal: 'resource_attempt_limit' });
       log(`attempt ${attempt}: ${kind}; stopping after ${resourceFailures} resource attempts`);
       sendPermanent(res, `${kind}: stopping after ${resourceFailures} resource attempts; upstream could not access the retained response history.`);
@@ -1148,16 +1241,18 @@ async function handle(req, res, state) {
           return 'retry';
         }
         diagnose('codex_resource_exhausted', { kind, source, status, refusal });
-        sendRetryable(res, 503, lastReason, attempt);
+        sendRetryable(res, 503, lastReason, attempt, policy);
         return 'stop';
       }
       log(`attempt ${attempt}: ${kind}: repair refused: ${reason}; not retrying`);
       sendPermanent(res, `${kind}: ${reason}. Use the original Azure resource or resend complete inline history without server-side references; reasoning continuity cannot be preserved.`);
       return 'stop';
     };
+    if (policy.historyMode === 'off') return fail('history recovery is disabled by policy');
+    if (preflightRefused) return fail('preflight history failed safety validation');
     if (!isResponses) return fail('automatic item repair is restricted to POST /v1/responses', 'wrong_endpoint');
-    // Claude parity for Codex: the first confirmed history error repairs and registers
-    // the session instead of waiting for a second consecutive same-kind failure.
+    // The default confirms on the first error. Custom thresholds accumulate only
+    // this request's same-kind history evidence, never throttling or empty replies.
     if (eligibleCodex && historyRepairChecked) {
       lastReason = `${kind}: upstream could not access the retained response history`;
       if (ac.signal.aborted) return 'stop';
@@ -1166,14 +1261,22 @@ async function handle(req, res, state) {
         return 'retry';
       }
       diagnose('codex_resource_exhausted', { kind, source, status, refusal: 'time_budget' });
-      sendRetryable(res, 503, lastReason, attempt);
+      sendRetryable(res, 503, lastReason, attempt, policy);
       return 'stop';
     }
     if (repairedItems) return fail('single item-repair attempt exhausted', 'repair_exhausted');
-    if (eligibleCodex) historyRepairChecked = true;
+    const confirmations = (historyErrorCounts.get(kind) || 0) + 1;
+    historyErrorCounts.set(kind, confirmations);
+    if (eligibleCodex && confirmations >= policy.historyConfirmations) historyRepairChecked = true;
     const repaired = repairResponsesItems(activeBody, { stripItemIds: azure || eligibleCodex, dropReasoning: true, codexHistory: eligibleCodex });
     if (repaired.error) return fail(repaired.error);
     if (deadline - Date.now() < cfg.minRetryWindowMs + cfg.deployDelayMs) return fail('insufficient time budget for repair', 'time_budget');
+    if (confirmations < policy.historyConfirmations) {
+      if (ac.signal.aborted) return 'stop';
+      if (attempt >= maxAttempts) return fail('history confirmation budget exhausted', 'time_budget');
+      log(`attempt ${attempt}: ${kind}; confirmed ${confirmations}/${policy.historyConfirmations}, retaining history`);
+      return 'retry';
+    }
     if ((azure || eligibleCodex) && rememberCompatibility(compatibility, compatibilityCache)) {
       diagnose('session_compat_enabled', { kind, source: compatibility.source });
     }
@@ -1237,15 +1340,16 @@ async function handle(req, res, state) {
     maxAttempts = Math.max(maxAttempts, cfg.deployMaxAttempts);
     // Codex history repair requires an explicit history error; empty replies alone
     // must neither trigger a lossy repair nor mutate the frozen/request-retained body.
-    if (!isResponses || eligibleCodex) return;
+    if (!isResponses || eligibleCodex || !policy.emptyResponseRepair) return;
     // 1 级无损，2 次失败就做。2 级要牺牲推理连续性，所以要多 4 次失败的证据，
     // 且只在 1 级确实改动过请求体时才做 —— 若 1 级无可改之处，说明形状假设不成立，
     // 那是与形状无关的真实限流，不该拿推理连续性去赌。
-    if (shapeRepairStage === 0 && !repairedItems && preCommitFailures >= 2) {
+    if (shapeRepairStage === 0 && !repairedItems && preCommitFailures >= policy.emptyResponseNormalizeAfter) {
       shapeRepairStage = 1;
       if (!repairShape(1, attempt, source)) return;
     }
-    if (shapeRepairStage === 1 && shapeNormalized && preCommitFailures >= 6) {
+    if (shapeRepairStage === 1 && shapeNormalized && policy.emptyResponseDropReasoning
+        && preCommitFailures >= policy.emptyResponseReasoningAfter) {
       shapeRepairStage = 2;
       repairShape(2, attempt, source);
     }
@@ -1256,7 +1360,7 @@ async function handle(req, res, state) {
     if (eligibleCodex && repairedItems && postRepairSends >= 3) {
       diagnose('codex_resource_exhausted', { kind: frozenHistoryKind, resourceFailures,
         refusal: 'resource_attempt_limit' });
-      return sendRetryable(res, 503, lastReason, attemptCount);
+      return sendRetryable(res, 503, lastReason, attemptCount, policy);
     }
     // 剩余预算不足以支撑「再等一次 + 还可能再重试」时，就别开新尝试了：
     // 否则只会白等到客户端自己超时。
@@ -1264,7 +1368,7 @@ async function handle(req, res, state) {
     if (attempt > 1 && remaining < cfg.minRetryWindowMs) {
       lastReason = `gave up retrying: only ${Math.round(remaining / 1000)}s of budget left`;
       log(`attempt ${attempt}: ${lastReason}`);
-      return sendRetryable(res, 503, lastReason, attempt - 1);
+      return sendRetryable(res, 503, lastReason, attempt - 1, policy);
     }
     // 每次尝试独立控制器：既能被客户端断开连带中止，也能被超时单独中止
     const attemptAc = new AbortController();
@@ -1302,9 +1406,9 @@ async function handle(req, res, state) {
       } catch (e) {
         if (ac.signal.aborted) return;
         if (outOfBudget()) {
-          lastReason = `total budget ${cfg.totalBudgetMs}ms exhausted`;
+          lastReason = `total budget ${policy.totalBudgetMs}ms exhausted`;
           log(`attempt ${attempt}: ${lastReason}`);
-          return sendRetryable(res, 503, lastReason, attempt);
+          return sendRetryable(res, 503, lastReason, attempt, policy);
         }
         lastReason = connectTimedOut
           ? `upstream connect timeout after ${cfg.connectTimeoutMs}ms`
@@ -1313,7 +1417,7 @@ async function handle(req, res, state) {
         // 连接超时/失败属于通道抖动：放宽次数、缩短间隔，快速换通道
         maxAttempts = Math.max(maxAttempts, cfg.deployMaxAttempts);
         if (attempt < maxAttempts) { await retrySleep(cfg.deployDelayMs); continue; }
-        return sendRetryable(res, 502, lastReason, attempt);
+        return sendRetryable(res, 502, lastReason, attempt, policy);
       } finally {
         clearTimeout(connectTimer);   // 已拿到响应头，后续由 peek 的读取超时接管
       }
@@ -1357,10 +1461,10 @@ async function handle(req, res, state) {
             await retrySleep(cfg.deployDelayMs);
             continue;
           }
-          return sendRetryable(res, 429, lastReason, attempt);
+          return sendRetryable(res, 429, lastReason, attempt, policy);
         }
-        if (attempt < maxAttempts) { await retrySleep(backoffMs(attempt)); continue; }
-        return sendRetryable(res, upstream.status === 429 ? 429 : 503, lastReason, attempt);
+        if (attempt < maxAttempts) { await retrySleep(backoffMs(attempt, policy)); continue; }
+        return sendRetryable(res, upstream.status === 429 ? 429 : 503, lastReason, attempt, policy);
       }
 
       const ct = (upstream.headers.get('content-type') || '').toLowerCase();
@@ -1421,8 +1525,8 @@ async function handle(req, res, state) {
         // 200 流内可重试错误（生产实测 154/154 都是 rate_limit_exceeded）刻意不做形状修复：
         // 实测把 item id 和 reasoning 都摘干净之后，请求仍然被限流 5~21 次 —— 形状不是触发条件，
         // 再改请求体只是白白损失推理连续性。这里保持纯重试。
-        if (attempt < maxAttempts) { await retrySleep(backoffMs(attempt)); continue; }
-        return sendRetryable(res, 429, lastReason, attempt);
+        if (attempt < maxAttempts) { await retrySleep(backoffMs(attempt, policy)); continue; }
+        return sendRetryable(res, 429, lastReason, attempt, policy);
       }
 
       // 非流式
@@ -1462,13 +1566,13 @@ async function handle(req, res, state) {
           await retrySleep(cfg.deployDelayMs);
           continue;
         }
-        return sendRetryable(res, 429, lastReason, attempt);
+        return sendRetryable(res, 429, lastReason, attempt, policy);
       }
       if (info && isRetryableError(info)) {
         lastReason = `HTTP 200 but body was an error: ${info.code || ''} ${info.message}`;
         log(`attempt ${attempt}: ${lastReason}`);
-        if (attempt < maxAttempts) { await retrySleep(backoffMs(attempt)); continue; }
-        return sendRetryable(res, 429, lastReason, attempt);
+        if (attempt < maxAttempts) { await retrySleep(backoffMs(attempt, policy)); continue; }
+        return sendRetryable(res, 429, lastReason, attempt, policy);
       }
 
       if (obj && isEmptyCompletion(obj)) {      // 空回应
@@ -1480,7 +1584,7 @@ async function handle(req, res, state) {
           await retrySleep(cfg.deployDelayMs);
           continue;
         }
-        return sendRetryable(res, 429, lastReason, attempt);
+        return sendRetryable(res, 429, lastReason, attempt, policy);
       }
 
       if (attempt > 1) log(`attempt ${attempt}: recovered on a later route (previous failures: ${attempt - 1})`);
@@ -1512,6 +1616,7 @@ function localControl(req, res, pathname) {
     controlResponse(res, 200, {
       loadedVersion, startedAt, pid: process.pid, supervisorEnabled, restarting, draining, restartError,
       safeShutdownVersion: 1,
+      policy: { revision: policyRevision, settings: policySettings },
       activeRequests: activeRequests.size,
       config: { statusIntervalMs: cfg.statusIntervalMs, streamIdleMs: cfg.streamIdleMs,
         streamProgressMs: cfg.streamProgressMs, peekTotalMs: cfg.peekTotalMs,

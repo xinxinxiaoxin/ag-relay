@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   ActivityIcon, ArrowUpRightIcon, CheckIcon, CopyIcon, FileTextIcon, LogOutIcon, MonitorIcon,
-  MoreHorizontalIcon, PlayIcon, RotateCwIcon, SearchIcon, Settings2Icon,
+  MoreHorizontalIcon, PlayIcon, RotateCwIcon, SearchIcon, Settings2Icon, SlidersHorizontalIcon,
   ShieldAlertIcon, ShieldCheckIcon, SquareIcon, TerminalIcon,
 } from 'lucide-react'
 import { toast } from 'sonner'
@@ -35,6 +35,8 @@ import { Toaster } from '@/components/ui/sonner'
 import { OverviewPage } from '@/pages/overview-page'
 import { LogsPage } from '@/pages/logs-page'
 import { SettingsPage } from '@/pages/settings-page'
+import { PolicyPage } from '@/pages/policy-page'
+import { createPolicyEditor } from '@/lib/policy-settings'
 import { useActivity } from '@/hooks/use-activity'
 import { ENDPOINT, stateNames } from '@/lib/types'
 import type { GatewayAction, GatewayErrorInfo, GatewaySnapshot, PageId } from '@/lib/types'
@@ -45,7 +47,7 @@ import {
 
 import { getConnectionSettings } from '@/lib/connection-settings'
 
-const pageNames: Record<PageId, string> = { overview: '网关总览', logs: '诊断日志', settings: '偏好设置' }
+const pageNames: Record<PageId, string> = { overview: '网关总览', logs: '诊断日志', settings: '偏好设置', policy: '重试与剥离' }
 // start_gateway 失败原因 → 中文吐司（port_already_in_use 需先探测，单独处理，见 runStart）。
 const START_FAILURE_TEXT: Record<string, string> = {
   node_missing: '自带 Node 运行时缺失，无法启动网关。',
@@ -58,6 +60,7 @@ const PORT_CONFLICT_DETAIL = '另一个程序正在占用所选端口，且未�
 const navigation = [
   { id: 'overview' as const, name: '网关总览', icon: ActivityIcon },
   { id: 'logs' as const, name: '诊断日志', icon: FileTextIcon },
+  { id: 'policy' as const, name: '重试与剥离', icon: SlidersHorizontalIcon },
   { id: 'settings' as const, name: '偏好设置', icon: Settings2Icon },
 ]
 
@@ -127,6 +130,7 @@ function AppSidebar({ page, onNavigate, onSearch, onAction, appVersion, updateNo
 
 export default function App() {
   const [page, setPage] = useState<PageId>('overview')
+  const [policyEditor] = useState(createPolicyEditor)
   const update = useUpdate()
   const updateNotice = update.state.view?.phase === 'needs_attention' ? '更新需要处理' : update.state.hasUpdate ? '有可用更新' : null
   const attentionShown = useRef<string | null>(null)
@@ -302,9 +306,9 @@ export default function App() {
     try {
       const r = await restartGateway()
       switch (r.kind) {
-        case 'restarted': toast('网关已安全重启，已应用保存的连接设置。'); break
+        case 'restarted': toast('网关已安全重启；连接与策略的实际生效状态请查看对应设置页。'); break
         case 'not_running': toast('网关未运行，请先启动。'); break
-        case 'timeout': toast('排空超时，已恢复接单，未强杀；连接设置尚未应用，请稍后重试。'); break
+        case 'timeout': toast('排空超时，已恢复接单，未强杀；已保存的连接与策略变更尚未应用，请稍后重试。'); break
         case 'failed':
           toast.error(`安全重启失败：${r.detail}`)
           setGatewayError({ portConflict: false, title: '安全重启失败', detail: `重启网关时出错：${r.detail}。请稍后重试，或打开日志文件夹查看详情。` })
@@ -369,6 +373,7 @@ export default function App() {
               {page === 'overview' && <OverviewPage {...common} appVersion={appVersion} gatewayError={gatewayError} onDismissError={() => setGatewayError(null)} />}
               {page === 'logs' && <LogsPage {...common} />}
               {page === 'settings' && <SettingsPage {...common} update={update} />}
+              {page === 'policy' && <PolicyPage editor={policyEditor} snapshot={view} onAction={act} />}
             </div>
           </main>
           <footer className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-t border-border bg-white/60 px-5 py-2 text-[11px] text-muted-foreground"><span>AG Relay · Agent Router专属网关</span><span className="tabular-nums">v{appVersion}</span></footer>
@@ -397,7 +402,7 @@ export default function App() {
           <AlertDialogHeader>
             <AlertDialogTitle>安全重启网关？</AlertDialogTitle>
             <AlertDialogDescription>
-              将先优雅排空在途请求，再使用已保存的连接设置重新启动网关。排空最多等待 10 秒，超时不强杀、不应用设置，恢复接单后可稍后重试。
+              将先优雅排空在途请求，再使用已保存的连接与策略设置重新启动网关。排空最多等待 10 秒，超时不强杀、不应用设置，恢复接单后可稍后重试。
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -417,7 +422,7 @@ export default function App() {
             <AlertDialogTitle>{externalConfirm === 'restart' ? '重启外部实例？' : '停止外部实例？'}</AlertDialogTitle>
             <AlertDialogDescription>
               {externalConfirm === 'restart'
-                ? '将优雅排空外部网关后，使用已保存的连接设置启动受管网关。排空最多等待 10 秒，超时不强杀；不支持安全停机的旧实例将保持不动。'
+                ? '将优雅排空外部网关后，使用已保存的连接与策略设置启动受管网关。排空最多等待 10 秒，超时不强杀；不支持安全停机的旧实例将保持不动。'
                 : '将优雅停止监听端口上的外部网关（先排空在途请求）。'}
             </AlertDialogDescription>
           </AlertDialogHeader>

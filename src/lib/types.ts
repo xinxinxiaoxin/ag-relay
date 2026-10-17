@@ -1,6 +1,37 @@
 // 壳前端共享类型与常量。
 // 术语对齐 GLOSSARY.md：活动事件 / 实例归属 / 受管网关 / 外部网关。
-export type PageId = 'overview' | 'logs' | 'settings'
+export type PageId = 'overview' | 'logs' | 'settings' | 'policy'
+
+export type PolicyGroup = 'codex' | 'general'
+export type PolicyMode = 'off' | 'on_error' | 'always'
+export interface PolicyProfile {
+  maxAttempts: number
+  baseDelayMs: number
+  maxDelayMs: number
+  totalBudgetMs: number
+  historyMode: PolicyMode
+  historyConfirmations: number
+  stripItemIds: boolean
+  rememberSession: boolean
+  repairStatus: boolean
+  retryHistory: boolean
+  emptyResponseRepair: boolean
+  emptyResponseDropReasoning: boolean
+  emptyResponseNormalizeAfter: number
+  emptyResponseReasoningAfter: number
+}
+export interface PolicySettings {
+  schemaVersion: 1
+  profiles: { codex: PolicyProfile; general: PolicyProfile }
+}
+export interface PolicySettingsView {
+  defaults: PolicySettings
+  saved: PolicySettings
+  active: PolicySettings | null
+  activeRevision: string | null
+  restartRequired: boolean
+  activeSupported: boolean
+}
 export type GatewayState = 'running' | 'stopped' | 'external' | 'error' | 'starting' | 'draining'
 export type StableState = 'running' | 'stopped' | 'external' | 'error'
 export type GatewayAction = 'start' | 'stop' | 'restart' | 'copy' | 'open-logs' | 'exit'

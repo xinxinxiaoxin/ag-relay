@@ -3,6 +3,7 @@ use crate::{
     connection_settings::{ConnectionSettings, ConnectionSettingsStore},
     gateway_process::{self, GatewayPaths, ManagedChild},
     gateway_safe_shutdown::safe_shutdown_at,
+    policy_settings::{ActivePolicy, PolicySettings, PolicySettingsStore, PolicySettingsView},
 };
 use serde::Serialize;
 use std::{
@@ -42,6 +43,7 @@ pub struct ConnectionSettingsView {
 pub struct GatewayConnection {
     paths: GatewayPaths,
     store: ConnectionSettingsStore,
+    policy_store: Option<PolicySettingsStore>,
     active: Option<ConnectionSettings>,
     managed: Option<ManagedChild>,
 }
@@ -52,10 +54,77 @@ impl GatewayConnection {
         Self {
             paths,
             store,
+            policy_store: None,
             active,
             managed: None,
         }
     }
+    /// 生产路径显式注入两份独立设置；旧构造入口不注入策略 JSON，保留旧环境配置语义。
+    pub fn new_with_policy_store(
+        paths: GatewayPaths,
+        store: ConnectionSettingsStore,
+        policy_store: PolicySettingsStore,
+    ) -> Self {
+        let mut connection = Self::new(paths, store);
+        connection.policy_store = Some(policy_store);
+        connection
+    }
+
+    fn load_policy(&self) -> Result<Option<PolicySettings>, ConnectionError> {
+        self.policy_store
+            .as_ref()
+            .map(PolicySettingsStore::load)
+            .transpose()
+            .map_err(ConnectionError::from)
+    }
+
+    pub fn policy_settings(&self) -> Result<PolicySettingsView, ConnectionError> {
+        let saved = self.load_policy()?.unwrap_or_default();
+        let active = self.read_active_policy();
+        Ok(PolicySettingsView {
+            defaults: PolicySettings::default(),
+            restart_required: active
+                .as_ref()
+                .is_some_and(|active| active.settings != saved),
+            active_supported: active.is_some(),
+            active_revision: active.as_ref().map(|active| active.revision.clone()),
+            active: active.map(|active| active.settings),
+            saved,
+        })
+    }
+
+    pub fn save_policy(
+        &mut self,
+        settings: &PolicySettings,
+    ) -> Result<PolicySettingsView, ConnectionError> {
+        self.policy_store
+            .as_ref()
+            .ok_or_else(|| ConnectionError::Failed("未配置策略设置文件路径".into()))?
+            .save(settings)?;
+        self.policy_settings()
+    }
+
+    fn read_active_policy(&self) -> Option<ActivePolicy> {
+        let port = self.port().ok()?;
+        let body =
+            crate::gateway_status::fetch_status_body(gateway_process::GATEWAY_HOST, port).ok()?;
+        let pid = crate::gateway_status::parse_status_pid(&body)?;
+        let gateway_process::ExternalStopTarget::Supervisor {
+            pid: supervisor_pid,
+        } = gateway_process::resolve_external_stop_target(pid)
+        else {
+            return None;
+        };
+        // 外部实例也须核实属于本网关；持有句柄时还须与当前 supervisor 一致。
+        if self
+            .managed_supervisor_pid()
+            .is_some_and(|expected| expected != supervisor_pid)
+        {
+            return None;
+        }
+        ActivePolicy::from_status(&body)
+    }
+
     pub fn settings(&self) -> Result<ConnectionSettingsView, ConnectionError> {
         let saved = self.store.load()?;
         Ok(ConnectionSettingsView {
@@ -87,6 +156,20 @@ impl GatewayConnection {
     }
 
     pub fn start(&mut self) -> Result<u32, ConnectionError> {
+        let saved = self.store.load()?;
+        let policy = self.load_policy()?;
+        self.start_validated(saved, policy)
+    }
+
+    // restart 传入停机前已经读取/校验的快照，不在停掉旧网关后重新读盘。
+    fn start_validated(
+        &mut self,
+        saved: ConnectionSettings,
+        policy: Option<PolicySettings>,
+    ) -> Result<u32, ConnectionError> {
+        if let Some(policy) = &policy {
+            policy.validate()?;
+        }
         if let Some(child) = self.managed.as_mut() {
             if child
                 .child
@@ -100,16 +183,20 @@ impl GatewayConnection {
             }
             self.managed = None;
         }
-        let saved = self.store.load()?;
-        let child = gateway_process::start_gateway_process_with_settings(&self.paths, &saved)
-            .map_err(|e| {
-                ConnectionError::Failed(match e {
-                    gateway_process::GatewayError::PortAlreadyInUse { .. } => {
-                        "port_already_in_use".into()
-                    }
-                    _ => e.to_string(),
-                })
-            })?;
+        let child = match policy.as_ref() {
+            Some(policy) => {
+                gateway_process::start_gateway_process_with_policy(&self.paths, &saved, policy)
+            }
+            None => gateway_process::start_gateway_process_with_settings(&self.paths, &saved),
+        }
+        .map_err(|e| {
+            ConnectionError::Failed(match e {
+                gateway_process::GatewayError::PortAlreadyInUse { .. } => {
+                    "port_already_in_use".into()
+                }
+                _ => e.to_string(),
+            })
+        })?;
         let pid = child.supervisor_pid;
         self.managed = Some(child);
         self.active = Some(saved.clone());
@@ -167,6 +254,10 @@ impl GatewayConnection {
 
     pub fn restart(&mut self, timeout: Duration) -> Result<bool, ConnectionError> {
         let saved = self.store.load()?;
+        let policy = self.load_policy()?;
+        if let Some(policy) = &policy {
+            policy.validate()?;
+        }
         // 已知启动条件先检查，不为明显不可用的新配置停掉旧网关。
         if !self.paths.node_exe.is_file()
             || !self
@@ -188,7 +279,7 @@ impl GatewayConnection {
         if !self.safe_shutdown(timeout)? {
             return Ok(false);
         }
-        self.start()?;
+        self.start_validated(saved, policy)?;
         Ok(true)
     }
 }

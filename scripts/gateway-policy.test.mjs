@@ -1,0 +1,497 @@
+// 只在 HTTP 网关→假上游和 /_relay/status 接缝验证策略，不读取核心私有函数。
+import assert from 'node:assert/strict'
+import test from 'node:test'
+import http from 'node:http'
+import { spawn } from 'node:child_process'
+import { once } from 'node:events'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { setTimeout as delay } from 'node:timers/promises'
+
+const core = fileURLToPath(new URL('../src-tauri/resources/gateway/relay-retry-proxy.mjs', import.meta.url))
+const runtime = process.platform === 'win32'
+  ? fileURLToPath(new URL('../src-tauri/binaries/node-x86_64-pc-windows-msvc.exe', import.meta.url)) : process.execPath
+const success = { status: 200, body: { ok: true } }
+const missingReasoning = "Item 'ws_policy' of type 'web_search_call' was provided without its required 'reasoning' item: 'rs_policy'."
+const history = {
+  model: 'fixture-model', store: false,
+  input: [
+    { type: 'message', id: 'msg_policy', role: 'user', content: 'policy fixture prompt' },
+    { type: 'reasoning', id: 'rs_policy', summary: [], encrypted_content: 'policy fixture ciphertext' },
+    { type: 'web_search_call', id: 'ws_policy', status: 'completed', action: { type: 'search', query: 'policy fixture query' } },
+  ],
+}
+
+// 产品默认值来自已批准的配置契约；只缩短本测试的重试参数。
+function policy(codex = {}, general = {}) {
+  const defaults = {
+    maxAttempts: 5, baseDelayMs: 10, maxDelayMs: 10, totalBudgetMs: 10000,
+    historyMode: 'on_error', historyConfirmations: 1,
+    stripItemIds: true, rememberSession: true, repairStatus: true, retryHistory: true,
+    emptyResponseRepair: false, emptyResponseDropReasoning: false,
+    emptyResponseNormalizeAfter: 2, emptyResponseReasoningAfter: 6,
+  }
+  return {
+    schemaVersion: 1,
+    profiles: {
+      codex: { ...defaults, ...codex },
+      general: {
+        ...defaults, stripItemIds: false, retryHistory: false,
+        emptyResponseRepair: true, emptyResponseDropReasoning: true, ...general,
+      },
+    },
+  }
+}
+
+const recoveredHistory = {
+  model: 'fixture-model', store: false,
+  input: [
+    { type: 'message', role: 'user', content: 'policy fixture prompt' },
+    { type: 'web_search_call', status: 'completed', action: { type: 'search', query: 'policy fixture query' } },
+  ],
+}
+const crossResource = 'The requested item was created under a different Azure OpenAI resource'
+const staleReasoning = 'encrypted content could not be verified'
+
+function historyError(message = missingReasoning) {
+  return { status: 400, body: { error: { type: 'invalid_request_error', message } } }
+}
+
+async function listen(server) {
+  server.listen(0, '127.0.0.1')
+  await once(server, 'listening')
+  const port = server.address().port
+  assert.notEqual(port, 8787, '测试不得使用真实网关默认端口')
+  return port
+}
+
+const legacyPolicy = Symbol('不设置新策略环境变量')
+
+async function fixture(t, respond, settings = policy(), extraEnv = {}, startupOnly = false) {
+  const dir = mkdtempSync(join(tmpdir(), 'ag-relay-policy-'))
+  const captured = []
+  let upstreamError
+  const upstream = http.createServer(async (req, res) => {
+    try {
+      const chunks = []
+      for await (const chunk of req) chunks.push(chunk)
+      const raw = Buffer.concat(chunks).toString('utf8')
+      const body = JSON.parse(raw)
+      captured.push({ raw, body })
+      const reply = await respond(body, captured.length, req)
+      res.writeHead(reply.status, { 'content-type': reply.type ?? 'application/json', connection: 'close' })
+      res.end(typeof reply.body === 'string' ? reply.body : JSON.stringify(reply.body))
+    } catch (error) {
+      upstreamError = error
+      res.writeHead(500).end()
+    }
+  })
+  let child
+  let closed
+  t.after(async () => {
+    try {
+      if (child && child.exitCode === null && child.signalCode === null) {
+        if (child.connected) child.send({ type: 'shutdown' })
+        await Promise.race([closed, delay(1500)])
+        // 只清理本测试持有的子进程，绝不通过真实端口、PID 搜索或进程名杀进程。
+        if (child.exitCode === null && child.signalCode === null) child.kill()
+        await Promise.race([closed, delay(3000).then(() => { throw new Error('策略测试隔离核心未退出') })])
+      }
+    } finally {
+      upstream.closeAllConnections()
+      await new Promise(resolve => upstream.close(resolve))
+      if (!child || child.exitCode !== null || child.signalCode !== null) {
+        rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
+      }
+    }
+    if (upstreamError) throw upstreamError
+  })
+  const upstreamPort = await listen(upstream)
+  const reservation = http.createServer()
+  const port = await listen(reservation)
+  await new Promise(resolve => reservation.close(resolve))
+  // 不继承用户 API 凭据、NODE_OPTIONS 或其真实网关配置。
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => /^(SystemRoot|WINDIR|TEMP|TMP)$/i.test(key)))
+  Object.assign(env, {
+    PROXY_HOST: '127.0.0.1', PROXY_PORT: String(port), PROXY_UPSTREAM: `http://127.0.0.1:${upstreamPort}`,
+    PROXY_DIAGNOSTICS_FILE: join(dir, 'diagnostics.jsonl'), PROXY_VERBOSE: '0', PROXY_SUPERVISED: '1',
+    PROXY_MAX_ATTEMPTS: '5', PROXY_DEPLOY_MAX_ATTEMPTS: '5', PROXY_BASE_DELAY_MS: '10',
+    PROXY_MAX_DELAY_MS: '10', PROXY_DEPLOY_DELAY_MS: '10', PROXY_TOTAL_BUDGET_MS: '10000',
+    PROXY_MIN_RETRY_WINDOW_MS: '100', PROXY_CONNECT_TIMEOUT_MS: '2000',
+    ...(settings === legacyPolicy ? {} : { PROXY_POLICY_JSON: JSON.stringify(settings) }), ...extraEnv,
+  })
+  child = spawn(runtime, [core], { cwd: dir, env, windowsHide: true, stdio: ['ignore', 'ignore', 'pipe', 'ipc'] })
+  closed = new Promise(resolve => child.once('close', resolve))
+  let stderr = ''
+  child.stderr.on('data', chunk => { stderr = (stderr + chunk).slice(-4096) })
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`策略测试隔离核心就绪超时：${stderr}`)), 5000)
+    child.once('error', error => { clearTimeout(timer); reject(error) })
+    child.once('exit', code => { clearTimeout(timer); reject(new Error(`策略测试隔离核心退出 ${code}：${stderr}`)) })
+    child.once('message', message => {
+      clearTimeout(timer)
+      if (message.type === 'ready') resolve()
+      else reject(new Error('策略测试隔离核心未报告 ready'))
+    })
+  })
+  // 无效配置测试只观察持有子进程的启动结果，绝不发 HTTP 探测请求。
+  if (startupOnly) assert.fail('无效策略意外到达 ready：必须在监听前拒绝')
+  // IPC 是自己持有的进程通道。绑定失败不访问端口，ready 后核对 PID 才发送业务请求。
+  const url = `http://127.0.0.1:${port}`
+  const getStatus = async () => {
+    const response = await fetch(`${url}/_relay/status`, { signal: AbortSignal.timeout(2000) })
+    assert.equal(response.status, 200)
+    const status = await response.json()
+    assert.equal(status.pid, child.pid)
+    return status
+  }
+  await getStatus()
+  return {
+    captured, status: getStatus,
+    async request(body = history, headers = {}, options = {}) {
+      const response = await fetch(`${url}${options.path ?? '/v1/responses'}`, {
+        method: 'POST', signal: options.signal ?? AbortSignal.timeout(12000),
+        headers: {
+          authorization: 'Bearer policy-fixture-only-not-a-key', 'content-type': 'application/json',
+          'x-relay-client': 'codex', ...headers,
+        },
+        body: typeof body === 'string' ? body : JSON.stringify(body),
+      })
+      return { status: response.status, body: await response.text() }
+    },
+  }
+}
+
+test('policy 两组重试参数独立：Codex 两次、general 四次并回报实际设置', async t => {
+  const settings = policy({ maxAttempts: 2 }, { maxAttempts: 4 })
+  const f = await fixture(t, () => ({ status: 503, body: { error: { code: 'server_error', message: 'fixture unavailable' } } }), settings)
+  const request = { model: 'fixture-model', input: 'policy retry fixture' }
+  assert.equal((await f.request(request)).status, 503)
+  assert.equal(f.captured.length, 2, 'Codex 必须遵守自己的两次发送上限，而非旧 env 五次')
+  assert.equal((await f.request(request, { 'x-relay-client': 'claude' })).status, 503)
+  assert.equal(f.captured.length, 6, 'general 必须独立使用四次上限，而非继承 Codex 两次')
+  const status = await f.status()
+  assert.deepEqual(status.policy?.settings, settings, '状态回执必须是实际生效的完整双 profile 设置')
+  assert.match(status.policy?.revision ?? '', /^[a-f0-9]{64}$/, '状态回执须提供策略修订号，不在测试中复制哈希实现')
+})
+
+for (const confirmations of [1, 2, 3, 4]) {
+  test(`policy 历史确认 ${confirmations}：门槛前逐字节保留，到门槛才整组降级`, async t => {
+    const raw = ` \n${JSON.stringify(history)}\n `
+    const f = await fixture(t, (_, count) => count <= confirmations ? historyError() : success,
+      policy({ historyConfirmations: confirmations, stripItemIds: false, rememberSession: false }))
+    assert.equal((await f.request(raw)).status, 200)
+    assert.equal(f.captured.length, confirmations + 1)
+    for (const request of f.captured.slice(0, confirmations)) assert.equal(request.raw, raw)
+    assert.deepEqual(f.captured[confirmations].body, recoveredHistory)
+  })
+}
+
+test('policy 历史确认掺入限流：限流不计数，也不清除当前请求已有证据', async t => {
+  const raw = ` \n${JSON.stringify(history)}\n `
+  const replies = [historyError(), {
+    status: 429, body: { error: { code: 'rate_limit_exceeded', message: missingReasoning } },
+  }, historyError(), success]
+  const f = await fixture(t, (_, count) => replies[count - 1] ?? success,
+    policy({ historyConfirmations: 2, stripItemIds: false, rememberSession: false }))
+  assert.equal((await f.request(raw)).status, 200)
+  assert.equal(f.captured.length, 4)
+  for (const request of f.captured.slice(0, 3)) assert.equal(request.raw, raw)
+  assert.deepEqual(f.captured[3].body, recoveredHistory)
+})
+
+test('policy 历史确认分类型：跨资源与失效推理分别累计', async t => {
+  const raw = ` \n${JSON.stringify(history)}\n `
+  const replies = [historyError(crossResource), historyError(staleReasoning), historyError(crossResource), success]
+  const f = await fixture(t, (_, count) => replies[count - 1] ?? success,
+    policy({ historyConfirmations: 2, stripItemIds: false, rememberSession: false }))
+  assert.equal((await f.request(raw)).status, 200)
+  assert.equal(f.captured.length, 4)
+  for (const request of f.captured.slice(0, 3)) assert.equal(request.raw, raw)
+  assert.deepEqual(f.captured[3].body, recoveredHistory)
+})
+
+test('policy 提前整组降级：Codex 搜索与普通、自定义工具内容完整保留', async t => {
+  const tools = [
+    { type: 'function_call', call_id: 'call_policy_function', name: 'fixture_lookup', arguments: '{"id":"nested_keep"}' },
+    { type: 'function_call_output', call_id: 'call_policy_function', output: 'policy function result' },
+    { type: 'custom_tool_call', call_id: 'call_policy_custom', name: 'fixture_custom', input: '{"encrypted_content":"nested_keep"}' },
+    { type: 'custom_tool_call_output', call_id: 'call_policy_custom', output: [{ type: 'input_text', text: 'policy custom result' }] },
+  ]
+  const action = { type: 'search', queries: ['first query', 'second query'], sources: [{ type: 'url', url: 'https://example.invalid/policy', id: 'source_keep' }] }
+  const body = structuredClone(history)
+  body.input[2].action = action
+  body.input.push(...tools.map((item, index) => ({ id: `tool_policy_${index}`, ...item })))
+  const f = await fixture(t, () => success, policy({ historyMode: 'always' }))
+  assert.equal((await f.request(body)).status, 200)
+  assert.equal(f.captured.length, 1, '提前模式不需要先制造一次上游错误')
+  assert.deepEqual(f.captured[0].body, {
+    model: 'fixture-model', store: false,
+    input: [
+      { type: 'message', role: 'user', content: 'policy fixture prompt' },
+      { type: 'web_search_call', status: 'completed', action }, ...tools,
+    ],
+  })
+})
+
+for (const [name, extra, item] of [
+  ['previous_response_id', { previous_response_id: 'resp_policy_server_only' }],
+  ['conversation', { conversation: { id: 'conv_policy_server_only' } }],
+  ['item_reference', {}, { type: 'item_reference', id: 'msg_policy_server_only' }],
+  ['compaction', {}, { type: 'compaction', encrypted_content: 'opaque policy fixture' }],
+  ['未知项', {}, { type: 'future_tool', id: 'opaque_policy_fixture' }],
+  ['工具缺结果', {}, { type: 'function_call', call_id: 'call_policy_orphan', name: 'fixture', arguments: '{}' }],
+  ['孤立工具结果', {}, { type: 'function_call_output', call_id: 'call_policy_orphan', output: 'fixture result' }],
+  ['非推理密文', {}, { type: 'message', role: 'assistant', content: 'fixture text', encrypted_content: 'must keep' }],
+  ['未知搜索动作', {}, { type: 'web_search_call', id: 'ws_unknown', status: 'completed', action: { type: 'future_action' } }],
+]) {
+  test(`policy 提前校验失败 ${name}：包括 message.id 在内整个原始 body 逐字节保留`, async t => {
+    const body = { ...structuredClone(history), ...extra }
+    if (item) body.input.push(item)
+    const raw = ` \n${JSON.stringify(body, null, 2)}\n `
+    const f = await fixture(t, () => success,
+      policy({ historyMode: 'always', stripItemIds: true, rememberSession: true }))
+    assert.equal((await f.request(raw)).status, 200)
+    assert.equal(f.captured.length, 1)
+    assert.equal(f.captured[0].raw, raw, '拒绝整组提前降级后，不能再经 strip/cache 路径局部改写')
+  })
+}
+
+test('policy general 提前模式不套 Codex 搜索专用降级变体', async t => {
+  const raw = ` \n${JSON.stringify(history)}\n `
+  const f = await fixture(t, () => success, policy({}, { historyMode: 'always', stripItemIds: false }))
+  assert.equal((await f.request(raw, { 'x-relay-client': 'claude' })).status, 200)
+  assert.equal(f.captured.length, 1)
+  assert.equal(f.captured[0].raw, raw, 'general 无法证明搜索可完整重放时拒绝整组提前变更')
+})
+
+for (const [name, outputs] of [['缺工具结果', 0], ['重复工具结果', 2]]) {
+  test(`policy general 提前${name}：拒绝不完整配对并保留整个原始 body`, async t => {
+    const output = { type: 'function_call_output', call_id: 'call_general_policy', output: 'fixture result' }
+    const body = {
+      model: 'fixture-model', input: [
+        { type: 'message', id: 'msg_general_policy', role: 'user', content: 'fixture request' },
+        { type: 'reasoning', id: 'rs_general_policy', encrypted_content: 'fixture ciphertext' },
+        { type: 'function_call', id: 'fc_general_policy', call_id: 'call_general_policy', name: 'fixture', arguments: '{}' },
+        ...Array.from({ length: outputs }, () => ({ ...output })),
+      ],
+    }
+    const raw = ` \n${JSON.stringify(body)}\n `
+    const f = await fixture(t, () => success, policy({}, { historyMode: 'always' }))
+    assert.equal((await f.request(raw, { 'x-relay-client': 'claude' })).status, 200)
+    assert.equal(f.captured.length, 1)
+    assert.equal(f.captured[0].raw, raw, 'general 提前模式也须验证一一完整配对，不能部分删除历史')
+  })
+}
+
+for (const rememberSession of [false, true]) {
+  test(`policy 会话记忆 ${rememberSession ? 'on' : 'off'}：只在允许时改变同会话下一次首发`, async t => {
+    const raw = ` \n${JSON.stringify(history)}\n `
+    const f = await fixture(t, (_, count) => count === 1 ? historyError() : success,
+      policy({ stripItemIds: false, rememberSession }))
+    const headers = { 'x-relay-session-id': 'policy-memory-fixture' }
+    assert.equal((await f.request(raw, headers)).status, 200)
+    assert.equal(f.captured.length, 2)
+    assert.equal(f.captured[0].raw, raw)
+    assert.deepEqual(f.captured[1].body, recoveredHistory)
+    assert.equal((await f.request(raw, headers)).status, 200)
+    assert.equal(f.captured.length, 3)
+    if (rememberSession) assert.deepEqual(f.captured[2].body, recoveredHistory)
+    else assert.equal(f.captured[2].raw, raw, '记忆关闭不能经缓存提前剥离下一请求')
+  })
+}
+
+for (const stripItemIds of [false, true]) {
+  test(`policy history off 与首发编号清理 ${stripItemIds ? 'on' : 'off'} 互相独立`, async t => {
+    const raw = ` \n${JSON.stringify(history)}\n `
+    const f = await fixture(t, () => success, policy({ historyMode: 'off', stripItemIds }))
+    assert.equal((await f.request(raw)).status, 200)
+    assert.equal(f.captured.length, 1)
+    if (!stripItemIds) assert.equal(f.captured[0].raw, raw)
+    else assert.deepEqual(f.captured[0].body, {
+      model: 'fixture-model', store: false,
+      input: [recoveredHistory.input[0], history.input[1], history.input[2]],
+    }, '只清可选编号，搜索关联的推理及编号仍保留')
+  })
+}
+
+test('policy Codex history off 不得误落到 general 空响应形状修复', async t => {
+  const body = { model: 'fixture-model', input: history.input.slice(0, 2) }
+  const raw = ` \n${JSON.stringify(body)}\n `
+  const f = await fixture(t, (_, count) => count <= 2
+    ? { status: 200, type: 'text/event-stream', body: '' } : success,
+  policy({ historyMode: 'off', stripItemIds: false }))
+  assert.equal((await f.request(raw)).status, 200)
+  assert.equal(f.captured.length, 3)
+  assert.ok(f.captured.every(request => request.raw === raw), 'Codex 身份不能被 history 开关抹掉')
+})
+
+for (const retryHistory of [false, true]) {
+  test(`policy 保留历史重试 ${retryHistory ? 'on' : 'off'}：不能改写时遵守独立开关`, async t => {
+    const raw = ` \n${JSON.stringify({ ...history, previous_response_id: 'resp_retry_policy' })}\n `
+    const f = await fixture(t, () => historyError(crossResource),
+      policy({ maxAttempts: 3, stripItemIds: false, retryHistory }))
+    assert.equal((await f.request(raw)).status, retryHistory ? 503 : 400)
+    assert.equal(f.captured.length, retryHistory ? 3 : 1)
+    assert.ok(f.captured.every(request => request.raw === raw))
+  })
+}
+
+for (const client of ['codex', 'claude']) {
+  for (const repairStatus of [false, true]) {
+    for (const carrier of ['http', 'json', 'sse']) {
+      test(`policy status 精确拒绝 ${client}/${carrier}/${repairStatus ? 'on' : 'off'}`, async t => {
+        const body = { input: [{ type: 'message', role: 'user', content: 'status fixture', status: 'completed' }] }
+        const raw = ` \n${JSON.stringify(body)}\n `
+        const error = { error: { type: 'invalid_request_error', message: "Unknown parameter: 'input[0].status'." } }
+        const reply = {
+          status: carrier === 'http' ? 400 : 200,
+          type: carrier === 'sse' ? 'text/event-stream' : 'application/json',
+          body: carrier === 'sse' ? `data: ${JSON.stringify(error)}\n\n` : error,
+        }
+        const profile = { historyMode: 'off', repairStatus }
+        const f = await fixture(t, (_, count) => count === 1 ? reply : success, policy(profile, profile))
+        const response = await f.request(raw, { 'x-relay-client': client })
+        assert.equal(response.status, repairStatus || carrier !== 'http' ? 200 : 400)
+        assert.equal(f.captured[0].raw, raw)
+        if (repairStatus) {
+          assert.equal(f.captured.length, 2)
+          assert.deepEqual(f.captured[1].body, {
+            input: [{ type: 'message', role: 'user', content: 'status fixture' }],
+          })
+        } else {
+          // 关闭字段修复不重新定义旧错误信封/通用重试，只禁止任何尝试偷偷删除字段。
+          assert.ok(f.captured.every(request => request.raw === raw))
+          if (carrier === 'http') assert.equal(f.captured.length, 1)
+        }
+      })
+    }
+  }
+}
+
+test('policy status 非精确拒绝不删除字段', async t => {
+  const raw = ' {"input":[{"type":"message","role":"user","content":"status fixture","status":"completed"}]} '
+  const f = await fixture(t, () => historyError('The status is invalid for this account'),
+    policy({ repairStatus: true }))
+  assert.equal((await f.request(raw)).status, 400)
+  assert.equal(f.captured.length, 1)
+  assert.equal(f.captured[0].raw, raw)
+})
+
+for (const source of ['empty', 'history']) {
+  test(`policy general 提前拒绝不被 ${source} 旁路：整次请求保持工具原始字节`, async t => {
+    const raw = ' \n{"input":[{"type":"message","id":"msg_keep","role":"user","content":"fixture"},{"type":"reasoning","id":"rs_keep","encrypted_content":"fixture"},{"type":"function_call","id":"fc_keep","call_id":"call_keep","name":"fixture","arguments":"{}"}]}\n '
+    const f = await fixture(t, (_, count) => source === 'empty'
+      ? (count <= 2 ? { status: 200, type: 'text/event-stream', body: '' } : success)
+      : (count === 1 ? historyError(crossResource) : success), policy({}, { historyMode: 'always' }))
+    const response = await f.request(raw, { 'x-relay-client': 'claude' })
+    if (source === 'empty') {
+      assert.equal(response.status, 200)
+      assert.equal(f.captured.length, 3)
+    }
+    assert.ok(f.captured.length >= 1)
+    for (const request of f.captured) assert.equal(request.raw, raw, '提前整组拒绝之后，空响应与明确历史错误均不能部分改写')
+  })
+}
+
+for (const [name, overrides, normalizeAfter, reasoningAfter] of [
+  ['默认2/6', {}, 2, 6],
+  ['自定义1/3', { emptyResponseNormalizeAfter: 1, emptyResponseReasoningAfter: 3 }, 1, 3],
+  ['history off仍独立2/6', { historyMode: 'off' }, 2, 6],
+]) {
+  test(`policy general 空响应两级修复 ${name}：只在对应门槛后改变请求`, async t => {
+    const body = { input: [
+      { type: 'message', id: 'msg_shape', role: 'user', content: 'shape fixture', status: 'completed' },
+      { type: 'reasoning', id: 'rs_shape', summary: [], encrypted_content: 'shape ciphertext' },
+    ] }
+    const normalized = { input: [
+      { role: 'user', content: 'shape fixture', status: 'completed' },
+      { type: 'reasoning', summary: [], encrypted_content: 'shape ciphertext' },
+    ] }
+    const dropped = { input: [{ role: 'user', content: 'shape fixture', status: 'completed' }] }
+    const raw = ` \n${JSON.stringify(body)}\n `
+    const f = await fixture(t, (_, count) => count <= reasoningAfter
+      ? { status: 200, type: 'text/event-stream', body: '' } : success,
+    policy({}, { maxAttempts: 8, rememberSession: false, ...overrides }))
+    assert.equal((await f.request(raw, { 'x-relay-client': 'claude' })).status, 200)
+    assert.equal(f.captured.length, reasoningAfter + 1)
+    for (const request of f.captured.slice(0, normalizeAfter)) assert.equal(request.raw, raw)
+    for (const request of f.captured.slice(normalizeAfter, reasoningAfter)) assert.deepEqual(request.body, normalized)
+    assert.deepEqual(f.captured[reasoningAfter].body, dropped)
+  })
+}
+
+for (const [name, overrides, alreadyNormalized] of [
+  ['一级关闭', { emptyResponseRepair: false, emptyResponseDropReasoning: false }, false],
+  ['二级关闭', { emptyResponseDropReasoning: false }, false],
+  ['一级没有实际改动', {}, true],
+]) {
+  test(`policy general 空响应 ${name}：不能绕过开关或空转升级删除推理`, async t => {
+    const normalized = { input: [
+      { role: 'user', content: 'shape fixture' },
+      { type: 'reasoning', encrypted_content: 'shape ciphertext' },
+    ] }
+    const body = alreadyNormalized ? normalized : { input: [
+      { type: 'message', id: 'msg_shape', role: 'user', content: 'shape fixture' },
+      { type: 'reasoning', id: 'rs_shape', encrypted_content: 'shape ciphertext' },
+    ] }
+    const raw = ` \n${JSON.stringify(body)}\n `
+    const f = await fixture(t, (_, count) => count <= 6
+      ? { status: 200, type: 'text/event-stream', body: '' } : success,
+    policy({}, { maxAttempts: 8, ...overrides }))
+    assert.equal((await f.request(raw, { 'x-relay-client': 'claude' })).status, 200)
+    assert.equal(f.captured.length, 7)
+    for (const [index, request] of f.captured.entries()) {
+      if (name === '二级关闭' && index >= 2) assert.deepEqual(request.body, normalized)
+      else assert.equal(request.raw, raw)
+    }
+  })
+}
+
+for (const [name, invalid] of [
+  ['顶层null', null], ['顶层数组', []], ['顶层错误类型', 'invalid'],
+  ['版本null', { schemaVersion: null }], ['未知版本', { schemaVersion: 2 }],
+  ['未知顶层字段', { futureSetting: true }], ['profiles为null', { profiles: null }],
+  ['未知profile', { profiles: { other: {} } }], ['codex为null', { profiles: { codex: null } }],
+  ['未知profile字段', policy({ futureSetting: true })], ['整数是字符串', policy({ maxAttempts: '5' })],
+  ['布尔是数字', policy({ rememberSession: 1 })], ['布尔是null', policy({ stripItemIds: null })],
+  ['模式不存在', policy({ historyMode: 'automatic' })], ['次数为零', policy({ maxAttempts: 0 })],
+  ['确认超Codex上限', policy({ historyConfirmations: 5 })],
+  ['确认超发送上限', policy({ maxAttempts: 2, historyConfirmations: 3 })],
+  ['间隔倒挂', policy({ baseDelayMs: 20, maxDelayMs: 10 })],
+  ['阶段倒挂', policy({}, { emptyResponseNormalizeAfter: 6, emptyResponseReasoningAfter: 2 })],
+  ['二级开启一级关闭', policy({}, { emptyResponseRepair: false, emptyResponseDropReasoning: true })],
+  ['Codex不支持empty模块', policy({ emptyResponseRepair: true })],
+  ['general不支持strip模块', policy({}, { stripItemIds: true })],
+  ['general不支持历史保留重试模块', policy({}, { retryHistory: true })],
+]) {
+  test(`policy invalid 启动前拒绝：${name}`, async t => {
+    await assert.rejects(fixture(t, () => { assert.fail('无效配置不能访问假上游') }, invalid, {}, true), /Invalid PROXY_POLICY_JSON/)
+  })
+}
+
+test('policy invalid 启动前拒绝：无法解析的 JSON', async t => {
+  await assert.rejects(fixture(t, () => { assert.fail('无效配置不能访问假上游') }, policy(),
+    { PROXY_POLICY_JSON: '{not-json' }, true), /Invalid PROXY_POLICY_JSON/)
+})
+
+test('policy 新env完全未设置：保留旧env的首发编号开关', async t => {
+  const raw = ` \n${JSON.stringify(history)}\n `
+  const f = await fixture(t, () => success, legacyPolicy, { PROXY_CODEX_STRIP_IDS: '0' })
+  assert.equal((await f.request(raw)).status, 200)
+  assert.equal(f.captured.length, 1)
+  assert.equal(f.captured[0].raw, raw)
+})
+
+test('policy Codex history off：明确历史错误也不得剥离推理或任何条目编号', async t => {
+  const raw = ` \n${JSON.stringify(history)}\n `
+  const f = await fixture(t, (_, count) => count === 1 ? historyError() : success,
+    policy({ historyMode: 'off', stripItemIds: false, rememberSession: true }))
+  await f.request(raw)
+  assert.ok(f.captured.length >= 1, '假上游必须实际收到请求')
+  for (const [index, request] of f.captured.entries()) {
+    assert.equal(request.raw, raw, `historyMode=off 时第 ${index + 1} 次请求必须逐字节保留原始 body`)
+  }
+})

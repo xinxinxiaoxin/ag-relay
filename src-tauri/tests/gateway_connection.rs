@@ -1,6 +1,8 @@
 use ag_relay_lib::{
-    connection_settings::ConnectionSettingsStore, gateway_connection::GatewayConnection,
+    connection_settings::ConnectionSettingsStore,
+    gateway_connection::GatewayConnection,
     gateway_process::GatewayPaths,
+    policy_settings::{PolicySettings, PolicySettingsStore},
 };
 use std::{
     io::{Read, Write},
@@ -33,7 +35,17 @@ struct Fixture {
     pub gateway: GatewayConnection,
 }
 impl Fixture {
+    // 既有回归继续走无策略 JSON 的旧环境入口，保留临时脚本的环境覆盖语义。
     fn new(name: &str, upstream: &str, port: u16) -> Self {
+        Self::build(name, upstream, port, false)
+    }
+
+    // 新策略测试才走生产桌面的完整策略快照入口。
+    fn with_policy(name: &str, upstream: &str, port: u16) -> Self {
+        Self::build(name, upstream, port, true)
+    }
+
+    fn build(name: &str, upstream: &str, port: u16, with_policy: bool) -> Self {
         let dir =
             std::env::temp_dir().join(format!("ag-relay-connection-{name}-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("gateway")).unwrap();
@@ -52,10 +64,13 @@ impl Fixture {
             gateway_dir: dir.join("gateway"),
             diagnostics_file: dir.join("logs/diagnostics.jsonl"),
         };
-        Self {
-            dir,
-            gateway: GatewayConnection::new(paths, store),
-        }
+        let gateway = if with_policy {
+            let policy_store = PolicySettingsStore::new(dir.join("policy-settings.json"));
+            GatewayConnection::new_with_policy_store(paths, store, policy_store)
+        } else {
+            GatewayConnection::new(paths, store)
+        };
+        Self { dir, gateway }
     }
 }
 impl Drop for Fixture {
@@ -63,6 +78,243 @@ impl Drop for Fixture {
         // 正常完成先走安全停机；断言 panic 时只回收自己持有的 Job，不按端口杀进程。
         let _ = self.gateway.safe_shutdown(Duration::from_secs(2));
         let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+#[test]
+fn 策略保存_不重启_安全重启后才由核心确认完整生效() {
+    let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://127.0.0.1:{}", upstream.local_addr().unwrap().port());
+    let port = free_port();
+    let mut fixture = Fixture::with_policy("policy-apply", &url, port);
+    fixture.gateway.start().unwrap();
+    let original_pid = fixture.gateway.managed_supervisor_pid();
+    let original = fixture.gateway.policy_settings().unwrap();
+    assert!(original.active_supported);
+    assert_eq!(original.active.as_ref(), Some(&original.saved));
+    assert!(original
+        .active_revision
+        .as_ref()
+        .is_some_and(|r| !r.is_empty()));
+    assert!(!original.restart_required);
+    let mut changed = original.saved.clone();
+    changed.profiles.codex.max_attempts = 17;
+    changed.profiles.general.base_delay_ms = 333;
+    let saved = fixture.gateway.save_policy(&changed).unwrap();
+    assert_eq!(saved.saved, changed);
+    assert_eq!(saved.active, original.active);
+    assert_eq!(saved.active_revision, original.active_revision);
+    assert!(saved.restart_required);
+    assert_eq!(fixture.gateway.managed_supervisor_pid(), original_pid);
+    assert!(fixture.gateway.restart(Duration::from_secs(3)).unwrap());
+    let applied = fixture.gateway.policy_settings().unwrap();
+    assert_eq!(applied.active, Some(changed));
+    assert!(!applied.restart_required);
+    assert_ne!(applied.active_revision, original.active_revision);
+    assert_ne!(fixture.gateway.managed_supervisor_pid(), original_pid);
+}
+
+#[test]
+fn 策略重启_排空期间磁盘变化不能替换已确认的启动快照() {
+    use std::sync::mpsc;
+    let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://127.0.0.1:{}", upstream.local_addr().unwrap().port());
+    let (seen_tx, seen_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = upstream.accept().unwrap();
+        let mut bytes = [0; 8192];
+        stream.read(&mut bytes).unwrap();
+        seen_tx.send(()).unwrap();
+        release_rx.recv_timeout(Duration::from_secs(15)).unwrap();
+        stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"ok\":true}").unwrap();
+    });
+    let old_port = free_port();
+    let mut fixture = Fixture::with_policy("policy-snapshot", &url, old_port);
+    fixture.gateway.start().unwrap();
+    let planned_port = free_port();
+    let later_port = free_port();
+    let mut planned_policy = PolicySettings::default();
+    planned_policy.profiles.codex.max_attempts = 13;
+    fixture.gateway.save(&url, planned_port.into()).unwrap();
+    fixture.gateway.save_policy(&planned_policy).unwrap();
+    let client = std::thread::spawn(move || request(old_port, "/hold"));
+    seen_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    let dir = fixture.dir.clone();
+    let replace_during_drain = std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            let body =
+                ag_relay_lib::gateway_status::fetch_status_body("127.0.0.1", old_port).unwrap();
+            if serde_json::from_str::<serde_json::Value>(&body).unwrap()["draining"] == true {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        ConnectionSettingsStore::new(dir.join("connection.json"))
+            .save(&url, later_port.into())
+            .unwrap();
+        std::fs::write(dir.join("policy-settings.json"), "{").unwrap();
+        release_tx.send(()).unwrap();
+    });
+    assert!(fixture.gateway.restart(Duration::from_secs(5)).unwrap());
+    replace_during_drain.join().unwrap();
+    assert!(client.join().unwrap().contains("{\"ok\":true}"));
+    server.join().unwrap();
+    let connection = fixture.gateway.settings().unwrap();
+    assert_eq!(connection.active.unwrap().port(), planned_port);
+    assert_eq!(connection.saved.port(), later_port);
+    let body = ag_relay_lib::gateway_status::fetch_status_body("127.0.0.1", planned_port).unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&body).unwrap()["policy"]["settings"],
+        serde_json::to_value(planned_policy).unwrap()
+    );
+}
+
+#[test]
+fn 策略实况_只接受已核实核心的完整有效回执() {
+    use serde_json::json;
+    let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://127.0.0.1:{}", upstream.local_addr().unwrap().port());
+    let owner_port = free_port();
+    let mut owner = Fixture::with_policy("policy-status", &url, owner_port);
+    owner.gateway.start().unwrap();
+    let pid = ag_relay_lib::gateway_status::parse_status_pid(
+        &ag_relay_lib::gateway_status::fetch_status_body("127.0.0.1", owner_port).unwrap(),
+    )
+    .unwrap();
+    let mut effective = PolicySettings::default();
+    effective.profiles.codex.max_attempts = 19;
+    let revision = "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef";
+    let complete = json!({"pid": pid, "policy": {"revision": revision, "settings": effective}});
+    let mut cases = vec![
+        (json!({"pid": pid}), false),
+        (json!({"pid": pid, "policy": null}), false),
+        (
+            json!({"pid": pid, "policy": {"revision": revision, "settings": {"schemaVersion": 1}}}),
+            false,
+        ),
+    ];
+    for pointer in [
+        "/pid",
+        "/policy/revision",
+        "/policy/settings/profiles/codex/maxAttempts",
+    ] {
+        let mut missing = complete.clone();
+        let (parent, key) = pointer.rsplit_once('/').unwrap();
+        missing
+            .pointer_mut(parent)
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .remove(key);
+        cases.push((missing, false));
+    }
+    for (pointer, value) in [
+        ("/pid", json!(0)),
+        ("/policy/revision", json!("")),
+        ("/policy/revision", json!(42)),
+        ("/policy/revision", json!("a".repeat(63))),
+        ("/policy/revision", json!("a".repeat(65))),
+        ("/policy/revision", json!("g".repeat(64))),
+        ("/policy/revision", json!("全".repeat(64))),
+        ("/policy/settings/schemaVersion", json!(2)),
+        (
+            "/policy/settings/profiles/general/stripItemIds",
+            json!(true),
+        ),
+        (
+            "/policy/settings/profiles/codex/historyMode",
+            json!("future_mode"),
+        ),
+        ("/policy/settings/profiles/general/baseDelayMs", json!(0)),
+    ] {
+        let mut invalid = complete.clone();
+        *invalid.pointer_mut(pointer).unwrap() = value;
+        cases.push((invalid, false));
+    }
+    let mut unknown = complete.clone();
+    unknown["policy"]["settings"]["profiles"]["general"]["futureModule"] = json!(false);
+    cases.push((unknown, false));
+    cases.push((complete, true));
+    for (index, (body, supported)) in cases.into_iter().enumerate() {
+        // HTTP 是公开系统边界；所有回执与 PID 均来自本测试持有的临时实例。
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut buffer = [0; 4096];
+            stream.read(&mut buffer).unwrap();
+            let text = body.to_string();
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{text}",
+                text.len()
+            )
+            .unwrap();
+        });
+        let connection =
+            ConnectionSettingsStore::new(owner.dir.join(format!("observer-{index}.json")));
+        connection.save(&url, port.into()).unwrap();
+        let observer = GatewayConnection::new_with_policy_store(
+            GatewayPaths {
+                node_exe: owner.dir.join("unused-node.exe"),
+                gateway_dir: owner.dir.join("gateway"),
+                diagnostics_file: owner.dir.join("logs/observer.jsonl"),
+            },
+            connection,
+            PolicySettingsStore::new(owner.dir.join("observer-policy.json")),
+        );
+        let view = observer.policy_settings().unwrap();
+        server.join().unwrap();
+        assert_eq!(view.active_supported, supported, "case {index}");
+        if supported {
+            assert_eq!(view.active, Some(effective.clone()));
+            assert_eq!(view.active_revision.as_deref(), Some(revision));
+            assert!(
+                view.restart_required,
+                "必须比较实际回执与保存值，而非假设已生效"
+            );
+        } else {
+            assert!(view.active.is_none());
+            assert!(view.active_revision.is_none());
+            assert!(!view.restart_required);
+        }
+    }
+}
+
+#[test]
+fn 策略损坏_启动拒绝且重启不能先停止旧实例() {
+    let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://127.0.0.1:{}", upstream.local_addr().unwrap().port());
+    let port = free_port();
+    let mut fixture = Fixture::with_policy("policy-preflight", &url, port);
+    let path = fixture.dir.join("policy-settings.json");
+    std::fs::write(&path, "{").unwrap();
+    assert!(fixture.gateway.start().is_err());
+    assert!(!fixture.gateway.holds_managed());
+    PolicySettingsStore::new(path.clone())
+        .save(&PolicySettings::default())
+        .unwrap();
+    fixture.gateway.start().unwrap();
+    let original_pid = fixture.gateway.managed_supervisor_pid();
+    for invalid in [
+        "{",
+        r#"{"schemaVersion":2}"#,
+        r#"{"schemaVersion":1,"profiles":{"codex":{"historyConfirmations":5}}}"#,
+    ] {
+        std::fs::write(&path, invalid).unwrap();
+        assert!(fixture.gateway.restart(Duration::from_millis(200)).is_err());
+        assert_eq!(fixture.gateway.managed_supervisor_pid(), original_pid);
+        let body = ag_relay_lib::gateway_status::fetch_status_body("127.0.0.1", port).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&body).unwrap()["draining"],
+            false
+        );
     }
 }
 
