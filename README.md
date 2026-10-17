@@ -185,7 +185,28 @@ node scripts/release.mjs test-build --out C:\Temp\ag-relay-test-artifacts
 
 注：网关核心的四个 `.mjs` 与 `gateway-config.bat` 已由 `.gitattributes` 固定为不做换行符转换（`-text`），因此任何机器上检出内容与仓库内容一致、哈希唯一。此前 `.bat` 未固定：仓库内容为 LF、Windows 检出为 CRLF，两者哈希不同。下表 v0.2.0/v0.3.1 条目记录的是当时**磁盘检出**（CRLF）的值 `102865c8…`，属历史留档不回填；v0.3.2 及以后记录的是**仓库内容**（LF）的值 `9a8a483e…`。
 
-### v0.3.8（当前）
+### v0.3.9（当前）
+
+| 项 | 值 |
+| --- | --- |
+| 打包日期 | 2026-10-17 14:47（UTC+8） |
+| 发布日期 | 2026-10-17 15:04（UTC+8） |
+| 本仓构建提交 | `cd02556dd3b9b6234dd65ac804b9deef283822ae`（tag `v0.3.9`；产物先从工作区构建，通过验证后以此提交归档相同构建输入） |
+| 构建方式 | 维护者本机，原生产更新签名；不运行安装器 |
+| 验证 | 网关 Node 新策略 74 项与历史回归 66 项、Rust 隔离集成 50 项、发布工具 35 项通过；1 项既有手动性能观察忽略；前端构建及策略交互通过；两种安装器更新签名、版本绑定、随包许可、本机路径隐私检查通过；7 个上传文件的 SHA-256 与本地一致；未执行本机安装/升级 |
+| `relay-retry-proxy.mjs` sha256 | `9ad631456995939f2020c3713d797cf0bfd87b9548c51bb67b1c49771bbcd51e` |
+| `relay-supervisor.mjs` sha256 | `f2f030b46999f84afc77f7f92643075c1d1f1ddf7ad3c327fbd92f5593dff77c` |
+| `relay-start-check.mjs` sha256 | `bb54cc7255b4f570ba1bdcfda255f19f0ca0a70fa6d028d0ed4e44f8146037c4` |
+| `bounded-file-log.mjs` sha256 | `3841b877ce76e6ff37497bfbcd65e3dd4f478442dc7fff9eaf4b39612b25c205` |
+| `gateway-config.bat` sha256 | `9a8a483ec40f34fc59ef34284304c938f4a00b6813aa7486c2df501c7caf80ab` |
+| `ag-relay_0.3.9_x64-setup.exe` sha256 | `bf17c9e5e563c30cf20a44fdff73fb565bc04a56282b7357a81487e7d63247e2` |
+| `ag-relay_0.3.9_x64_zh-CN.msi` sha256 | `02815f6c8e84225141cea43fb09f1c8500fb0ca7804943a216d05c8019534f04` |
+| `third-party-sources.tar.gz` sha256 | `56d6dbab5149aec7dfdee1196817613d629958dc922aecde78cc28c37f9b817f` |
+| Release | [v0.3.9](https://github.com/xinxinxiaoxin/ag-relay/releases/tag/v0.3.9)（NSIS + MSI + 各自 `.sig` + `latest.json` + `SHA256SUMS` + 第三方源码附件） |
+
+新增 Codex 与 Claude / Zcode 双组「重试与剥离」设置：模块可添加、移除并说明影响，支持调整重试预算、历史确认门槛、受保护的提前处理及恢复默认。保存与运行中策略分开显示，显式安全重启才应用；旧启动入口继续尊重原环境参数。说明见 [v0.3.9](docs/releases/v0.3.9.md)，构建与发布详情见 [构建记录](docs/releases/v0.3.9-build.md)。
+
+### v0.3.8（历史）
 
 | 项 | 值 |
 | --- | --- |
