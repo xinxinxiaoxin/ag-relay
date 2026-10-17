@@ -1,0 +1,478 @@
+// 隔离验证真实核心：随机回环端口、临时日志、假上游与假凭据，不依赖 Tauri 构建。
+import assert from 'node:assert/strict'
+import test from 'node:test'
+import http from 'node:http'
+import { spawn } from 'node:child_process'
+import { once } from 'node:events'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join, resolve } from 'node:path'
+import { setTimeout as delay } from 'node:timers/promises'
+
+const core = resolve('src-tauri/resources/gateway/relay-retry-proxy.mjs')
+const runtime = process.platform === 'win32'
+  ? resolve('src-tauri/binaries/node-x86_64-pc-windows-msvc.exe') : process.execPath
+const missingReasoning = "Item 'ws_fixture' of type 'web_search_call' was provided without its required 'reasoning' item: 'rs_fixture'. [trace_id=fixture]"
+const success = { status: 200, body: { ok: true } }
+const history = {
+  model: 'fixture-model', store: false,
+  input: [
+    { type: 'message', id: 'msg_fixture', role: 'user', content: 'fixture prompt' },
+    { type: 'reasoning', id: 'rs_fixture', summary: [], encrypted_content: 'fixture ciphertext' },
+    { type: 'web_search_call', id: 'ws_fixture', status: 'completed', action: { type: 'search', query: 'fixture query' } },
+  ],
+}
+const expectedHistory = {
+  model: 'fixture-model', store: false,
+  input: [
+    { type: 'message', role: 'user', content: 'fixture prompt' },
+    { type: 'reasoning', id: 'rs_fixture', summary: [], encrypted_content: 'fixture ciphertext' },
+    { type: 'web_search_call', id: 'ws_fixture', status: 'completed', action: { type: 'search', query: 'fixture query' } },
+  ],
+}
+
+const recoveredHistory = {
+  model: 'fixture-model', store: false,
+  input: [
+    { type: 'message', role: 'user', content: 'fixture prompt' },
+    { type: 'web_search_call', status: 'completed', action: { type: 'search', query: 'fixture query' } },
+  ],
+}
+
+async function listen(server) {
+  server.listen(0, '127.0.0.1')
+  await once(server, 'listening')
+  return server.address().port
+}
+
+async function fixture(t, respond, config = {}, script = core) {
+  const dir = mkdtempSync(join(tmpdir(), 'ag-relay-history-'))
+  const diagnostics = join(dir, 'diagnostics.jsonl')
+  const captured = []
+  let upstreamError
+  const upstream = http.createServer(async (req, res) => {
+    try {
+      const chunks = []
+      for await (const chunk of req) chunks.push(chunk)
+      const raw = Buffer.concat(chunks).toString('utf8')
+      const body = JSON.parse(raw)
+      captured.push({ raw, body })
+      const reply = await respond(body, captured.length, req)
+      res.writeHead(reply.status, { 'content-type': reply.type ?? 'application/json', connection: 'close' })
+      res.end(typeof reply.body === 'string' ? reply.body : JSON.stringify(reply.body))
+    } catch (error) {
+      upstreamError = error
+      res.writeHead(500).end()
+    }
+  })
+  let child
+  let closed
+  t.after(async () => {
+    try {
+      if (child && child.exitCode === null && child.signalCode === null) {
+        if (child.connected) child.send({ type: 'shutdown' })
+        await Promise.race([closed, delay(1500)])
+        // 只终止本测试持有的子进程，不按端口/进程名清理。
+        if (child.exitCode === null && child.signalCode === null) child.kill()
+        await Promise.race([closed, delay(3000).then(() => { throw new Error('隔离核心未退出') })])
+      }
+    } finally {
+      upstream.closeAllConnections()
+      await new Promise(resolve => upstream.close(resolve))
+      if (!child || child.exitCode !== null || child.signalCode !== null) {
+        rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
+      }
+    }
+    if (upstreamError) throw upstreamError
+  })
+  const upstreamPort = await listen(upstream)
+  const reservation = http.createServer()
+  const port = await listen(reservation)
+  await new Promise(resolve => reservation.close(resolve))
+  assert.notEqual(port, 8787)
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => /^(SystemRoot|WINDIR|TEMP|TMP)$/i.test(key)))
+  Object.assign(env, {
+    PROXY_HOST: '127.0.0.1', PROXY_PORT: String(port), PROXY_UPSTREAM: `http://127.0.0.1:${upstreamPort}`,
+    PROXY_DIAGNOSTICS_FILE: diagnostics, PROXY_VERBOSE: '0', PROXY_SUPERVISED: '1',
+    PROXY_MAX_ATTEMPTS: '5', PROXY_DEPLOY_MAX_ATTEMPTS: '5', PROXY_BASE_DELAY_MS: '10',
+    PROXY_MAX_DELAY_MS: '10', PROXY_DEPLOY_DELAY_MS: '10', PROXY_TOTAL_BUDGET_MS: '10000',
+    PROXY_MIN_RETRY_WINDOW_MS: '100', PROXY_CONNECT_TIMEOUT_MS: '2000', ...config,
+  })
+  child = spawn(runtime, [script], { cwd: dir, env, windowsHide: true, stdio: ['ignore', 'ignore', 'pipe', 'ipc'] })
+  closed = new Promise(resolve => child.once('close', resolve))
+  let stderr = ''
+  child.stderr.on('data', chunk => { stderr = (stderr + chunk).slice(-4096) })
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`隔离核心就绪超时：${stderr}`)), 5000)
+    child.once('error', error => { clearTimeout(timer); reject(error) })
+    child.once('exit', code => { clearTimeout(timer); reject(new Error(`隔离核心退出 ${code}：${stderr}`)) })
+    child.once('message', message => {
+      clearTimeout(timer)
+      if (message.type === 'ready') resolve()
+      else reject(new Error('隔离核心未报告 ready'))
+    })
+  })
+  // 收到自己启动的核心 ready 后才访问端口；绑定失败绝不探测可能占位的其他实例。
+  const url = `http://127.0.0.1:${port}`
+  const status = await (await fetch(`${url}/_relay/status`)).json()
+  assert.equal(status.pid, child.pid)
+  return {
+    captured,
+    rows: () => readFileSync(diagnostics, 'utf8').trim().split(/\r?\n/).map(line => JSON.parse(line)),
+    async request(body = history, headers = {}, options = {}) {
+      const response = await fetch(`${url}${options.path ?? '/v1/responses'}`, {
+        method: 'POST', signal: options.signal ?? AbortSignal.timeout(12000),
+        headers: { authorization: 'Bearer fixture-only-not-a-key', 'content-type': 'application/json', 'x-relay-client': 'codex', ...headers },
+        body: typeof body === 'string' ? body : JSON.stringify(body),
+      })
+      return { status: response.status, body: await response.text() }
+    },
+  }
+}
+
+// 仅对本测试已知的 ws_fixture → rs_fixture 配对校验，不假装能从任意历史推断隐式依赖。
+function validateSearch(body) {
+  const hasSearch = body.input.some(item => item.type === 'web_search_call' && item.id === 'ws_fixture')
+  const hasReasoning = body.input.some(item => item.type === 'reasoning' && item.id === 'rs_fixture')
+  return hasSearch && !hasReasoning
+    ? { status: 400, body: { error: { type: 'invalid_request_error', message: missingReasoning } } }
+    : success
+}
+
+test('Codex 网页搜索首发保留配套推理及编号', async t => {
+  const f = await fixture(t, validateSearch)
+  const response = await f.request()
+  assert.equal(response.status, 200, response.body)
+  assert.equal(f.captured.length, 1)
+  assert.deepEqual(f.captured[0].body, expectedHistory)
+})
+
+function historyError(message, carrier = 'http', code) {
+  const body = { error: { type: 'invalid_request_error', message, ...(code ? { code } : {}) } }
+  return {
+    status: carrier === 'http' ? 400 : 200,
+    type: carrier === 'sse' ? 'text/event-stream' : 'application/json',
+    body: carrier === 'sse' ? `data: ${JSON.stringify(body)}\n\n` : body,
+  }
+}
+
+test('Codex 首次明确缺推理错误后移除旧推理与搜索编号', async t => {
+  const f = await fixture(t, body => body.input.some(item => item.type === 'reasoning' || Object.hasOwn(item, 'id'))
+    ? historyError(missingReasoning) : success)
+  const response = await f.request()
+  assert.equal(response.status, 200, response.body)
+  assert.equal(f.captured.length, 2)
+  assert.deepEqual(f.captured[0].body, expectedHistory)
+  assert.deepEqual(f.captured[1].body, recoveredHistory)
+  assert.equal(f.rows().filter(row => row.event === 'repair_applied').length, 1)
+  assert.equal(f.rows().filter(row => row.event === 'session_compat_enabled').length, 1)
+})
+
+test('Codex 的兼容记忆不会影响同身份的 Claude 和 ZCode', async t => {
+  const f = await fixture(t, (body, count) => count === 1 ? historyError(missingReasoning) : validateSearch(body))
+  const session = { 'x-relay-session-id': 'fixture-shared-session' }
+  assert.equal((await f.request(history, session)).status, 200)
+  assert.equal(f.captured.length, 2)
+  for (const client of ['claude', 'zcode']) {
+    const response = await f.request(history, { ...session, 'x-relay-client': client })
+    assert.equal(response.status, 200, `${client}: ${response.body}`)
+    assert.equal(f.captured.at(-1).raw, JSON.stringify(history), `${client} 不得读取 Codex 降级标记`)
+  }
+  assert.equal((await f.request(history, session)).status, 200)
+  assert.equal(f.captured.length, 5)
+  assert.deepEqual(f.captured[4].body, recoveredHistory, 'Codex 自己仍应记住兼容模式')
+})
+
+test('Codex 明确上下文超限不能被跨资源文案覆盖', async t => {
+  const f = await fixture(t, (_, count) => count === 1
+    ? historyError('The requested item was created under a different Azure OpenAI resource', 'json', 'context_length_exceeded') : success)
+  assert.equal((await f.request()).status, 400)
+  assert.equal(f.captured.length, 1)
+  assert.ok(!f.rows().some(row => ['repair_applied', 'session_compat_enabled'].includes(row.event)))
+})
+
+test('Codex 降级保留原生搜索的查询数组与来源扩展', async t => {
+  const body = structuredClone(history)
+  body.input[2].action = { type: 'search', queries: ['fixture first', 'fixture second'], sources: [{ type: 'url', url: 'https://example.invalid/fixture', id: 'nested_keep' }] }
+  const f = await fixture(t, (_, count) => count === 1 ? historyError(missingReasoning) : success)
+  assert.equal((await f.request(body)).status, 200)
+  assert.equal(f.captured.length, 2)
+  assert.deepEqual(f.captured[1].body, {
+    model: 'fixture-model', store: false,
+    input: [recoveredHistory.input[0], { type: 'web_search_call', status: 'completed', action: body.input[2].action }],
+  })
+})
+
+for (const carrier of ['http', 'json', 'sse']) {
+  for (const [kind, message] of [
+    ['跨资源', 'The requested item was created under a different Azure OpenAI resource'],
+    ['失效推理', 'encrypted content could not be verified'],
+    ['缺配套推理', missingReasoning],
+  ]) {
+    test(`Codex ${carrier}/${kind} 首次错误后剥离并登记会话`, async t => {
+      const f = await fixture(t, (body, count) => count === 1 ? historyError(message, carrier) : validateSearch(body))
+      const response = await f.request()
+      assert.equal(response.status, 200, response.body)
+      assert.equal(f.captured.length, 2)
+      assert.deepEqual(f.captured[0].body, expectedHistory)
+      assert.deepEqual(f.captured[1].body, recoveredHistory)
+      assert.equal(f.rows().filter(row => row.event === 'repair_applied').length, 1)
+      assert.equal(f.rows().filter(row => row.event === 'session_compat_enabled').length, 1)
+      const diagnostics = JSON.stringify(f.rows())
+      for (const secret of ['fixture ciphertext', 'fixture prompt', 'fixture query', 'fixture-only-not-a-key', 'ws_fixture', 'rs_fixture']) {
+        assert.ok(!diagnostics.includes(secret), '诊断不得泄露内容、凭据或条目编号')
+      }
+    })
+  }
+  for (const [code, sends, status] of [
+    ['rate_limit_exceeded', 2, 200], ['server_error', 2, 200],
+    ['invalid_api_key', 1, 400], ['insufficient_quota', 1, 402], ['context_length_exceeded', 1, 400],
+  ]) {
+    test(`Codex ${carrier}/${code} 不被缺推理文案误判`, async t => {
+      const f = await fixture(t, (body, count) => count === 1 ? historyError(missingReasoning, carrier, code) : validateSearch(body))
+      const response = await f.request()
+      // 普通 HTTP 400 沿用原信封透传；200 内嵌错误才按既有 code 规则归类。
+      assert.equal(response.status, carrier === 'http' ? 400 : status, response.body)
+      assert.equal(f.captured.length, carrier === 'http' ? 1 : sends)
+      assert.ok(f.captured.every(({ body }) => JSON.stringify(body) === JSON.stringify(expectedHistory)))
+      assert.ok(!f.rows().some(row => ['item_error', 'repair_applied', 'session_compat_enabled', 'codex_resource_retry'].includes(row.event)))
+    })
+  }
+}
+
+for (const remaining of [[], [{ type: 'reasoning', id: 'rs_other', encrypted_content: 'other ciphertext' }], [{ type: 'reasoning', encrypted_content: 'no id ciphertext' }]]) {
+  test(`原请求已缺配套 rs 时不补造推理，明确报错后移除搜索引用（${remaining[0]?.id ?? remaining[0]?.type ?? '无推理'}）`, async t => {
+    const body = { input: [expectedHistory.input[0], ...remaining, expectedHistory.input[2]] }
+    const raw = ` \n${JSON.stringify(body)}\n `
+    const f = await fixture(t, validateSearch)
+    const response = await f.request(raw)
+    assert.equal(response.status, 200, response.body)
+    assert.equal(f.captured.length, 2)
+    assert.equal(f.captured[0].raw, raw, '正常首发不主动删除搜索依赖')
+    assert.deepEqual(f.captured[1].body, { input: recoveredHistory.input })
+    assert.equal(f.rows().filter(row => row.event === 'repair_applied').length, 1)
+  })
+}
+
+test('多个不相邻推理与搜索项全部保留，未知搜索形状也不拆推理编号', async t => {
+  const body = structuredClone(history)
+  body.input.push(
+    { type: 'message', role: 'assistant', content: 'fixture search summary' },
+    { type: 'reasoning', id: 'rs_other', summary: [], encrypted_content: 'other ciphertext' },
+    { type: 'web_search_call', id: 'ws_other', action: { type: 'future_action' } },
+  )
+  const expected = structuredClone(body)
+  delete expected.input[0].id
+  const f = await fixture(t, (_, count) => count === 1 ? historyError('encrypted content could not be verified') : success)
+  assert.equal((await f.request(body)).status, 200)
+  assert.equal(f.captured.length, 2)
+  assert.deepEqual(f.captured[0].body, expected)
+  assert.equal(f.captured[1].raw, f.captured[0].raw)
+})
+
+for (const [name, headers, config] of [
+  ['Claude', { 'x-relay-client': 'claude' }, {}],
+  ['冲突标记', { 'x-relay-client': 'codex', 'user-agent': 'claude-desktop/1.0' }, {}],
+  ['未知标记', { 'x-relay-client': 'unknown', 'user-agent': 'codex_cli_rs/0.100.0' }, {}],
+  ['Codex 兼容关闭', {}, { PROXY_CODEX_RESOURCE_RETRY: '0' }],
+]) {
+  test(`${name} 不新增缺配套推理恢复策略`, async t => {
+    const f = await fixture(t, () => historyError(missingReasoning), config)
+    const response = await f.request(history, headers)
+    assert.equal(response.status, 400)
+    assert.equal(f.captured.length, 1)
+    assert.ok(!f.rows().some(row => ['item_error', 'repair_applied', 'codex_resource_retry'].includes(row.event)))
+    if (name !== 'Codex 兼容关闭') assert.equal(f.captured[0].raw, JSON.stringify(history))
+  })
+}
+
+test('成功正文引用同一错误不会触发恢复', async t => {
+  const responseBody = { output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: missingReasoning }] }] }
+  const f = await fixture(t, () => ({ status: 200, body: responseBody }))
+  const response = await f.request()
+  assert.equal(response.status, 200)
+  assert.deepEqual(JSON.parse(response.body), responseBody)
+  assert.equal(f.captured.length, 1)
+  assert.ok(!f.rows().some(row => row.event === 'item_error'))
+})
+
+test('已交付 SSE 内容后出现缺推理错误不重放', async t => {
+  const stream = `event: response.output_text.delta\ndata: ${JSON.stringify({ type: 'response.output_text.delta', delta: 'fixture visible text' })}\n\ndata: ${JSON.stringify({ error: { type: 'invalid_request_error', message: missingReasoning } })}\n\n`
+  const f = await fixture(t, () => ({ status: 200, type: 'text/event-stream', body: stream }))
+  const response = await f.request()
+  assert.equal(response.status, 200)
+  assert.equal(response.body, stream)
+  assert.equal(f.captured.length, 1)
+})
+
+test('客户端在历史重试等待期间取消，不再发送下一次', { timeout: 10000 }, async t => {
+  const f = await fixture(t, () => historyError(missingReasoning), { PROXY_DEPLOY_DELAY_MS: '500' })
+  const controller = new AbortController()
+  const pending = f.request(history, {}, { signal: controller.signal })
+  const rejected = assert.rejects(pending, { name: 'AbortError' })
+  const deadline = Date.now() + 3000
+  while (f.captured.length === 0) {
+    assert.ok(Date.now() < deadline, '假上游未收到首发请求')
+    await delay(5)
+  }
+  controller.abort()
+  await rejected
+  await delay(650)
+  assert.equal(f.captured.length, 1)
+})
+
+test('非 Responses 端点不套用新历史恢复', async t => {
+  const f = await fixture(t, () => historyError(missingReasoning))
+  const response = await f.request(history, {}, { path: '/v1/messages' })
+  assert.equal(response.status, 400)
+  assert.equal(f.captured.length, 1)
+  assert.equal(f.captured[0].raw, JSON.stringify(history))
+  assert.ok(!f.rows().some(row => row.event === 'item_error'))
+})
+
+test('关闭首发剥 id 后仍只在明确错误后剥离', async t => {
+  const f = await fixture(t, (body, count) => count === 1 ? historyError(missingReasoning) : validateSearch(body), { PROXY_CODEX_STRIP_IDS: '0' })
+  const raw = ` \n${JSON.stringify(history)}\n `
+  assert.equal((await f.request(raw)).status, 200)
+  assert.equal(f.captured.length, 2)
+  assert.equal(f.captured[0].raw, raw)
+  assert.deepEqual(f.captured[1].body, recoveredHistory)
+})
+
+for (const [name, extra, item] of [
+  ['previous_response_id', { previous_response_id: 'resp_server_only' }],
+  ['conversation', { conversation: { id: 'conv_server_only' } }],
+  ['item_reference', {}, { type: 'item_reference', id: 'msg_server_only' }],
+  ['compaction', {}, { type: 'compaction', encrypted_content: 'opaque fixture' }],
+  ['unknown_item', {}, { type: 'future_tool', id: 'opaque_fixture' }],
+  ['missing_tool_result', {}, { type: 'function_call', call_id: 'call_orphan', name: 'fixture', arguments: '{}' }],
+]) {
+  test(`Codex ${name} 不能被盲目剥离，保留字节并遵守五次上限`, async t => {
+    const body = { ...structuredClone(history), ...extra }
+    delete body.input[0].id
+    if (item) body.input.push(item)
+    const raw = ` \n${JSON.stringify(body)}\n `
+    const f = await fixture(t, () => historyError('The requested item was created under a different Azure OpenAI resource'))
+    assert.equal((await f.request(raw)).status, 400)
+    assert.equal(f.captured.length, 5)
+    assert.ok(f.captured.every(sent => sent.raw === raw))
+    assert.ok(!f.rows().some(row => ['repair_applied', 'session_compat_enabled'].includes(row.event)))
+  })
+}
+
+for (const [name, action, withId] of [
+  ['open_page', { type: 'open_page', url: 'https://example.invalid/fixture', extra: { id: 'nested_keep' } }, true],
+  ['find_in_page', { type: 'find_in_page', url: 'https://example.invalid/fixture', pattern: 'fixture' }, true],
+  ['already_idless', { type: 'search', query: 'fixture query' }, false],
+]) {
+  test(`Codex ${name} 的完整搜索内容在降级后保留`, async t => {
+    const body = structuredClone(history)
+    body.input[2].action = action
+    if (!withId) delete body.input[2].id
+    const f = await fixture(t, (_, count) => count === 1 ? historyError('encrypted content could not be verified') : success)
+    assert.equal((await f.request(body)).status, 200)
+    assert.equal(f.captured.length, 2)
+    assert.deepEqual(f.captured[1].body, { model: 'fixture-model', store: false, input: [recoveredHistory.input[0], { type: 'web_search_call', status: 'completed', action }] })
+  })
+}
+
+test('Codex 降级完整保留普通和自定义工具的配对及嵌套载荷', async t => {
+  const tools = [
+    { type: 'function_call', call_id: 'call_function', name: 'fixture_lookup', arguments: '{"id":"nested_arg"}' },
+    { type: 'function_call_output', call_id: 'call_function', output: 'fixture function result' },
+    { type: 'custom_tool_call', call_id: 'call_custom', name: 'fixture_custom', input: '{"encrypted_content":"nested_keep"}' },
+    { type: 'custom_tool_call_output', call_id: 'call_custom', output: [{ type: 'input_text', text: 'fixture custom result' }] },
+  ]
+  const body = { ...structuredClone(history), input: [...history.input, ...tools.map((item, index) => ({ id: `item_${index}`, ...item }))] }
+  const f = await fixture(t, (_, count) => count === 1 ? historyError(missingReasoning) : success)
+  assert.equal((await f.request(body)).status, 200)
+  assert.deepEqual(f.captured[1].body, { model: 'fixture-model', store: false, input: [...recoveredHistory.input, ...tools] })
+})
+
+for (const temporary of [false, true]) {
+  test(`Codex 搜索降级后最多再发三次且请求体冻结（${temporary ? '混合503' : '历史错误'}）`, async t => {
+    const f = await fixture(t, (_, count) => count === 1 || !temporary
+      ? historyError(missingReasoning) : { status: 503, body: { error: { code: 'server_error', message: 'fixture unavailable' } } })
+    assert.equal((await f.request()).status, 503)
+    assert.equal(f.captured.length, 4)
+    assert.deepEqual(f.captured[1].body, recoveredHistory)
+    assert.ok(f.captured.slice(1).every(sent => sent.raw === f.captured[1].raw))
+    assert.equal(f.rows().filter(row => row.event === 'repair_applied').length, 1)
+  })
+}
+
+for (const change of ['session', 'model', 'credentials']) {
+  test(`Codex 兼容模式不污染新的 ${change}`, async t => {
+    const f = await fixture(t, (_, count) => count === 1 ? historyError(missingReasoning) : success)
+    const headers = { 'x-relay-session-id': 'fixture-session-a' }
+    assert.equal((await f.request(history, headers)).status, 200)
+    const next = structuredClone(history)
+    const nextHeaders = { ...headers }
+    if (change === 'session') nextHeaders['x-relay-session-id'] = 'fixture-session-b'
+    if (change === 'model') next.model = 'fixture-other-model'
+    if (change === 'credentials') nextHeaders.authorization = 'Bearer fixture-other-not-a-key'
+    assert.equal((await f.request(next, nextHeaders)).status, 200)
+    assert.equal(f.captured.length, 3)
+    assert.deepEqual(f.captured[2].body, { ...expectedHistory, model: next.model })
+  })
+}
+
+test('Claude 的旧兼容记忆也不会使 Codex 未报错就降级', async t => {
+  const body = { ...history, input: history.input.slice(0, 2) }
+  const f = await fixture(t, (_, count) => count === 1 ? historyError('The requested item was created under a different Azure OpenAI resource') : success)
+  const session = { 'x-relay-session-id': 'fixture-shared-session' }
+  assert.equal((await f.request(body, { ...session, 'x-relay-client': 'claude' })).status, 200)
+  assert.equal((await f.request(body, session)).status, 200)
+  assert.equal(f.captured.length, 3)
+  assert.deepEqual(f.captured[2].body, { model: 'fixture-model', store: false, input: [expectedHistory.input[0], { type: 'reasoning', summary: [], encrypted_content: 'fixture ciphertext' }] })
+})
+
+test('Codex 兼容缓存满时不会挤掉 Claude 的已有记录', async t => {
+  const body = { ...history, input: history.input.slice(0, 2) }
+  const f = await fixture(t, (_, count) => count === 1 || count === 3 ? historyError('The requested item was created under a different Azure OpenAI resource') : success, { PROXY_SESSION_COMPAT_MAX_KEYS: '1' })
+  const legacyHeaders = { 'x-relay-client': 'claude', 'x-relay-session-id': 'fixture-legacy' }
+  assert.equal((await f.request(body, legacyHeaders)).status, 200)
+  assert.equal((await f.request(history, { 'x-relay-session-id': 'fixture-codex' })).status, 200)
+  assert.equal((await f.request(body, legacyHeaders)).status, 200)
+  assert.equal(f.captured.length, 5)
+  assert.deepEqual(f.captured[4].body, { model: 'fixture-model', store: false, input: [expectedHistory.input[0]] })
+})
+
+for (const scenario of ['normal', 'azure', 'reasoning', 'empty_shape', 'empty_reasoning']) {
+  test(`Claude 修改前后差分：${scenario}`, { skip: !process.env.AG_RELAY_HISTORY_BASELINE }, async t => {
+    const raw = ` \n${JSON.stringify({ ...history, input: history.input.slice(0, 2) })}\n `
+    const observations = []
+    for (const script of [resolve(process.env.AG_RELAY_HISTORY_BASELINE), core]) {
+      const f = await fixture(t, (_, count) => {
+        if (scenario === 'azure' && count === 1) return historyError('The requested item was created under a different Azure OpenAI resource')
+        if (scenario === 'reasoning' && count === 1) return historyError('encrypted content could not be verified')
+        if (count <= (scenario === 'empty_shape' ? 2 : scenario === 'empty_reasoning' ? 6 : 0)) return { status: 200, type: 'text/event-stream', body: '' }
+        return success
+      }, { PROXY_DEPLOY_MAX_ATTEMPTS: '8' }, script)
+      const headers = { 'x-relay-client': 'claude', 'x-relay-session-id': 'fixture-differential' }
+      const responses = [await f.request(raw, headers), await f.request(raw, headers)]
+      const rows = f.rows()
+      observations.push({ responses, sent: f.captured.map(x => x.raw), repairs: rows.filter(x => x.event === 'repair_applied').map(({ kind, removedIds, removedReasoning }) => ({ kind, removedIds, removedReasoning })), enabled: rows.filter(x => x.event === 'session_compat_enabled').length })
+    }
+    assert.deepEqual(observations[1], observations[0], 'Claude 响应、请求字节和恢复策略必须与修改前一致')
+  })
+}
+
+for (const explicit of [false, true]) {
+  test(`Codex 已登记会话后来出现搜索也首发降级（${explicit ? '显式会话' : '资源血缘'}）`, async t => {
+    const seed = { ...history, input: history.input.filter(item => item.type !== 'web_search_call') }
+    const f = await fixture(t, (body, count) => count === 1
+      ? { status: 400, body: { error: { type: 'invalid_request_error', message: 'encrypted content could not be verified' } } }
+      : validateSearch(body))
+    const headers = explicit ? { 'x-relay-session-id': 'fixture-session' } : {}
+    assert.equal((await f.request(seed, headers)).status, 200)
+    assert.equal(f.captured.length, 2)
+    const response = await f.request(history, headers)
+    assert.equal(response.status, 200, response.body)
+    assert.equal(f.captured.length, 3, '搜索进入已登记会话后也应一次发送成功')
+    assert.deepEqual(f.captured[2].body, recoveredHistory)
+    assert.equal(f.rows().filter(row => row.event === 'repair_applied').length, 1, '后续首发使用记忆，不重新触发错误修复')
+    assert.equal(f.rows().filter(row => row.event === 'session_compat_enabled').length, 1)
+    assert.ok(f.rows().some(row => row.event === 'session_compat_applied' && row.removedReasoning === 1))
+  })
+}

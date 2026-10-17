@@ -426,13 +426,15 @@ fn responses_request_with_headers(port: u16, body: &str, headers: &[(&str, &str)
     response
 }
 
-/// 与核心 `stripCodexItemIds` 一致：首发前只删除可省略的 id 句柄。
+/// 首发允许清理可选 id；含搜索时，推理编号参与隐式依赖，必须保留。
 fn codex_stripped(body: &str) -> serde_json::Value {
     let mut value: serde_json::Value = serde_json::from_str(body).unwrap();
     if let Some(items) = value.get_mut("input").and_then(|value| value.as_array_mut()) {
+        let has_web_search = items.iter().any(|item| item["type"] == "web_search_call");
         for item in items.iter_mut() {
             let keep = match item.get("type").and_then(|value| value.as_str()) {
-                Some("message" | "reasoning" | "function_call" | "function_call_output"
+                Some("reasoning") => has_web_search,
+                Some("message" | "function_call" | "function_call_output"
                     | "custom_tool_call" | "custom_tool_call_output") => false,
                 Some(_) => true,
                 None => item.get("role").and_then(|value| value.as_str()).is_none(),
@@ -472,13 +474,33 @@ fn 重试边界_codex首次同类历史错误即修复() {
 }
 
 #[test]
-fn 重试边界_codex跨资源修复完整网页搜索时保留必需字段() {
+fn 重试边界_codex网页搜索首发保留配套推理及编号() {
+    let body = r#" {"input":[{"type":"message","id":"msg_fixture","role":"user","content":"fixture prompt"},{"type":"reasoning","id":"rs_fixture","summary":[],"encrypted_content":"fixture ciphertext"},{"type":"web_search_call","id":"ws_fixture","status":"completed","action":{"type":"search","query":"fixture query"}}]} "#;
+    let expected = serde_json::json!({"input": [
+        {"type": "message", "role": "user", "content": "fixture prompt"},
+        {"type": "reasoning", "id": "rs_fixture", "summary": [], "encrypted_content": "fixture ciphertext"},
+        {"type": "web_search_call", "id": "ws_fixture", "status": "completed", "action": {"type": "search", "query": "fixture query"}}
+    ]});
+    let upstream = RetryUpstream::new(vec![upstream_reply(200, "application/json", r#"{"ok":true}"#)]);
+    let port = free_port();
+    let mut fixture = Fixture::new("codex-web-search-reasoning-id", &upstream.url, port);
+    fixture.gateway.start().unwrap();
+    assert!(responses_request(port, body, "codex").contains(r#"{"ok":true}"#));
+    assert_eq!(upstream.attempts(), 1);
+    let captured = upstream.bodies();
+    assert_eq!(serde_json::from_slice::<serde_json::Value>(&captured[0]).unwrap(), expected,
+        "网页搜索的必需 id 会关联配套 reasoning，首发不能拆掉推理编号");
+}
+
+#[test]
+fn 重试边界_codex跨资源网页搜索首次报错后去推理和编号并保留完整历史() {
     let error = r#"{"error":{"type":"invalid_request_error","message":"The requested item was created under a different Azure OpenAI resource"}}"#;
     let body = r#" {"model":"gpt-6.1-sol","store":false,"reasoning":{"effort":"high"},"input":[{"type":"message","id":"msg_fixture","role":"user","content":"fixture prompt"},{"type":"reasoning","id":"rs_fixture","encrypted_content":"fixture ciphertext"},{"type":"web_search_call","id":"ws_search","status":"completed","action":{"type":"search","query":"fixture query","sources":[{"type":"url","url":"https://example.invalid/fixture"}]}},{"type":"web_search_call","id":"ws_open","status":"in_progress","action":{"type":"open_page","url":"https://example.invalid/fixture"}},{"type":"web_search_call","id":"ws_find","status":"searching","action":{"type":"find_in_page","url":"https://example.invalid/fixture","pattern":"fixture"}},{"type":"web_search_call","id":"ws_failed","status":"failed","action":{"type":"search","query":"fixture failed query"}},{"type":"function_call","id":"fc_fixture","call_id":"call_function","name":"fixture_function","arguments":"{\"id\":\"nested_id\"}"},{"type":"function_call_output","id":"fco_fixture","call_id":"call_function","output":"fixture function result"},{"type":"custom_tool_call","id":"ct_fixture","call_id":"call_custom","name":"fixture_tool","input":"{\"encrypted_content\":\"nested_keep\"}"},{"type":"custom_tool_call_output","id":"cto_fixture","call_id":"call_custom","output":[{"type":"input_text","text":"fixture tool result"}]}]} "#;
-    let expected = serde_json::json!({
+    let expected_first = serde_json::json!({
         "model": "gpt-6.1-sol", "store": false, "reasoning": {"effort": "high"},
         "input": [
             {"type": "message", "role": "user", "content": "fixture prompt"},
+            {"type": "reasoning", "id": "rs_fixture", "encrypted_content": "fixture ciphertext"},
             {"type": "web_search_call", "id": "ws_search", "status": "completed",
              "action": {"type": "search", "query": "fixture query", "sources": [{"type": "url", "url": "https://example.invalid/fixture"}]}},
             {"type": "web_search_call", "id": "ws_open", "status": "in_progress",
@@ -493,31 +515,50 @@ fn 重试边界_codex跨资源修复完整网页搜索时保留必需字段() {
             {"type": "custom_tool_call_output", "call_id": "call_custom", "output": [{"type": "input_text", "text": "fixture tool result"}]}
         ]
     });
+    let expected_repaired = serde_json::json!({
+        "model": "gpt-6.1-sol", "store": false, "reasoning": {"effort": "high"},
+        "input": [
+            {"type": "message", "role": "user", "content": "fixture prompt"},
+            {"type": "web_search_call", "status": "completed",
+             "action": {"type": "search", "query": "fixture query", "sources": [{"type": "url", "url": "https://example.invalid/fixture"}]}},
+            {"type": "web_search_call", "status": "in_progress",
+             "action": {"type": "open_page", "url": "https://example.invalid/fixture"}},
+            {"type": "web_search_call", "status": "searching",
+             "action": {"type": "find_in_page", "url": "https://example.invalid/fixture", "pattern": "fixture"}},
+            {"type": "web_search_call", "status": "failed",
+             "action": {"type": "search", "query": "fixture failed query"}},
+            {"type": "function_call", "call_id": "call_function", "name": "fixture_function", "arguments": "{\"id\":\"nested_id\"}"},
+            {"type": "function_call_output", "call_id": "call_function", "output": "fixture function result"},
+            {"type": "custom_tool_call", "call_id": "call_custom", "name": "fixture_tool", "input": "{\"encrypted_content\":\"nested_keep\"}"},
+            {"type": "custom_tool_call_output", "call_id": "call_custom", "output": [{"type": "input_text", "text": "fixture tool result"}]}
+        ]
+    });
     for (carrier, status, ct, error_body) in [
         ("http", 400, "application/json", error.to_string()),
         ("json", 200, "application/json", error.to_string()),
         ("sse", 200, "text/event-stream", format!("data: {error}\n\n")),
     ] {
         let failure = upstream_reply(status, ct, &error_body);
-        let upstream = RetryUpstream::new(vec![failure, upstream_reply(200, "application/json", r#"{"ok":true}"#)]);
+        let upstream = RetryUpstream::new(vec![failure.clone(), failure, upstream_reply(200, "application/json", r#"{"ok":true}"#)]);
         let port = free_port();
         let mut fixture = Fixture::new(&format!("codex-web-search-{carrier}"), &upstream.url, port);
         fixture.gateway.start().unwrap();
         let response = responses_request(port, body, "codex");
-        assert_eq!(upstream.attempts(), 2, "{carrier} 完整搜索历史应在首次同类错误后安全修复：{response}");
+        assert_eq!(upstream.attempts(), 3, "{carrier} 首次历史错误即修复，后续重试沿用冻结正文：{response}");
         assert!(response.contains(r#"{"ok":true}"#));
         let captured = upstream.bodies();
-        assert_eq!(serde_json::from_slice::<serde_json::Value>(&captured[0]).unwrap(), codex_stripped(body), "{carrier} 首发仅剥离可省略 id，搜索字段保持");
-        assert_eq!(serde_json::from_slice::<serde_json::Value>(&captured[1]).unwrap(), expected, "{carrier} 删除推理，但搜索 id/action/status/type 必须原样保留");
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&captured[0]).unwrap(), expected_first, "{carrier} 首发保留推理和完整搜索项");
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&captured[1]).unwrap(), expected_repaired, "{carrier} 修复仅移除推理项和顶层编号，搜索内容及普通/自定义工具输入输出与 call_id 原样保留");
+        assert_eq!(captured[2], captured[1], "{carrier} 修复后的后续重试必须逐字节复用冻结正文");
         let diagnostics = std::fs::read_to_string(fixture.dir.join("logs/diagnostics.jsonl")).unwrap();
         let repairs = diagnostics.lines().filter(|line| {
             serde_json::from_str::<serde_json::Value>(line).unwrap()["event"] == "repair_applied"
         }).count();
-        assert_eq!(repairs, 1);
+        assert_eq!(repairs, 1, "{carrier} 当次请求只执行一次历史修复");
         let enabled = diagnostics.lines().filter(|line| {
             serde_json::from_str::<serde_json::Value>(line).unwrap()["event"] == "session_compat_enabled"
         }).count();
-        assert_eq!(enabled, 1, "{carrier} 跨资源修复后登记会话，供后续请求预清理");
+        assert_eq!(enabled, 1, "{carrier} 修复后登记同会话后续请求的预清理");
         for sensitive in ["fixture-only-not-a-key", "fixture ciphertext", "fixture prompt", "fixture query"] {
             assert!(!diagnostics.contains(sensitive));
         }
@@ -722,10 +763,10 @@ fn 重试边界_codex空回不绕过门槛且修复版冻结状态字段() {
 }
 
 #[test]
-fn 重试边界_codex网页搜索缺失必需字段或未知动作时原样重试() {
+fn 重试边界_codex网页搜索缺失内容字段或未知动作状态时原样重试() {
     let valid = serde_json::json!({"type": "web_search_call", "id": "ws_fixture", "status": "completed", "action": {"type": "search", "query": "fixture query"}});
     let mut cases = Vec::new();
-    for field in ["id", "status", "action", "type"] {
+    for field in ["status", "action", "type"] {
         let mut item = valid.clone();
         item.as_object_mut().unwrap().remove(field);
         cases.push((format!("missing-{field}"), item));

@@ -159,6 +159,10 @@ function isReasoningItemError(text) {
   return REASONING_ITEM_TEXT.test(String(text || ''));
 }
 
+// Only admitted by the strict Codex branch; other clients keep their existing policy.
+const MISSING_SEARCH_REASONING_TEXT =
+  /\bitem ['"]ws_[^'"\r\n]+['"] of type ['"]web_search_call['"] was provided without its required ['"]reasoning['"] item:\s*['"]rs_[^'"\r\n]+['"]/i;
+
 // 上游会在消息末尾附加 "[trace_id=...]"，所以必须用子串/正则匹配，
 // 不能用全等比较 —— 否则永远匹配不上，修复逻辑形同虚设。
 const AZURE_RESOURCE_TEXT =
@@ -225,26 +229,28 @@ function safeDiagnostic(record) {
 /**
  * Conservative stateless replay. Only inline message/function/custom-tool items have optional
  * item ids removed; never recurse into content, arguments, output, or call_id.
- * In the opt-in Codex mode, complete web_search_call items retain their required ids.
+ * Confirmed Codex history errors may opt into stateless web-search replay: remove
+ * reasoning and search handles together, preserving the inline search payload.
+ * This is a lossy compatibility fallback, not portable Responses validation.
  * Server-side history cannot be reconstructed or proven complete by this proxy.
  *
  * options:
- *   stripItemIds      – drop the id handle on messages and inline tool calls/outputs
+ *   stripItemIds      – drop inline item handles; includes search handles in the Codex fallback
  *   stripReasoningIds – drop the id handle on reasoning items but keep the items
  *   stripMessageType  – drop the redundant `type: "message"` tag (role/content stay)
- *   dropReasoning     – remove reasoning items entirely (the only lossy option)
+ *   dropReasoning     – remove reasoning items entirely (lossy)
  *   allowUnchanged    – return the original body instead of erroring when nothing changed
- *   codexHistory      – validate and retain complete web-search history (default off)
+ *   codexHistory      – validate complete inline tool/search history for Codex (default off)
  *
- * The id and type removals are lossless for the supported items with optional ids;
- * the message type tag is a label, so no prompt content is discarded. Only
- * dropReasoning sacrifices reasoning continuity.
+ * Ordinary optional-id/type removals preserve inline content. The Codex fallback
+ * additionally sacrifices old reasoning continuity and resource-bound search linkage.
  */
 function repairResponsesItems(bodyBuf, options = {}) {
   const {
     stripItemIds = false, stripReasoningIds = false, stripMessageType = false,
     dropReasoning = false, allowUnchanged = false, codexHistory = false,
   } = options;
+  const statelessSearch = codexHistory && dropReasoning && stripItemIds;
   let obj;
   try { obj = JSON.parse(bodyBuf.toString('utf8')); }
   catch { return { error: 'request is not valid JSON' }; }
@@ -254,6 +260,10 @@ function repairResponsesItems(bodyBuf, options = {}) {
   }
   if (obj.conversation != null) return { error: 'conversation references server-side history' };
   if (!Array.isArray(obj.input)) return { error: 'input is not a complete inline item array' };
+  // Never remove reasoning while retaining resource-bound search handles.
+  if (codexHistory && dropReasoning && !statelessSearch && obj.input.some(item => item?.type === 'web_search_call')) {
+    return { error: 'web_search_call may depend on reasoning; refusing to discard its history' };
+  }
 
   let removedReasoning = 0;
   let removedIds = 0;
@@ -306,22 +316,23 @@ function repairResponsesItems(bodyBuf, options = {}) {
       if (codexHistory) completedCalls.add(item.call_id);
     } else if (codexHistory && item.type === 'web_search_call') {
       const action = item.action;
-      if (!nonEmptyStr(item.id) || !['in_progress', 'searching', 'completed', 'failed'].includes(item.status)
+      if ((!statelessSearch && !nonEmptyStr(item.id)) || !['in_progress', 'searching', 'completed', 'failed'].includes(item.status)
           || !action || typeof action !== 'object' || Array.isArray(action)
-          || !(action.type === 'search' && nonEmptyStr(action.query)
+          || !(action.type === 'search' && (nonEmptyStr(action.query)
+                || Array.isArray(action.queries) && action.queries.length > 0 && action.queries.every(nonEmptyStr))
             || action.type === 'open_page' && nonEmptyStr(action.url)
             || action.type === 'find_in_page' && nonEmptyStr(action.url) && nonEmptyStr(action.pattern))) {
         return { error: 'web_search_call lacks a supported complete inline action' };
       }
-      // Search ids are required, not optional resource handles. Preserve the whole item,
-      // including action extensions; never manufacture a call_id or turn it into text.
+      // The tested Codex route accepts an id-less search in the lossy fallback.
+      // Preserve all action extensions; never manufacture call_id or convert to text.
     } else {
       return { error: 'unsupported or reference-only input item; safe replay cannot be verified' };
     }
     if (Object.hasOwn(item, 'encrypted_content')) {
       return { error: 'encrypted_content on a non-reasoning item cannot be safely removed' };
     }
-    if (stripItemIds && !(codexHistory && item.type === 'web_search_call') && Object.hasOwn(item, 'id')) {
+    if (stripItemIds && (!(codexHistory && item.type === 'web_search_call') || statelessSearch) && Object.hasOwn(item, 'id')) {
       delete item.id;
       removedIds++;
     }
@@ -357,11 +368,14 @@ function stripCodexItemIds(bodyBuf) {
   catch { return null; }
   if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return null;
   if (!Array.isArray(obj.input)) return null;
+  // Search ids can reference reasoning ids implicitly; the dependency is not exposed
+  // in the input, so preserve every reasoning handle when search history is present.
+  const hasWebSearch = obj.input.some(item => item?.type === 'web_search_call');
   let removedIds = 0;
   for (const item of obj.input) {
     if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
     const type = item.type === undefined && typeof item.role === 'string' ? 'message' : item.type;
-    if (!CODEX_STRIPPABLE_ID_TYPES.has(type)) continue;
+    if (!CODEX_STRIPPABLE_ID_TYPES.has(type) || (hasWebSearch && type === 'reasoning')) continue;
     if (Object.hasOwn(item, 'id')) {
       delete item.id;
       removedIds++;
@@ -373,6 +387,8 @@ function stripCodexItemIds(bodyBuf) {
 
 // Store only scoped hashes, never credentials, session names, or reasoning payloads.
 const compatibilityKeys = new Map();
+// Codex fallback entries must neither affect nor evict the other clients' entries.
+const codexCompatibilityKeys = new Map();
 const fingerprint = (value) => createHash('sha256').update(value).digest('hex');
 
 function compatibilityIdentity(bodyBuf, headers) {
@@ -401,24 +417,24 @@ function compatibilityIdentity(bodyBuf, headers) {
   return keys.length ? { keys: [...new Set(keys)], source: 'resource_lineage' } : null;
 }
 
-function pruneCompatibility() {
+function pruneCompatibility(cache) {
   const now = Date.now();
-  for (const [key, expiry] of compatibilityKeys) if (expiry <= now) compatibilityKeys.delete(key);
+  for (const [key, expiry] of cache) if (expiry <= now) cache.delete(key);
 }
 
-function knownCompatibility(identity) {
-  pruneCompatibility();
-  return !!identity && identity.keys.some((key) => compatibilityKeys.has(key));
+function knownCompatibility(identity, cache) {
+  pruneCompatibility(cache);
+  return !!identity && identity.keys.some((key) => cache.has(key));
 }
 
-function rememberCompatibility(identity) {
+function rememberCompatibility(identity, cache) {
   if (!identity) return false;
-  pruneCompatibility();
+  pruneCompatibility(cache);
   for (const key of identity.keys) {
-    compatibilityKeys.delete(key);
-    compatibilityKeys.set(key, Date.now() + cfg.sessionCompatTtlMs);
-    while (compatibilityKeys.size > cfg.sessionCompatMaxKeys) {
-      compatibilityKeys.delete(compatibilityKeys.keys().next().value);
+    cache.delete(key);
+    cache.set(key, Date.now() + cfg.sessionCompatTtlMs);
+    while (cache.size > cfg.sessionCompatMaxKeys) {
+      cache.delete(cache.keys().next().value);
     }
   }
   return true;
@@ -1023,8 +1039,8 @@ async function handle(req, res, state) {
   let frozenHistoryKind = null;
   diagnose('received', isResponses ? { shape: summarizeResponsesBody(body) } : {});
   if (isResponses) diagnose('request_profile', requestProfile(body, headers));
-  // Codex uses the same resource-lineage session memory as Claude/ZCode: a confirmed
-  // history error registers the session, later requests strip reasoning before the first send.
+  // Keep Codex fallback memory separate; other clients retain their existing policy.
+  const compatibilityCache = eligibleCodex ? codexCompatibilityKeys : compatibilityKeys;
   const compatibility = isResponses ? compatibilityIdentity(body, headers) : null;
   delete headers['x-relay-session-id'];
   delete headers['x-relay-client'];
@@ -1037,7 +1053,7 @@ async function handle(req, res, state) {
       log(`codex item ids stripped before first attempt: ${stripped.removedIds}`);
     }
   }
-  if (knownCompatibility(compatibility)) {
+  if (knownCompatibility(compatibility, compatibilityCache)) {
     const cleaned = repairResponsesItems(activeBody, { stripItemIds: true, dropReasoning: true, allowUnchanged: true, codexHistory: eligibleCodex });
     if (cleaned.error) {
       diagnose('session_compat_refused', { reason: 'unsafe_inline_history' });
@@ -1047,7 +1063,7 @@ async function handle(req, res, state) {
       diagnose('codex_session_passthrough', { reason: 'unsafe_inline_history' });
     } else {
       activeBody = cleaned.body;
-      rememberCompatibility(compatibility);
+      rememberCompatibility(compatibility, compatibilityCache);
       repairedItems = true;
       diagnose('session_compat_applied', { source: compatibility.source,
         removedReasoning: cleaned.removedReasoning, removedIds: cleaned.removedIds });
@@ -1102,11 +1118,13 @@ async function handle(req, res, state) {
       const info = { code: errorCode, message };
       // A throttled/failing route can quote history errors without confirming that the
       // history caused this attempt. Keep its original recovery classification instead.
-      if ((status !== 400 && status !== 200) || isPermanentError(info) || isQuotaError(info)
+      if ((status !== 400 && status !== 200) || isDeterministicError(info)
           || isRetryableError(info) || isDeploymentError(info)) return null;
     }
     const azure = isAzureResourceError(message);
-    const reasoning = isReasoningItemError(message);
+    const missingSearchReasoning = eligibleCodex && MISSING_SEARCH_REASONING_TEXT.test(String(message || ''))
+      && !isDeterministicError({ code: errorCode, message });
+    const reasoning = isReasoningItemError(message) || missingSearchReasoning;
     if (!azure && !reasoning) return null;
     const kind = azure ? 'azure_resource_mismatch' : 'stale_reasoning_item';
     diagnose('item_error', { kind, source, status, shape: summarizeResponsesBody(activeBody) });
@@ -1153,10 +1171,10 @@ async function handle(req, res, state) {
     }
     if (repairedItems) return fail('single item-repair attempt exhausted', 'repair_exhausted');
     if (eligibleCodex) historyRepairChecked = true;
-    const repaired = repairResponsesItems(activeBody, { stripItemIds: azure, dropReasoning: true, codexHistory: eligibleCodex });
+    const repaired = repairResponsesItems(activeBody, { stripItemIds: azure || eligibleCodex, dropReasoning: true, codexHistory: eligibleCodex });
     if (repaired.error) return fail(repaired.error);
     if (deadline - Date.now() < cfg.minRetryWindowMs + cfg.deployDelayMs) return fail('insufficient time budget for repair', 'time_budget');
-    if ((azure || eligibleCodex) && rememberCompatibility(compatibility)) {
+    if ((azure || eligibleCodex) && rememberCompatibility(compatibility, compatibilityCache)) {
       diagnose('session_compat_enabled', { kind, source: compatibility.source });
     }
     activeBody = repaired.body;
