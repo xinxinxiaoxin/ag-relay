@@ -11,3 +11,7 @@ src-tauri/generated/.license-distribution-*/
 *.key
 *.key.pub
 release-artifacts/
+
+# 本机一次性调试/回滚记录，不进入版本控制
+.claude/debug/
+.claude/local-notes/
