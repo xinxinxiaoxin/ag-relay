@@ -22,7 +22,7 @@
 
 import http from 'node:http';
 import { createHash, randomUUID } from 'node:crypto';
-import { appendFileSync, mkdirSync, readFileSync, renameSync, statSync } from 'node:fs';
+import { appendFileSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, truncateSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createFileLogger } from './bounded-file-log.mjs';
@@ -72,7 +72,8 @@ const cfg = {
   sessionCompatTtlMs: num(process.env.PROXY_SESSION_COMPAT_TTL_MS, 86400000),
   sessionCompatMaxKeys: Math.floor(num(process.env.PROXY_SESSION_COMPAT_MAX_KEYS, 4096)),
   diagnosticsFile: process.env.PROXY_DIAGNOSTICS_FILE || fileURLToPath(new URL('./relay-diagnostics.jsonl', import.meta.url)),
-  diagnosticsMaxBytes: Math.max(4096, Math.floor(num(process.env.PROXY_DIAGNOSTICS_MAX_BYTES, 1024 * 1024))),
+  // 每份诊断档的容量。实测每条约 260 字节、高峰约 1800 条/小时，8 MiB 约覆盖一周。
+  diagnosticsMaxBytes: Math.max(4096, Math.floor(num(process.env.PROXY_DIAGNOSTICS_MAX_BYTES, 8 * 1024 * 1024))),
   verbose: process.env.PROXY_VERBOSE !== '0',
   extraRetryCodes: (process.env.PROXY_EXTRA_RETRY_CODES || '')
     .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean),
@@ -273,6 +274,23 @@ function summarizeResponsesBody(bodyBuf) {
 // Independent of verbose/raw logs. One writer per file; current + one backup,
 // each bounded. Synchronous short writes keep rotation ordered across requests.
 let diagnosticsWarning = false;
+// 归档本轮换连续失败几次后改为原地截断：宁可丢旧记录，也不能让诊断从此停止写入。
+// 2026-10-21 实测：Windows 上 rename 覆盖被占用的 .1 会 EPERM，原实现只 rename、
+// 失败又被 catch 静默吞掉，日志在 1 MiB 后整整停了 6 小时。
+const DIAGNOSTICS_TRUNCATE_AFTER = 3;
+let diagnosticsRotationFailures = 0;
+function rotateDiagnostics(file) {
+  try {
+    rmSync(file + '.1', { force: true });   // Windows 不允许 rename 覆盖已存在的目标
+    renameSync(file, file + '.1');
+    diagnosticsRotationFailures = 0;
+    return;
+  } catch { /* 落到下面的截断兜底 */ }
+  diagnosticsRotationFailures++;
+  if (diagnosticsRotationFailures < DIAGNOSTICS_TRUNCATE_AFTER) throw new Error('diagnostics rotate failed');
+  truncateSync(file, 0);
+  diagnosticsRotationFailures = 0;
+}
 function safeDiagnostic(record) {
   try {
     const line = JSON.stringify({ time: new Date().toISOString(), ...record }) + '\n';
@@ -282,13 +300,34 @@ function safeDiagnostic(record) {
     let size = 0;
     try { size = statSync(cfg.diagnosticsFile).size; }
     catch (e) { if (e.code !== 'ENOENT') throw e; }
-    if (size + bytes > cfg.diagnosticsMaxBytes) renameSync(cfg.diagnosticsFile, cfg.diagnosticsFile + '.1');
+    if (size + bytes > cfg.diagnosticsMaxBytes) rotateDiagnostics(cfg.diagnosticsFile);
     appendFileSync(cfg.diagnosticsFile, line, { mode: 0o600 });
   } catch {
     // Do not print filesystem paths, exceptions, or request data on failure.
     if (!diagnosticsWarning) console.error('safe diagnostics unavailable; requests will continue');
     diagnosticsWarning = true;
   }
+}
+
+/**
+ * 启动时自愈：容量上限调大（如 1 MiB → 8 MiB）后还要能继续写。
+ * live 已经写满时主动补做一次轮转，把旧 live 归到 .1；若这一步也做不成（文件被占用等），
+ * 就截断 live 继续写 —— 宁可丢旧记录，也不能让诊断从此停摆。
+ */
+function healDiagnosticsRotation() {
+  try {
+    const file = cfg.diagnosticsFile;
+    let size = 0;
+    try { size = statSync(file).size; }
+    catch (e) { if (e.code === 'ENOENT') return; throw e; }
+    if (size < cfg.diagnosticsMaxBytes) return;
+    try {
+      rmSync(file + '.1', { force: true });
+      renameSync(file, file + '.1');
+    } catch {
+      truncateSync(file, 0);
+    }
+  } catch { /* 自愈失败不影响转发，写入路径还有自己的兜底 */ }
 }
 
 /**
@@ -1754,6 +1793,7 @@ if (supervisorEnabled) {
 }
 
 server.listen(cfg.port, cfg.host, () => {
+  healDiagnosticsRotation();
   safeDiagnostic({ event: 'gateway_started', loadedVersion, startedAt, pid: process.pid, supervisorEnabled });
   if (supervisorEnabled && process.connected) process.send({ type: 'ready' });
   log(`relay-retry-proxy version ${loadedVersion.slice(0, 12)}; supervised=${supervisorEnabled}`);

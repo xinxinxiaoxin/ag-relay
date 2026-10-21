@@ -1,27 +1,27 @@
 {
   "schemaVersion": 1,
   "target": "x86_64-pc-windows-msvc",
-  "verifiedAt": "2026-10-17",
+  "verifiedAt": "2026-10-21",
   "scope": "锁定安装的 npm 完整依赖树（含开发工具）、Windows cargo metadata 已解析依赖树（含构建/宏）、随包 Node、Rust 标准库和 WebView2Loader SDK。其他平台 npm 可选二进制单列排除；并非精确二进制 SBOM。",
   "inputs": [
     {
       "path": "package.json",
-      "sha256": "b85f16ceeec8a0628883ba670d150322abf8b192c6b608d1c55765bd25a91d7c",
+      "sha256": "b31f99e2de951422f06ab87567369ffdd2d3551ea78b5d312e182cade7f905f5",
       "normalizeLf": true
     },
     {
       "path": "package-lock.json",
-      "sha256": "7947eace9023fd48a412caec753e8876f66d598cd790c5004d2a0dda5ce2b1b6",
+      "sha256": "843bd8d9c2b2d723a2561d50d14e7184f4febbbb0fda983d247c385bd168c167",
       "normalizeLf": true
     },
     {
       "path": "src-tauri/Cargo.lock",
-      "sha256": "3451ee591ef8d0b2906452e046a74fb5b4bc1dfed23974ef486a7cd58ab497e4",
+      "sha256": "46c1636d812856807725a9259e80b085045ffd7c650df3e570a9b334fe68dc23",
       "normalizeLf": true
     },
     {
       "path": "src-tauri/Cargo.toml",
-      "sha256": "3a093358a0cba4e018775a99d3a66b4d85d9cbe8326f1e26a2909b0f64f0e7c6",
+      "sha256": "c3f789bb16056356b570b1c15af250ee634aaab54598340860d82296c17fd228",
       "normalizeLf": true
     },
     {

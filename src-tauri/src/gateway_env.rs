@@ -4,7 +4,9 @@
 //! `src-tauri/resources/gateway/`，该文件只含环境变量默认值、不含任何密钥）。
 //! 测试逐项断言环境变量表与 bat 解析结果一致，bat 改了这里就会红。
 //! 历史来源：共享笔记《env-vars-and-gateway-facts.md》第 1 节（2026-10-11 抄录）。
-//! 另有壳必须补设的一项：PROXY_DIAGNOSTICS_FILE（诊断日志指向应用数据目录）。
+//! 另有壳必须补设的两项：PROXY_DIAGNOSTICS_FILE（诊断日志指向应用数据目录）与
+//! PROXY_DIAGNOSTICS_MAX_BYTES（诊断每份容量；1 MiB 仅约 2–4 小时，2026-10-21 上调为 8 MiB，
+//! 沿用核心内置默认，不改变 17 项重试契约）。
 //! PROXY_SUPERVISED=1 由 supervisor 自己设置，壳不设。
 
 use std::path::Path;
@@ -30,12 +32,15 @@ pub const GATEWAY_ENV_TABLE: [(&str, &str); 17] = [
     ("PROXY_VERBOSE", "1"),
 ];
 
+/// 诊断每份容量：8 MiB。与核心 `diagnosticsMaxBytes` 内置默认一致（shell 显式注入便于面板展示）。
+pub const DIAGNOSTICS_MAX_BYTES: &str = "8388608";
+
 /// 只读视图，供测试与上层校验。
 pub fn gateway_env_table() -> &'static [(&'static str, &'static str); 17] {
     &GATEWAY_ENV_TABLE
 }
 
-/// 在继承环境之上的追加项：17 项网关配置 + 诊断日志路径（PROXY_DIAGNOSTICS_FILE）。
+/// 在继承环境之上的追加项：17 项网关配置 + 诊断日志路径与容量。
 /// 注意：不含 PROXY_SUPERVISED（supervisor fork 网关时自己注入）。
 pub fn gateway_env_pairs(diagnostics_file: &Path) -> Vec<(String, String)> {
     let mut pairs: Vec<(String, String)> = GATEWAY_ENV_TABLE
@@ -45,6 +50,10 @@ pub fn gateway_env_pairs(diagnostics_file: &Path) -> Vec<(String, String)> {
     pairs.push((
         "PROXY_DIAGNOSTICS_FILE".to_string(),
         diagnostics_file.to_string_lossy().into_owned(),
+    ));
+    pairs.push((
+        "PROXY_DIAGNOSTICS_MAX_BYTES".to_string(),
+        DIAGNOSTICS_MAX_BYTES.to_string(),
     ));
     pairs
 }
@@ -133,6 +142,10 @@ mod tests {
             let Some((key, value)) = assign.split_once('=') else {
                 continue;
             };
+            // 诊断容量不属于 17 项重试契约，单独断言；这里只取重试表覆盖的键。
+            if !GATEWAY_ENV_TABLE.iter().any(|(name, _)| *name == key.trim()) {
+                continue;
+            }
             pairs.push((key.trim().to_string(), value.to_string()));
         }
         pairs
@@ -179,6 +192,11 @@ mod tests {
             let bat_value = &bat[index].1;
             assert_eq!(bat_value, value, "环境变量 {name} 的值与 bat 不一致");
         }
+        // 诊断容量与 shell 注入同源：bat 与 gateway_env 的常量必须一致。
+        assert!(
+            text.contains(&format!("set \"PROXY_DIAGNOSTICS_MAX_BYTES={DIAGNOSTICS_MAX_BYTES}\"")),
+            "bat 的诊断容量应与 gateway_env 的常量一致（{DIAGNOSTICS_MAX_BYTES}）"
+        );
     }
 
     #[test]
@@ -208,6 +226,12 @@ mod tests {
             !pairs.iter().any(|(k, _)| k == "PROXY_SUPERVISED"),
             "壳不应设置 PROXY_SUPERVISED（由 supervisor 自己设置）"
         );
-        assert_eq!(pairs.len(), 18, "应为 17 项配置 + 1 项诊断路径");
+        let diagnostics_limit = pairs
+            .iter()
+            .find(|(k, _)| k == "PROXY_DIAGNOSTICS_MAX_BYTES")
+            .map(|(_, v)| v.as_str())
+            .expect("缺少 PROXY_DIAGNOSTICS_MAX_BYTES");
+        assert_eq!(diagnostics_limit, "8388608", "诊断每份容量应为 8 MiB");
+        assert_eq!(pairs.len(), 19, "应为 17 项配置 + 诊断路径 + 诊断容量");
     }
 }

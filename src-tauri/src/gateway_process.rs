@@ -176,7 +176,7 @@ fn create_kill_on_close_job() -> Result<HANDLE, &'static str> {
 }
 
 /// 通用受管 spawn：node 运行脚本，CREATE_NO_WINDOW，挂 KILL_ON_JOB_CLOSE Job。
-/// extra_env 在继承环境之上追加（网关用 17 项配置 + 诊断路径）。
+/// extra_env 在继承环境之上追加（网关用 17 项配置 + 诊断路径与容量）。
 pub fn spawn_managed(
     node_exe: &Path,
     script: &Path,

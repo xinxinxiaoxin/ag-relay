@@ -40,7 +40,8 @@ fn 连接设置_重开后环境注入只覆盖连接项且保持本机监听() {
     assert_eq!(env.get("PROXY_PORT").unwrap(), "18998");
     assert_eq!(env.get("PROXY_HOST").unwrap(), "127.0.0.1");
     assert_eq!(env.get("PROXY_MAX_ATTEMPTS").unwrap(), "110");
-    assert_eq!(env.len(), 18);
+    assert_eq!(env.get("PROXY_DIAGNOSTICS_MAX_BYTES").unwrap(), "8388608");
+    assert_eq!(env.len(), 19);
     std::fs::remove_dir_all(dir).unwrap();
 }
 

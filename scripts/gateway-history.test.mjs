@@ -4,7 +4,7 @@ import test from 'node:test'
 import http from 'node:http'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
@@ -118,6 +118,7 @@ async function fixture(t, respond, config = {}, script = core) {
   assert.equal(status.pid, child.pid)
   return {
     captured,
+    diagnostics,
     rows: () => readFileSync(diagnostics, 'utf8').trim().split(/\r?\n/).map(line => JSON.parse(line)),
     async request(body = history, headers = {}, options = {}) {
       const response = await fetch(`${url}${options.path ?? '/v1/responses'}`, {
@@ -476,3 +477,48 @@ for (const explicit of [false, true]) {
     assert.ok(f.rows().some(row => row.event === 'session_compat_applied' && row.removedReasoning === 1))
   })
 }
+
+// 2026-10-21 线上事故：Windows 上 rename 覆盖被占用的 .1 返回 EPERM，原实现每写一条都轮转、
+// 失败又被静默吞掉，日志在 1 MiB 后停了 6 小时。这里固定两个行为：到限仍能继续写，
+// 且归档不可用时也不会静默停摆。核心把容量下限钳在 4096，测试用略高于它的预算。
+const diagnosticsLimit = 5000
+const diagnosticOptions = () => ({
+  PROXY_DIAGNOSTICS_MAX_BYTES: String(diagnosticsLimit), PROXY_STATUS_INTERVAL_MS: '100000',
+})
+const diagnosticTimes = file => readFileSync(file, 'utf8').trim().split('\n').map(line => JSON.parse(line).time)
+
+test('诊断到限后轮转并继续写入，归档与当前档都保留', async t => {
+  const f = await fixture(t, () => success, diagnosticOptions())
+  for (let i = 0; i < 16; i++) assert.equal((await f.request()).status, 200)
+  const live = f.diagnostics
+  assert.ok(statSync(live).size <= diagnosticsLimit, '当前档不得超过预算')
+  const archived = statSync(live + '.1').size
+  assert.ok(archived > 0 && archived <= diagnosticsLimit, '.1 必须存在且不超预算')
+  assert.ok(diagnosticTimes(live + '.1').every(time => time), '归档必须是完整 JSON 行')
+  const liveTimes = diagnosticTimes(live)
+  assert.ok(liveTimes.every(time => time), '当前档必须是完整 JSON 行')
+  assert.ok(liveTimes.length > 0, '轮转后仍应继续写入')
+  // 归档的最后一条必须早于当前档的第一条：说明没有把新内容挤掉
+  assert.ok(diagnosticTimes(live + '.1').at(-1) <= liveTimes[0], '归档与当前档时间必须连续')
+})
+
+test('归档无法替换时截断续写，诊断不会静默停摆', async t => {
+  const f = await fixture(t, () => success, diagnosticOptions())
+  const live = f.diagnostics
+  for (let i = 0; i < 8; i++) assert.equal((await f.request()).status, 200)
+  // 用目录占住 .1 的位置：删不掉、也 rename 不过去，模拟 Windows 下归档被占用。
+  // 连续失败几次后走截断兜底，写入必须恢复。
+  rmSync(live + '.1', { force: true })
+  mkdirSync(live + '.1')
+  try {
+    for (let i = 0; i < 24; i++) assert.equal((await f.request()).status, 200)
+    const written = readFileSync(live, 'utf8')
+    assert.ok(written.length > 0, '归档不可用时仍必须写入当前档')
+    assert.ok(statSync(live).size <= diagnosticsLimit, '截断兜底后当前档仍须有界')
+    assert.ok(diagnosticTimes(live).every(time => time), '当前档必须是完整 JSON 行')
+    // 截断发生过，说明恢复不是运气：写入量必须远超单档容量
+    assert.ok(diagnosticTimes(live).length < 60, '应发生截断而不是把全部记录堆在内存之外')
+  } finally {
+    rmSync(live + '.1', { recursive: true, force: true })
+  }
+})

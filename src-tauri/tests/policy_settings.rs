@@ -48,7 +48,7 @@ fn 启动环境_显式添加完整策略快照且保持旧环境默认表() {
         serde_json::to_value(&policy).unwrap()
     );
     assert_eq!(next, previous, "17 项默认及诊断路径不能跟着策略变化");
-    assert_eq!(next.len(), 18);
+    assert_eq!(next.len(), 19);
     policy.profiles.codex.max_attempts = 0;
     assert!(
         gateway_env::gateway_env_pairs_with_policy(&diagnostics, &connection, &policy).is_err()
