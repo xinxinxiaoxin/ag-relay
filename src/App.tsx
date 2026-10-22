@@ -28,6 +28,9 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel,
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { Input } from '@/components/ui/input'
 import { useUpdate } from '@/hooks/use-update'
+import { useShutdown } from '@/hooks/use-shutdown'
+import { shutdownControls } from '@/lib/shutdown'
+import { ShutdownProgress } from '@/components/shutdown-progress'
 import { respondToClose, watchWindowLifecycle, type CloseAction, type CloseRequest } from '@/lib/window'
 import { WindowControls } from '@/components/window-controls'
 import brandIcon from '@/assets/brand-small.png'
@@ -132,6 +135,11 @@ export default function App() {
   const [page, setPage] = useState<PageId>('overview')
   const [policyEditor] = useState(createPolicyEditor)
   const update = useUpdate()
+  const shutdown = useShutdown()
+  const exitProgress = shutdown.state.progress?.kind === 'exit' ? shutdown.state.progress : null
+  const exitWaiting = exitProgress !== null
+  const exitShutdown = { ...shutdown.state, progress: exitProgress }
+  const exitCancel = shutdownControls(exitShutdown)
   const updateNotice = update.state.view?.phase === 'needs_attention' ? '更新需要处理' : update.state.hasUpdate ? '有可用更新' : null
   const attentionShown = useRef<string | null>(null)
   useEffect(() => {
@@ -164,6 +172,14 @@ export default function App() {
   const [exitBusy, setExitBusy] = useState<CloseAction | null>(null)
   const [exitError, setExitError] = useState<string | null>(null)
   const exitWorking = useRef(false)
+  // 托盘触发 quit_app 不经过 runExit；后端发布退出进度也必须唤出确认框。
+  useEffect(() => {
+    if (exitProgress) {
+      setConfirmExit(current => current ?? { kind: 'menu' })
+      // 托盘退出也锁住确认按钮，直到实际任务失败事件；取消 IPC 受理不会解锁。
+      if (!exitWorking.current) setExitBusy('quit')
+    }
+  }, [exitProgress?.operationId])
   useEffect(() => watchWindowLifecycle({
     onClose: request => {
       setConfirmExit({ kind: 'window', request })
@@ -172,12 +188,18 @@ export default function App() {
     onExitFailed: detail => {
       setConfirmExit(current => current ?? { kind: 'menu' })
       setExitError(detail)
+      if (!exitWorking.current) setExitBusy(null)
     },
     onError: error => toast.error('无法接收窗口关闭请求', { description: String(error) }),
   }), [])
 
   const runExit = async (action: CloseAction) => {
-    if (!confirmExit || exitWorking.current) return
+    // 忙碌时的“取消”取消排空等待，而不是消费窗口关闭请求；不走退出工作锁。
+    if (action === 'cancel' && (exitWorking.current || exitBusy !== null || exitWaiting)) {
+      if (exitProgress) await shutdown.onCancelWait(exitProgress.operationId)
+      return
+    }
+    if (!confirmExit || exitWorking.current || exitBusy !== null || exitWaiting) return
     exitWorking.current = true
     setExitBusy(action)
     setExitError(null)
@@ -372,7 +394,7 @@ export default function App() {
             <div className="mx-auto w-full max-w-[1280px]">
               {page === 'overview' && <OverviewPage {...common} appVersion={appVersion} gatewayError={gatewayError} onDismissError={() => setGatewayError(null)} />}
               {page === 'logs' && <LogsPage {...common} />}
-              {page === 'settings' && <SettingsPage {...common} update={update} />}
+              {page === 'settings' && <SettingsPage {...common} update={{ ...update, shutdown: shutdown.state, onCancelWait: shutdown.onCancelWait }} />}
               {page === 'policy' && <PolicyPage editor={policyEditor} snapshot={view} onAction={act} />}
             </div>
           </main>
@@ -443,24 +465,27 @@ export default function App() {
       </AlertDialog>
 
       {/* 窗口关闭三选与明确退出共用确认框；操作完成前不关闭，失败留在原地。 */}
-      <AlertDialog open={confirmExit !== null} onOpenChange={open => { if (!open && !exitWorking.current) void runExit('cancel') }}>
-        <AlertDialogContent onEscapeKeyDown={event => { if (exitWorking.current) event.preventDefault() }}>
+      <AlertDialog open={confirmExit !== null || exitWaiting} onOpenChange={open => { if (!open) void runExit('cancel') }}>
+        <AlertDialogContent onEscapeKeyDown={event => {
+          if (exitWorking.current || exitWaiting) { event.preventDefault(); void runExit('cancel') }
+        }}>
           <AlertDialogHeader>
             <AlertDialogMedia>
               <LogOutIcon aria-hidden="true" />
             </AlertDialogMedia>
             <AlertDialogTitle>{confirmExit?.kind === 'window' ? '关闭 AG Relay 窗口？' : '退出 AG Relay？'}</AlertDialogTitle>
             <AlertDialogDescription>
-              {confirmExit?.kind === 'window' ? '留在托盘可继续运行；退出会等待请求结束，超时则保持运行。' : '退出会等待请求结束，超时则保持运行。'}
+              {confirmExit?.kind === 'window' ? '留在托盘可继续运行；退出会暂停接收新请求，等待已有请求完成。等待时可以取消，最长10分钟；超时取消退出，不强制结束请求。' : '退出会暂停接收新请求，等待已有请求完成。等待时可以取消，最长10分钟；超时取消退出，不强制结束请求。'}
             </AlertDialogDescription>
           </AlertDialogHeader>
           {confirmExit?.kind === 'window' && !confirmExit.request.trayAvailable && <p id="tray-unavailable" className="text-xs text-muted-foreground">系统托盘不可用，请取消或退出。</p>}
           {exitError && <p role="alert" className="text-sm text-destructive">{exitError}</p>}
-          {exitBusy && <p role="status" className="text-xs text-muted-foreground">{exitBusy === 'quit' ? '正在等待请求结束…' : '正在处理窗口操作…'}</p>}
+          {(exitWaiting || exitBusy === 'quit') && <ShutdownProgress shutdown={exitShutdown} showCancel={false} />}
+          {exitBusy && exitBusy !== 'quit' && <p role="status" className="text-xs text-muted-foreground">正在处理窗口操作…</p>}
           <AlertDialogFooter className="sm:flex-wrap">
-            <AlertDialogCancel disabled={exitBusy !== null} onClick={event => { event.preventDefault(); void runExit('cancel') }}>取消</AlertDialogCancel>
-            {confirmExit?.kind === 'window' && <Button variant="outline" disabled={exitBusy !== null || !confirmExit.request.trayAvailable} aria-describedby={!confirmExit.request.trayAvailable ? 'tray-unavailable' : undefined} onClick={() => void runExit('tray')}>保留在托盘</Button>}
-            <AlertDialogAction variant="destructive" disabled={exitBusy !== null} onClick={event => { event.preventDefault(); void runExit('quit') }}>
+            <AlertDialogCancel disabled={exitWaiting ? !exitCancel.canCancel : exitBusy !== null} onClick={event => { event.preventDefault(); void runExit('cancel') }}>{exitWaiting ? exitCancel.cancelText : '取消'}</AlertDialogCancel>
+            {confirmExit?.kind === 'window' && <Button variant="outline" disabled={exitBusy !== null || exitWaiting || !confirmExit.request.trayAvailable} aria-describedby={!confirmExit.request.trayAvailable ? 'tray-unavailable' : undefined} onClick={() => void runExit('tray')}>保留在托盘</Button>}
+            <AlertDialogAction variant="destructive" disabled={exitBusy !== null || exitWaiting} onClick={event => { event.preventDefault(); void runExit('quit') }}>
               {confirmExit?.kind === 'window' ? '彻底退出' : '退出应用'}
             </AlertDialogAction>
           </AlertDialogFooter>

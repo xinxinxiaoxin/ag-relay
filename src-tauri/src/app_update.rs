@@ -1,5 +1,6 @@
 //! AG Relay 更新的应用服务层。候选与已验签字节只保留在 Rust，前端只拿展示信息和确认编号。
 
+use crate::shutdown_wait::{ShutdownKind, ShutdownProgress, ShutdownWait, ShutdownWaits};
 pub use crate::update_journal::BootPlan;
 use crate::update_journal::{Journal, Stage};
 use serde::Serialize;
@@ -18,6 +19,7 @@ pub struct GatewayIdentity {
 #[derive(Debug)]
 pub enum ShutdownFailure {
     Timeout,
+    Cancelled,
     Refused(String),
 }
 
@@ -33,6 +35,7 @@ pub enum ExitFailureReason {
     GatewayAccessFailed,
     GatewayBusy,
     DrainTimeoutCancelled,
+    WaitCancelled,
     StatusUnverified,
     StatusIdentityMissing,
     StatusInvalid,
@@ -64,6 +67,7 @@ impl ExitFailureReason {
             Self::GatewayAccessFailed => "gateway_access_failed",
             Self::GatewayBusy => "gateway_busy",
             Self::DrainTimeoutCancelled => "drain_timeout_cancelled",
+            Self::WaitCancelled => "wait_cancelled",
             Self::StatusUnverified => "status_unverified",
             Self::StatusIdentityMissing => "status_identity_missing",
             Self::StatusInvalid => "status_invalid",
@@ -91,7 +95,8 @@ impl ExitFailureReason {
             "无法核实当前网关状态，未执行停机" => Self::StatusUnverified,
             "网关状态缺少实例身份" => Self::StatusIdentityMissing,
             "网关状态无效" => Self::StatusInvalid,
-            "此网关不支持有界安全停机，请先手动处理旧实例；不会强制停止" => {
+            "此网关不支持有界安全停机，请先手动处理旧实例；不会强制停止"
+            | "此网关不支持可取消等待，请先手动处理旧实例；不会强制停止" => {
                 Self::SafeShutdownUnsupported
             }
             "无法核实 supervisor 父链，未执行停机" => Self::SupervisorChainUnverified,
@@ -144,6 +149,9 @@ impl std::error::Error for ExitPreparationFailure {}
 pub trait UpdateGateway {
     fn identity(&mut self) -> Result<GatewayIdentity, String>;
     fn safe_shutdown(&mut self, timeout: Duration) -> Result<bool, ShutdownFailure>;
+    fn safe_shutdown_wait(&mut self, wait: &ShutdownWait) -> Result<bool, ShutdownFailure> {
+        self.safe_shutdown(wait.timeout())
+    }
     fn restore(&mut self) -> Result<(), String>;
 }
 pub trait GatewayHost {
@@ -283,6 +291,7 @@ pub struct UpdateService<C> {
     state: Mutex<UpdateState<C>>,
     journal: Option<Journal>,
     operation: AtomicU8,
+    waits: ShutdownWaits,
     enabled: bool,
 }
 
@@ -311,6 +320,7 @@ impl<C: Clone + Send + Sync> UpdateService<C> {
             }),
             journal: None,
             operation: AtomicU8::new(OperationState::Idle as u8),
+            waits: ShutdownWaits::default(),
             enabled,
         }
     }
@@ -330,12 +340,23 @@ impl<C: Clone + Send + Sync> UpdateService<C> {
         OperationState::load(&self.operation) == OperationState::ExitAuthorized
     }
 
+    pub fn shutdown_progress(&self) -> Option<ShutdownProgress> {
+        self.waits.progress()
+    }
+
+    pub fn cancel_shutdown(&self, operation_id: u64) -> Result<(), String> {
+        self.waits.cancel(operation_id)
+    }
+
     pub fn prepare_exit(&self, host: &impl GatewayHost) -> Result<(), ExitPreparationFailure> {
         let _operation = self.begin_operation().map_err(|detail| {
             ExitPreparationFailure::new(ExitFailureReason::OperationBusy, detail)
         })?;
+        let wait = self.waits.begin(ShutdownKind::Exit).map_err(|detail| {
+            ExitPreparationFailure::new(ExitFailureReason::OperationBusy, detail)
+        })?;
         let outcome = host
-            .with_gateway(|g| g.safe_shutdown(Duration::from_secs(10)))
+            .with_gateway(|g| g.safe_shutdown_wait(&wait))
             .map_err(|detail| {
                 let reason = if detail == "网关正在执行另一项操作，请稍后重试" {
                     ExitFailureReason::GatewayBusy
@@ -350,9 +371,13 @@ impl<C: Clone + Send + Sync> UpdateService<C> {
                         ExitFailureReason::shutdown_refusal(&detail),
                         detail,
                     ),
+                    ShutdownFailure::Cancelled => ExitPreparationFailure::new(
+                        ExitFailureReason::WaitCancelled,
+                        "已取消等待，网关已恢复接单；未强制结束请求。",
+                    ),
                     ShutdownFailure::Timeout => ExitPreparationFailure::new(
                         ExitFailureReason::DrainTimeoutCancelled,
-                        "退出已取消：排空超时，网关已恢复接单；未强制结束，请稍后重试。",
+                        "等待已超过10分钟，网关已恢复接单；未强制结束，请稍后重试。",
                     ),
                 })
             });
@@ -546,23 +571,32 @@ impl<C: Clone + Send + Sync> UpdateService<C> {
             journal.write(&transaction)?;
             self.set_phase(
                 UpdatePhase::Quiescing,
-                "正在优雅排空在途请求，超时将取消安装。",
+                "已暂停接收新请求，等待已有请求完成；最长10分钟，可取消等待。",
             );
             // 原来已停止时绝不调用可发现外部实例的停机链，避免停掉随后出现的新实例。
             let stopped = if original.running {
-                gateway.safe_shutdown(Duration::from_secs(10))
+                let wait = self.waits.begin(ShutdownKind::Update)?;
+                gateway.safe_shutdown_wait(&wait)
             } else {
                 Ok(false)
             };
             match stopped {
                 Ok(was_running) if was_running == original.running => {}
                 Ok(_) => return Err("未证实原网关完整退出，拒绝安装。".into()),
+                Err(ShutdownFailure::Cancelled) => {
+                    transaction.stage = Stage::Aborted;
+                    journal.write(&transaction)?;
+                    return Ok(self.set_phase(
+                        UpdatePhase::Deferred,
+                        "已取消等待，网关已恢复接单；未安装，可稍后重新确认更新。",
+                    ));
+                }
                 Err(ShutdownFailure::Timeout) => {
                     transaction.stage = Stage::Aborted;
                     journal.write(&transaction)?;
                     return Ok(self.set_phase(
                         UpdatePhase::Deferred,
-                        "排空超时，网关已恢复接单；未安装，请稍后重试。",
+                        "等待已超过10分钟，网关已恢复接单；未安装，请稍后重试。",
                     ));
                 }
                 Err(ShutdownFailure::Refused(detail)) => return Err(detail),
@@ -728,7 +762,7 @@ mod tests {
             })
         }
         fn safe_shutdown(&mut self, timeout: Duration) -> Result<bool, ShutdownFailure> {
-            assert_eq!(timeout, Duration::from_secs(10));
+            assert_eq!(timeout, Duration::from_secs(600));
             if let Some(failure) = self.failure.take() {
                 return Err(failure);
             }
@@ -768,7 +802,7 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "退出已取消：排空超时，网关已恢复接单；未强制结束，请稍后重试。"
+            "等待已超过10分钟，网关已恢复接单；未强制结束，请稍后重试。"
         );
         assert_eq!(updates.view().detail, error.to_string());
         assert!(!updates.exit_authorized());
@@ -1126,6 +1160,102 @@ mod tests {
         assert!(host.0.lock().unwrap().running);
         assert_eq!(updates.view().phase, UpdatePhase::Failed);
         assert!(updates.view().detail.contains("未停止网关"));
+    }
+
+    #[test]
+    fn 退出与更新等待都可取消_不安装不重启且解除互斥() {
+        use std::sync::mpsc;
+        struct WaitingGateway {
+            ready: mpsc::Sender<()>,
+            running: bool,
+        }
+        impl UpdateGateway for WaitingGateway {
+            fn identity(&mut self) -> Result<GatewayIdentity, String> {
+                Ok(GatewayIdentity {
+                    running: self.running,
+                    token: "等待测试实例".into(),
+                })
+            }
+            fn safe_shutdown(&mut self, _: Duration) -> Result<bool, ShutdownFailure> {
+                panic!("新流程不能退回旧停机入口")
+            }
+            fn safe_shutdown_wait(&mut self, wait: &ShutdownWait) -> Result<bool, ShutdownFailure> {
+                assert_eq!(wait.timeout(), Duration::from_secs(600));
+                wait.update_remaining(2);
+                self.ready.send(()).unwrap();
+                let deadline = std::time::Instant::now() + Duration::from_secs(3);
+                while !wait.cancelled() {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "取消必须绕过生命周期锁到达"
+                    );
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(ShutdownFailure::Cancelled)
+            }
+            fn restore(&mut self) -> Result<(), String> {
+                panic!("取消不能重启")
+            }
+        }
+        for kind in [ShutdownKind::Exit, ShutdownKind::Update] {
+            let (ready, observed) = mpsc::channel();
+            let root = std::env::temp_dir().join(format!(
+                "ag-relay-wait-{}",
+                crate::update_journal::unique_id()
+            ));
+            let updates = UpdateService::<()>::with_journal(
+                true,
+                "0.3.11".into(),
+                "隔离安装".into(),
+                root.join("state.json"),
+            );
+            let host = Sandbox(Mutex::new(WaitingGateway {
+                ready,
+                running: true,
+            }));
+            let server = ReleaseServer {
+                downloads: AtomicUsize::new(0),
+            };
+            let id = tauri::async_runtime::block_on(updates.check(&server))
+                .unwrap()
+                .release
+                .unwrap()
+                .id;
+            std::thread::scope(|scope| {
+                let task = scope.spawn(|| match kind {
+                    ShutdownKind::Exit => updates
+                        .prepare_exit(&host)
+                        .map(|_| ())
+                        .map_err(|e| e.detail),
+                    ShutdownKind::Update => {
+                        tauri::async_runtime::block_on(updates.confirm(&server, &host, &id))
+                            .map(|_| ())
+                    }
+                });
+                observed.recv_timeout(Duration::from_secs(3)).unwrap();
+                let progress = updates.shutdown_progress().unwrap();
+                assert_eq!(progress.kind, kind);
+                assert_eq!(progress.remaining_requests, Some(2));
+                assert!(updates.controls_blocked());
+                updates.cancel_shutdown(progress.operation_id).unwrap();
+                let result = task.join().unwrap();
+                if kind == ShutdownKind::Exit {
+                    assert_eq!(
+                        result.unwrap_err(),
+                        "已取消等待，网关已恢复接单；未强制结束请求。"
+                    );
+                } else {
+                    result.unwrap();
+                    assert_eq!(updates.view().phase, UpdatePhase::Deferred);
+                    assert_eq!(updates.boot_plan(), BootPlan::Normal);
+                }
+            });
+            assert!(host.0.lock().unwrap().running);
+            assert!(!updates.controls_blocked());
+            assert!(!updates.exit_authorized());
+            assert!(updates.shutdown_progress().is_none());
+            let _ = std::fs::remove_dir_all(root);
+        }
     }
 
     #[test]

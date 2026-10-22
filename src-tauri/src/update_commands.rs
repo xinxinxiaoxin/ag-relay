@@ -124,6 +124,20 @@ impl UpdateGateway for GatewayConnection {
             ConnectionError::Failed(detail) => ShutdownFailure::Refused(detail),
         })
     }
+    fn safe_shutdown_wait(
+        &mut self,
+        wait: &crate::shutdown_wait::ShutdownWait,
+    ) -> Result<bool, ShutdownFailure> {
+        GatewayConnection::safe_shutdown_wait(self, wait).map_err(|error| match error {
+            ConnectionError::Timeout => ShutdownFailure::Timeout,
+            ConnectionError::Failed(detail)
+                if detail == "已取消等待，网关已恢复接单；未强制结束请求。" =>
+            {
+                ShutdownFailure::Cancelled
+            }
+            ConnectionError::Failed(detail) => ShutdownFailure::Refused(detail),
+        })
+    }
     fn restore(&mut self) -> Result<(), String> {
         // start 自己拒绝端口冲突，绝不杀掉更新期间出现的其它实例。
         self.start().map(|_| ()).map_err(|e| e.to_string())
@@ -364,6 +378,19 @@ mod exit_task_tests {
             assert!(exits.try_begin().is_ok(), "实际任务结束后才允许显式重试");
         }
     }
+}
+
+#[tauri::command]
+pub fn get_shutdown_progress(app: AppHandle) -> Option<crate::shutdown_wait::ShutdownProgress> {
+    app.try_state::<Updates>()
+        .and_then(|state| state.shutdown_progress())
+}
+
+#[tauri::command]
+pub fn cancel_shutdown(app: AppHandle, operation_id: u64) -> Result<(), String> {
+    app.try_state::<Updates>()
+        .ok_or("更新模块尚未就绪，暂不能取消等待。")?
+        .cancel_shutdown(operation_id)
 }
 
 #[tauri::command]

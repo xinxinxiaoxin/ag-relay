@@ -155,6 +155,34 @@ let closing = false;
 let restartError = null;
 // 一次有界、安全停机尝试。超时或调用者断连时撤销，不保留延迟退出任务。
 let safeShutdown = null;
+// 可取消的两阶段等待：排空后仍存活，由同一操作显式确认退出。
+let drainWait = null;
+// 只保留最近 128 个操作的封闭终态：旧 start 不续预算，取消确认可安全重试。
+const finishedDrainOperations = new Map();
+
+function clearDrainWait(attempt = drainWait, outcome = 'cancelled') {
+  if (!attempt || drainWait !== attempt) return;
+  clearTimeout(attempt.budgetTimer);
+  clearTimeout(attempt.leaseTimer);
+  finishedDrainOperations.set(attempt.operation, outcome);
+  if (finishedDrainOperations.size > 128) finishedDrainOperations.delete(finishedDrainOperations.keys().next().value);
+  drainWait = null;
+  draining = false;
+  // 到期/实际停机撤销尚未送完的 commit，不能留下成功确认后又继续接单。
+  if (attempt.commitRes && !attempt.commitRes.writableFinished) attempt.commitRes.destroy();
+}
+
+function expireDrainWait(attempt = drainWait) {
+  if (!attempt || drainWait !== attempt) return;
+  const now = performance.now();
+  if (now >= attempt.deadline || now >= attempt.leaseDeadline) clearDrainWait(attempt);
+}
+
+function renewDrainLease(attempt) {
+  clearTimeout(attempt.leaseTimer);
+  attempt.leaseDeadline = performance.now() + attempt.leaseMs;
+  attempt.leaseTimer = setTimeout(() => clearDrainWait(attempt), attempt.leaseMs);
+}
 
 function requestSnapshot(state) {
   const now = Date.now();
@@ -183,6 +211,16 @@ function progressKind(obj) {
   return 'text';
 }
 
+// Classification sees the cause, not opaque identifiers or diagnostic URLs. Keep
+// item prefixes and parameter paths so precise history/status errors stay recognizable.
+function errorCauseText(message) {
+  return String(message || '')
+    .replace(/\[\s*(?:request|trace|response|item)[_ -]?id\s*[:=][^\]\r\n]*\]|\(\s*(?:request|trace|response|item)[_ -]?id\s*[:=][^)\r\n]*\)/gi, ' ')
+    .replace(/\bhttps?:\/\/[^\s<>"'\])]+/gi, ' ')
+    .replace(/\b(?:request|trace|response|item)[_ -]?id\s*[:=]\s*(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s)\],;]+)/gi, ' ')
+    .replace(/\b(rs|ws|msg|resp|fc|call)_[a-z0-9_.:-]+/gi, '$1_opaque');
+}
+
 // 明确的暂时性错误码 → 值得重试
 // 注意：不含 insufficient_quota —— 配额耗尽属于确定性错误，重试无意义。
 const RETRYABLE_CODES = new Set([
@@ -196,21 +234,30 @@ const RETRYABLE_CODES = new Set([
 // 注意 "no deployment / deployment to match"：模型名本身是有效的（在服务商 /v1/models
 // 里能查到），报这个错说明上游部分通道缺少该部署，属于偶发路由问题 —— 重试有机会命中好通道。
 const RETRYABLE_TEXT =
-  /rate.?limit|too many requests|overload|temporar|try again|timeout|timed out|unavailable|capacity|internal (server )?error|bad gateway|gateway|no deployment|deployment to match|502|503|504/i;
+  /\b(?:rate[ _-]?limit(?:ed| exceeded)?|too many requests|overload(?:ed)?|temporar(?:y|ily)|try again|timeout|timed out|unavailable|capacity|internal (?:server )?error|bad gateway|gateway (?:error|timeout)|no deployment|deployment to match)\b|\b(?:HTTP(?: status(?: code)?)?|status(?: code)?|error(?: code)?)\s*[:=]?\s*(?:502|503|504)\b/i;
 
-// 真正永久性的错误：重试不会改变结果，只白烧额度/时间 —— 直接透传，让 ZCode 快速失败。
-// 只保留鉴权类：key 错了、没权限，重试一万次也一样。
+// Exact provider codes are evidence; code substrings and opaque identifiers are not.
+const PERMANENT_CODES = new Set([
+  'invalid_api_key', 'incorrect_api_key', 'unauthorized', 'authentication_error',
+  'permission_denied', 'insufficient_permissions', 'account_disabled', 'account_deactivated',
+  'context_length_exceeded', 'model_not_found', 'invalid_model', 'unsupported_model',
+  'content_blocked', 'content-blocked', 'content_filter', 'content_filter_error',
+  'content-filter', 'contentfilter', 'flagged', 'moderation',
+  'sensitive_words', 'request_too_large',
+]);
+const QUOTA_CODES = new Set(['insufficient_quota', 'quota_exceeded', 'quota_exhausted', 'insufficient_balance', 'payment_required']);
 const PERMANENT_TEXT =
-  /invalid api key|incorrect api key|invalid_api_key|unauthorized|authentication failed|authentication_error|insufficient permissions|permission denied|account (is )?(deactivated|disabled|suspended)/i;
+  /\b(?:invalid api key|incorrect api key|invalid_api_key|unauthorized|authentication failed|authentication_error|insufficient permissions|permission denied|account (?:is )?(?:deactivated|disabled|suspended))\b/i;
 
 function isPermanentError(info) {
-  return !!info && PERMANENT_TEXT.test(`${info.code || ''} ${info.message || ''}`);
+  return !!info && (PERMANENT_CODES.has(String(info.code || info.type || '').toLowerCase())
+    || PERMANENT_TEXT.test(errorCauseText(info.message)));
 }
 
 // 「找不到部署 / 上游没有该模型部署」——通道抖动，重试换通道即可，值得多试几次
-const DEPLOYMENT_TEXT = /no deployment|deployment to match/i;
+const DEPLOYMENT_TEXT = /\b(?:no deployment|deployment to match)\b/i;
 function isDeploymentError(info) {
-  return !!info && DEPLOYMENT_TEXT.test(String(info.message || ''));
+  return !!info && DEPLOYMENT_TEXT.test(errorCauseText(info.message));
 }
 
 /**
@@ -219,7 +266,7 @@ function isDeploymentError(info) {
  * 删除不可用 reasoning 会损失推理连续性，并非无损修复。
  */
 const REASONING_ITEM_TEXT =
-  /encrypted content could not be (verified|decrypted)|encrypted content (could not|failed)|items are not persisted when .?store.? is set to false|item with id .rs_[^']* not found/i;
+  /\bencrypted content (?:for item ['"]?rs_[^'"\s]+['"]? )?could not be (?:verified|decrypted|parsed)\b|\bencrypted content (?:could not|failed)\b|\bitems are not persisted when .?store.? is set to false\b|\bitem with id ['"]rs_[^'"\r\n]+['"] not found\b/i;
 
 function isReasoningItemError(text) {
   return REASONING_ITEM_TEXT.test(String(text || ''));
@@ -235,12 +282,6 @@ const AZURE_RESOURCE_TEXT =
   /\bthe requested item was created under a different (?:azure|\*\*\*) openai resource\b/i;
 function isAzureResourceError(message) {
   return AZURE_RESOURCE_TEXT.test(String(message || ''));
-}
-
-/** Inspect only an error message, not arbitrary JSON fields containing quoted errors. */
-function httpErrorMessage(text) {
-  try { return errorInfoFromJson(JSON.parse(text))?.message || ''; }
-  catch { return text.trim(); }
 }
 
 /** Allowlisted shape only: never copy arbitrary type/role/store values from input. */
@@ -552,36 +593,19 @@ function rememberCompatibility(identity, cache) {
  * 好去换模型/换号/等池子恢复。若当成可重试错误处理，只会白白拖慢并烧掉请求数。
  */
 const QUOTA_TEXT =
-  /budget pool|quota has been exhausted|quota exhausted|insufficient_quota|insufficient quota|out of quota|exceeded your current quota|no available channel|balance|payment required|insufficient balance|余额不足|额度不足|配额/;
+  /\b(?:budget pool|quota has been exhausted|quota exhausted|insufficient_quota|insufficient quota|out of quota|exceeded your current quota|no available channel|payment required|insufficient balance|balance (?:is )?(?:insufficient|exhausted|too low))\b|余额不足|额度不足|配额/i;
 
 function isQuotaError(info) {
-  return !!info && QUOTA_TEXT.test(`${info.code || ''} ${info.message || ''}`);
-}
-function isQuotaErrorText(text) {
-  return QUOTA_TEXT.test(String(text || ''));
+  return !!info && (QUOTA_CODES.has(String(info.code || info.type || '').toLowerCase())
+    || QUOTA_TEXT.test(errorCauseText(info.message)));
 }
 
-/**
- * 确定性错误（重试不会改变结果）：
- * 内容被审核拦、模型不存在、参数非法、超长超限等 —— 这些必须原样透传，
- * 否则会把「内容里有敏感词」这类问题重试好几轮，既慢又白烧额度。
- */
 const DETERMINISTIC_BODY_TEXT =
-  /sensitive words|sensitive_words|content[-_ ]?blocked|content[-_ ]?filter|flagged|moderation|内容审核|违规|model not found|does not exist|invalid model|unsupported model|not supported|invalid api key|incorrect api key|unauthorized|authentication failed|invalid_request_error|too large|context length|context_length_exceeded|maximum context|exceed.*max.*token/i;
+  /\b(?:sensitive words|sensitive_words|content[-_ ]?(?:blocked|filter)|flagged|moderation|model not found|(?:model|resource|item)\s+(?:['"][^'"\r\n]+['"]\s+)?does not exist|invalid model|unsupported model|not supported|too large|context length|context_length_exceeded|maximum context|exceed\w*[^.\r\n]*\bmax(?:imum)?[^.\r\n]*\btokens?)\b|内容审核|违规/i;
 
-function isDeterministicBodyError(bodyText) {
-  return isQuotaErrorText(bodyText) || DETERMINISTIC_BODY_TEXT.test(String(bodyText || ''));
-}
-
-// 三种错误载体共用既有确定性规则；未知错误不因“不认识”就被禁用重试。
-// 部署缺失仍走快速重试，鉴权/配额错误不被混合文案中的 deployment 放行。
 function isDeterministicError(info) {
-  if (!info) return false;
-  // invalid_request_error 是泛化信封，不足以证明请求不可恢复。
-  // 有些服务把限流/未知临时故障也包在这个 type 下；仍以具体原因判断。
-  const code = String(info.code || '').toLowerCase() === 'invalid_request_error' ? '' : info.code;
-  return isPermanentError(info) || isQuotaError(info) ||
-    (!isDeploymentError(info) && isDeterministicBodyError(`${code || ''} ${info.message || ''}`));
+  return !!info && (isPermanentError(info) || isQuotaError(info)
+    || DETERMINISTIC_BODY_TEXT.test(errorCauseText(info.message)));
 }
 
 // 日志：默认只打到控制台；显式启用的普通文件日志也受总容量约束。
@@ -671,21 +695,52 @@ function isTerminalEvent(obj) {
 
 function errorInfoFromJson(obj) {
   if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return null;
-  if (obj.type === 'error' || obj.type === 'response.failed') {
-    const e = obj.error || obj.response?.error || {};
-    return { code: e.code || e.type || obj.code, message: e.message || obj.message || 'provider error' };
-  }
-  if (obj.error && typeof obj.error === 'object') {
-    const e = obj.error;
-    return { code: e.code || e.type, message: e.message || 'provider error' };
-  }
-  return null;
+  const eventError = obj.type === 'error' || obj.type === 'response.failed';
+  const e = obj.error || (eventError ? obj.response?.error : null);
+  if (!eventError && (!e || typeof e !== 'object' || Array.isArray(e))) return null;
+  const field = value => typeof value === 'string' && value.trim() ? value : undefined;
+  return {
+    code: field(e?.code) || (eventError ? field(obj.code) : undefined),
+    type: field(e?.type),
+    message: field(e?.message) || (eventError ? field(obj.message) : undefined) || 'provider error',
+  };
 }
 
 function isRetryableError(info) {
   if (!info) return false;
-  if (RETRYABLE_CODES.has(String(info.code || '').toLowerCase())) return true;
-  return RETRYABLE_TEXT.test(String(info.message || ''));
+  if (RETRYABLE_CODES.has(String(info.code || info.type || '').toLowerCase())) return true;
+  return RETRYABLE_TEXT.test(errorCauseText(info.message));
+}
+
+// Every error carrier supplies the same evidence. Transport status is authoritative
+// for auth/payment; generic envelope types and unrelated JSON are not error causes.
+function classifyError(info, status = 200) {
+  const message = errorCauseText(info?.message);
+  const evidence = info ? { code: info.code, type: info.type, message } : null;
+  const quota = status === 402 || isQuotaError(evidence);
+  const permanent = quota || status === 401 || status === 403 || isDeterministicError(evidence);
+  const deployment = !permanent && isDeploymentError(evidence);
+  const retryable = !permanent && (deployment || status === 408 || status === 429 || status >= 500 || isRetryableError(info));
+  let kind = permanent ? (quota ? 'quota' : 'permanent') : deployment ? 'deployment' : retryable ? 'retryable' : 'unknown';
+  let historyKind = null;
+  let missingSearchReasoning = false;
+  let statusIndex = null;
+  if (kind === 'unknown' && info && (status === 400 || status === 200)) {
+    const statusMatch = /^Unknown parameter: ['"]input\[(\d+)\]\.status['"]\.(?:\s*\[trace_id=[^\]\r\n]+\])?\s*$/.exec(message);
+    if (statusMatch) {
+      kind = 'status';
+      statusIndex = Number(statusMatch[1]);
+    } else {
+      const azure = isAzureResourceError(message);
+      const reasoning = isReasoningItemError(message);
+      missingSearchReasoning = !azure && !reasoning && MISSING_SEARCH_REASONING_TEXT.test(message);
+      if (azure || reasoning || missingSearchReasoning) {
+        kind = 'history';
+        historyKind = azure ? 'azure_resource_mismatch' : 'stale_reasoning_item';
+      }
+    }
+  }
+  return { kind, info, message, permanent, quota, deployment, retryable, historyKind, missingSearchReasoning, statusIndex };
 }
 
 // 诊断用：把上游错误压成有界的指纹（错误码 + 命中的关键词），绝不落盘原文。
@@ -694,7 +749,7 @@ const ERROR_HINTS = ['different', 'resource', 'masked', 'persisted', 'encrypted'
   'rate', 'overload', 'capacity', 'quota', 'channel', 'balance', 'timeout', 'unavailable', 'deployment'];
 function errorFingerprint(info) {
   if (!info) return null;
-  const message = String(info.message || '').toLowerCase();
+  const message = errorCauseText(info.message).toLowerCase();
   const code = String(info.code || '');
   return {
     code: /^[A-Za-z0-9_.-]{1,64}$/.test(code) ? code : (code ? 'other' : 'none'),
@@ -992,10 +1047,8 @@ async function peekAndCommit(upstream, res, onCommit = () => {}, state) {
   // 误当成「通道抖动」而放宽了尝试次数，覆盖了用户配置的上限。
   const failure = (reason, kind = 'other') => ({
     committed: false, reason, kind, errorMessage: streamError?.message,
-    errorCode: streamError?.code ?? null,
-    permanent: isDeterministicError(streamError),
-    deployment: !isQuotaError(streamError) && isDeploymentError(streamError),
-    quota: isQuotaError(streamError),
+    errorCode: streamError?.code || streamError?.type || null,
+    classification: classifyError(streamError),
   });
 
   try {
@@ -1212,11 +1265,9 @@ async function handle(req, res, state) {
   log(`incoming ${req.method} ${req.url} body=${(body.length / 1024).toFixed(0)}KB ` +
       `waitHeader=${Math.round(attemptTimeoutMs / 1000)}s budget=${Math.round(policy.totalBudgetMs / 1000)}s`);
 
-  const handleStatusError = (message, attempt, source, status) => {
-    if (!policy.repairStatus) return null;
-    const match = /^Unknown parameter: ['"]input\[(\d+)\]\.status['"]\.(?:\s*\[trace_id=[^\]\r\n]+\])?\s*$/.exec(String(message || ''));
-    if (!match) return null;
-    const index = Number(match[1]);
+  const handleStatusError = (classification, attempt, source, status) => {
+    if (!policy.repairStatus || classification.kind !== 'status') return null;
+    const index = classification.statusIndex;
     const refuse = (reason) => {
       diagnose('status_repair_refused', { source, status, reason });
       sendPermanent(res, `Unsupported input status field: ${reason}. Correct the upstream request conversion.`);
@@ -1245,20 +1296,10 @@ async function handle(req, res, state) {
   };
 
   // Called uniformly for HTTP errors, pre-commit SSE errors and 200 JSON errors.
-  const handleItemError = (message, attempt, source, status, errorCode) => {
-    if (eligibleCodex || (hasPolicySettings && isResponses)) {
-      const info = { code: errorCode, message };
-      // A throttled/failing route can quote history errors without confirming that the
-      // history caused this attempt. Keep its original recovery classification instead.
-      if ((status !== 400 && status !== 200) || isDeterministicError(info)
-          || isRetryableError(info) || isDeploymentError(info)) return null;
-    }
-    const azure = isAzureResourceError(message);
-    const missingSearchReasoning = eligibleCodex && MISSING_SEARCH_REASONING_TEXT.test(String(message || ''))
-      && !isDeterministicError({ code: errorCode, message });
-    const reasoning = isReasoningItemError(message) || missingSearchReasoning;
-    if (!azure && !reasoning) return null;
-    const kind = azure ? 'azure_resource_mismatch' : 'stale_reasoning_item';
+  const handleItemError = (classification, attempt, source, status) => {
+    if (classification.kind !== 'history' || (classification.missingSearchReasoning && !eligibleCodex)) return null;
+    const kind = classification.historyKind;
+    const azure = kind === 'azure_resource_mismatch';
     diagnose('item_error', { kind, source, status, shape: summarizeResponsesBody(activeBody) });
     // 两类历史错误都可能来自当前通道无法接续；无法安全改写不等于无法原样重试。
     if ((codexResourceRetry || (hasPolicySettings && eligibleCodex)) && ++resourceFailures >= 5) {
@@ -1467,33 +1508,27 @@ async function handle(req, res, state) {
         const buf = Buffer.from(await upstream.arrayBuffer());
         const text = buf.toString('utf8');
 
-        let errorMessage = '';
         let errorInfo = null;
-        try { errorInfo = errorInfoFromJson(JSON.parse(text)); errorMessage = errorInfo?.message || ''; } catch { /* not an error envelope */ }
-        const statusAction = handleStatusError(errorMessage, attempt, 'http_error', upstream.status);
+        try { errorInfo = errorInfoFromJson(JSON.parse(text)); }
+        catch { errorInfo = { message: text.trim() }; }
+        const classification = classifyError(errorInfo, upstream.status);
+        const statusAction = handleStatusError(classification, attempt, 'http_error', upstream.status);
         if (statusAction === 'stop') return;
         if (statusAction === 'retry') { await retrySleep(cfg.deployDelayMs); continue; }
-        const itemAction = handleItemError(httpErrorMessage(text), attempt, 'http_error', upstream.status, errorInfo?.code);
+        const itemAction = handleItemError(classification, attempt, 'http_error', upstream.status);
         if (itemAction === 'stop') return;
         if (itemAction === 'retry') { await retrySleep(cfg.deployDelayMs); continue; }
 
-        // 「找不到部署」是通道抖动，优先按可重试处理（换通道重试有机会命中）。
-        const isDeploy = DEPLOYMENT_TEXT.test(text);
-        // 其余 5xx 里混着确定性错误：内容被审核拦、模型/参数不对等，重试纯属白烧额度。
-        // For scoped Codex recovery, a parsed invalid_request_error envelope is not
-        // itself evidence of a permanent failure; classify its message and code instead.
-        const deterministicBody = isDeterministicBodyError(eligibleCodex && errorInfo ? errorMessage : text);
-        if (isDeterministicError(errorInfo) || (!isDeploy && deterministicBody)) {
+        if (classification.permanent) {
           lastReason = `HTTP ${upstream.status} deterministic error: ${snippet(buf)}`;
           log(`attempt ${attempt}: ${lastReason}`);
           log('  -> deterministic error, not retrying');
           return passthrough(res, upstream.status, upstream.headers, buf);
         }
-        const retryable = isDeploy || upstream.status === 429 || upstream.status === 408 || upstream.status >= 500;
-        if (!retryable) return passthrough(res, upstream.status, upstream.headers, buf);
+        if (!classification.retryable) return passthrough(res, upstream.status, upstream.headers, buf);
         lastReason = `HTTP ${upstream.status} ${snippet(buf)}`;
         log(`attempt ${attempt}: ${lastReason}`);
-        if (isDeploy) {
+        if (classification.deployment) {
           maxAttempts = Math.max(maxAttempts, cfg.deployMaxAttempts);
           if (attempt < maxAttempts) {
             log('  -> deployment missing on this route, retrying for another route');
@@ -1518,6 +1553,7 @@ async function handle(req, res, state) {
         }
         if (ac.signal.aborted) return;
         lastReason = outcome.reason;
+        const classification = outcome.classification;
         log(`attempt ${attempt}: ${lastReason}`);
         // 有界诊断：把「200 流内的失败」分类成固定枚举 + 上游错误指纹（不落盘文案）。
         // 之前这类失败没有任何诊断记录，只能靠反推，代价很大。
@@ -1530,22 +1566,22 @@ async function handle(req, res, state) {
             code: fp ? fp.code : 'none',
             hints: fp ? fp.hints : '',
             masked: fp ? fp.masked : false,
-            retryable: !outcome.permanent && isRetryableError({ code: outcome.errorCode, message: outcome.errorMessage }),
+            retryable: classification.retryable,
           });
         }
-        const statusAction = handleStatusError(outcome.errorMessage, attempt, 'sse_precommit', upstream.status);
+        const statusAction = handleStatusError(classification, attempt, 'sse_precommit', upstream.status);
         if (statusAction === 'stop') return;
         if (statusAction === 'retry') { await retrySleep(cfg.deployDelayMs); continue; }
-        const itemAction = handleItemError(outcome.errorMessage, attempt, 'sse_precommit', upstream.status, outcome.errorCode);
+        const itemAction = handleItemError(classification, attempt, 'sse_precommit', upstream.status);
         if (itemAction === 'stop') return;
         if (itemAction === 'retry') { await retrySleep(cfg.deployDelayMs); continue; }
-        if (outcome.permanent) {                // 确认的确定性错误：不重试，直接失败
-          log(outcome.quota
+        if (classification.permanent) {                // 确认的确定性错误：不重试，直接失败
+          log(classification.quota
             ? '  -> quota exhausted, not retrying (switch model or wait for the pool to refill)'
             : '  -> permanent error, not retrying');
-          return sendPermanent(res, lastReason, outcome.quota ? 402 : 400);
+          return sendPermanent(res, lastReason, classification.quota ? 402 : 400);
         }
-        if (outcome.deployment) {               // 通道缺部署：放宽次数、缩短间隔，快速换通道
+        if (classification.deployment) {               // 通道缺部署：放宽次数、缩短间隔，快速换通道
           maxAttempts = Math.max(maxAttempts, cfg.deployMaxAttempts);
           if (attempt < maxAttempts) {
             log('  -> deployment missing on this route, retrying for another route');
@@ -1574,29 +1610,22 @@ async function handle(req, res, state) {
       try { obj = JSON.parse(buf.toString('utf8')); } catch { /* 非 JSON */ }
 
       const info = errorInfoFromJson(obj);
-      // 200 + 错误体里的 item 类错误（推理项失效 / 跨 Azure 资源引用）走同一处理：
-      // 可安全重放时修一次，不可安全重放则明确失败，不落进泛化重试。
+      const classification = classifyError(info);
       if (info) {
-        const statusAction = handleStatusError(info.message, attempt, 'json_error', upstream.status);
+        const statusAction = handleStatusError(classification, attempt, 'json_error', upstream.status);
         if (statusAction === 'stop') return;
         if (statusAction === 'retry') { await retrySleep(cfg.deployDelayMs); continue; }
-        const itemAction = handleItemError(info.message, attempt, 'json_error', upstream.status, info.code);
+        const itemAction = handleItemError(classification, attempt, 'json_error', upstream.status);
         if (itemAction === 'stop') return;
         if (itemAction === 'retry') { await retrySleep(cfg.deployDelayMs); continue; }
       }
-      if (info && isQuotaError(info)) {         // 配额耗尽：不重试，返回 402
-        lastReason = `HTTP 200 but body was an error: ${info.code || ''} ${info.message}`;
+      if (classification.permanent) {
+        lastReason = `HTTP 200 but body was an error: ${info.code || info.type || ''} ${info.message}`;
         log(`attempt ${attempt}: ${lastReason}`);
-        log('  -> quota exhausted, not retrying (switch model or wait for the pool to refill)');
-        return sendPermanent(res, lastReason, 402);
+        log(classification.quota ? '  -> quota exhausted, not retrying' : '  -> permanent error, not retrying');
+        return sendPermanent(res, lastReason, classification.quota ? 402 : 400);
       }
-      if (isDeterministicError(info)) {        // 与 HTTP / 流式一致的确定性错误
-        lastReason = `HTTP 200 but body was an error: ${info.code || ''} ${info.message}`;
-        log(`attempt ${attempt}: ${lastReason}`);
-        log('  -> permanent error, not retrying');
-        return sendPermanent(res, lastReason);
-      }
-      if (info && isDeploymentError(info)) {    // 通道缺部署：放宽次数、缩短间隔
+      if (classification.deployment) {    // 通道缺部署：放宽次数、缩短间隔
         lastReason = `HTTP 200 but body was an error: ${info.code || ''} ${info.message}`;
         log(`attempt ${attempt}: ${lastReason}`);
         maxAttempts = Math.max(maxAttempts, cfg.deployMaxAttempts);
@@ -1607,7 +1636,7 @@ async function handle(req, res, state) {
         }
         return sendRetryable(res, 429, lastReason, attempt, policy);
       }
-      if (info && isRetryableError(info)) {
+      if (classification.retryable) {
         lastReason = `HTTP 200 but body was an error: ${info.code || ''} ${info.message}`;
         log(`attempt ${attempt}: ${lastReason}`);
         if (attempt < maxAttempts) { await retrySleep(backoffMs(attempt, policy)); continue; }
@@ -1654,7 +1683,7 @@ function localControl(req, res, pathname) {
   if (pathname === '/_relay/status' && req.method === 'GET') {
     controlResponse(res, 200, {
       loadedVersion, startedAt, pid: process.pid, supervisorEnabled, restarting, draining, restartError,
-      safeShutdownVersion: 1,
+      safeShutdownVersion: 1, drainWaitVersion: 1,
       policy: { revision: policyRevision, settings: policySettings },
       activeRequests: activeRequests.size,
       config: { statusIntervalMs: cfg.statusIntervalMs, streamIdleMs: cfg.streamIdleMs,
@@ -1665,6 +1694,70 @@ function localControl(req, res, pathname) {
       requestsTruncated: activeRequests.size > 100,
     });
     return;
+  }
+  if (pathname === '/_relay/drain' && req.method === 'POST') {
+    if (req.headers['x-relay-control'] !== '1') return controlResponse(res, 403, { error: 'control_header_required' });
+    if (req.headers['x-relay-pid'] !== String(process.pid)) return controlResponse(res, 409, { error: 'instance_changed' });
+    const operation = req.headers['x-relay-operation'];
+    const action = req.headers['x-relay-action'];
+    if (typeof operation !== 'string' || !/^[a-f0-9]{32}$/.test(operation)) {
+      return controlResponse(res, 400, { error: 'invalid_operation' });
+    }
+    if (!['start', 'refresh', 'cancel', 'commit'].includes(action)) return controlResponse(res, 400, { error: 'invalid_action' });
+    expireDrainWait();
+    if (action === 'start') {
+      const budgetHeader = req.headers['x-relay-timeout-ms'];
+      const leaseHeader = req.headers['x-relay-lease-ms'];
+      const budget = Number(budgetHeader);
+      const leaseMs = Number(leaseHeader);
+      if (!/^[0-9]+$/.test(budgetHeader || '') || !Number.isInteger(budget) || budget < 1 || budget > 600000) {
+        return controlResponse(res, 400, { error: 'invalid_timeout' });
+      }
+      if (!/^[0-9]+$/.test(leaseHeader || '') || !Number.isInteger(leaseMs) || leaseMs < 100 || leaseMs > 10000) {
+        return controlResponse(res, 400, { error: 'invalid_lease' });
+      }
+      if (drainWait) {
+        if (drainWait.operation !== operation || drainWait.committing) return controlResponse(res, 409, { error: 'control_busy' });
+        renewDrainLease(drainWait);
+        return controlResponse(res, 202, { operation, activeRequests: activeRequests.size, draining: true });
+      }
+      if (finishedDrainOperations.has(operation)) return controlResponse(res, 409, { error: 'unknown_operation' });
+      if (draining || restarting) return controlResponse(res, 409, { error: 'control_busy' });
+      const attempt = { operation, leaseMs, deadline: performance.now() + budget, leaseDeadline: 0,
+        budgetTimer: null, leaseTimer: null, committing: false };
+      drainWait = attempt;
+      draining = true;
+      attempt.budgetTimer = setTimeout(() => clearDrainWait(attempt), budget);
+      renewDrainLease(attempt);
+      return controlResponse(res, 202, { operation, activeRequests: activeRequests.size, draining: true });
+    }
+    const attempt = drainWait;
+    if (action === 'cancel' && finishedDrainOperations.get(operation) === 'cancelled') {
+      return controlResponse(res, 200, { operation, cancelled: true });
+    }
+    if (!attempt || attempt.operation !== operation) return controlResponse(res, 409, { error: 'unknown_operation' });
+    if (attempt.committing) return controlResponse(res, 409, { error: 'control_busy' });
+    if (action === 'cancel') {
+      clearDrainWait(attempt);
+      return controlResponse(res, 200, { operation, cancelled: true });
+    }
+    if (action === 'commit') {
+      if (activeRequests.size) return controlResponse(res, 409, { error: 'active_requests', activeRequests: activeRequests.size });
+      attempt.committing = true;
+      attempt.commitRes = res;
+      // 只有完整确认交给 socket 后才真正停机；确认前断连撤销整个等待。
+      res.once('close', () => clearDrainWait(attempt));
+      res.once('finish', () => {
+        expireDrainWait(attempt);
+        if (drainWait !== attempt) return;
+        clearDrainWait(attempt, 'committed');
+        beginDrain(0);
+      });
+      if (res.destroyed || req.socket.destroyed) { clearDrainWait(attempt); return; }
+      return controlResponse(res, 200, { operation, drained: true, pid: process.pid });
+    }
+    renewDrainLease(attempt);
+    return controlResponse(res, 200, { operation, activeRequests: activeRequests.size, draining: true });
   }
   if (pathname === '/_relay/shutdown' && req.method === 'POST') {
     if (req.headers['x-relay-control'] !== '1') return controlResponse(res, 403, { error: 'control_header_required' });
@@ -1708,7 +1801,7 @@ function localControl(req, res, pathname) {
 }
 
 function finishDrain() {
-  if (!draining || closing || activeRequests.size) return;
+  if (!draining || closing || activeRequests.size || drainWait) return;
   if (safeShutdown) {
     const attempt = safeShutdown;
     if (attempt.committing) return;
@@ -1729,6 +1822,7 @@ function finishDrain() {
 }
 
 function beginDrain(code) {
+  clearDrainWait(drainWait, 'shutdown');
   draining = true;
   drainExitCode = code;
   safeDiagnostic({ event: 'gateway_draining', activeRequests: activeRequests.size, restart: code === 75 });
@@ -1739,6 +1833,8 @@ const server = http.createServer((req, res) => {
   let pathname;
   try { pathname = new URL(req.url, 'http://localhost').pathname; }
   catch { controlResponse(res, 400, { error: 'invalid_path' }); return; }
+  // 回调可能晚于真实截止：任何新 HTTP 访问都先校验，不续已到期租约/预算。
+  expireDrainWait();
   if (pathname.startsWith('/_relay/')) return localControl(req, res, pathname);
   if (draining) {
     res.setHeader('retry-after', '2');

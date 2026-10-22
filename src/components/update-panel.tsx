@@ -7,8 +7,9 @@ import {
   AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
 import { downloadProgress, updateControls, type UpdateState, type UpdateView } from '@/lib/update'
+import { ShutdownProgress, type ShutdownProgressProps } from '@/components/shutdown-progress'
 
-export interface UpdatePanelProps {
+export interface UpdatePanelProps extends Pick<ShutdownProgressProps, 'shutdown' | 'onCancelWait'> {
   state: UpdateState
   onCheck: () => Promise<void>
   onConfirm: (candidateId: string) => Promise<void>
@@ -16,19 +17,21 @@ export interface UpdatePanelProps {
 
 const stageText: Partial<Record<UpdateView['phase'], string>> = {
   verifying: '正在校验更新包签名，尚未开始安装。',
-  verified: '签名校验通过，准备优雅排空网关。',
-  quiescing: '正在优雅排空在途请求，超时会取消安装并恢复接单，不强杀。',
+  verified: '签名校验通过，准备暂停接收新请求并等待已有请求完成。',
+  quiescing: '暂停接收新请求，等待已有请求完成；支持取消等待，最长10分钟，超时取消安装，不强制退出。',
   install_pending: '已交给原生安装器，请在安装器中继续；本面板无法确认安装结果。',
 }
 
 /** 受控更新卡只由设置页渲染；候选说明永远作为纯文本。 */
-export function UpdatePanel({ state, onCheck, onConfirm }: UpdatePanelProps) {
+export function UpdatePanel({ state, onCheck, onConfirm, shutdown, onCancelWait }: UpdatePanelProps) {
   const { view, error } = state
   const { busy, canCheck, canConfirm } = updateControls(state)
   const [confirmation, setConfirmation] = useState<UpdateView['release']>(null)
-  const confirmationCurrent = canConfirm && confirmation?.id === view?.release?.id
+  const confirmationCurrent = canConfirm && !shutdown?.progress && confirmation?.id === view?.release?.id
   const download = view?.phase === 'downloading' ? downloadProgress(view.download) : null
   const stage = view ? stageText[view.phase] : null
+  const waiting = view?.phase === 'quiescing' || shutdown?.progress?.kind === 'update'
+  const updateShutdown = shutdown ? { ...shutdown, progress: shutdown.progress?.kind === 'update' ? shutdown.progress : null } : undefined
 
   return (
     <section aria-label="AG Relay 更新" data-testid="update-panel" className="rounded-2xl border border-border bg-card px-5 py-4 text-sm">
@@ -38,17 +41,17 @@ export function UpdatePanel({ state, onCheck, onConfirm }: UpdatePanelProps) {
           <p role="status" className="text-xs leading-5 text-muted-foreground">{view?.detail ?? '正在读取更新状态…'}</p>
         </div>
         <div className="flex flex-wrap gap-2">
-          <Button variant="outline" size="sm" disabled={!canCheck} onClick={() => void onCheck()}>
+          <Button variant="outline" size="sm" disabled={!canCheck || waiting || Boolean(shutdown?.progress)} onClick={() => void onCheck()}>
             <RefreshCw className={view?.phase === 'checking' ? 'animate-spin motion-reduce:animate-none' : ''} aria-hidden="true" />检查更新
           </Button>
-          {canConfirm && <Button size="sm" onClick={() => setConfirmation(view!.release)}>
+          {canConfirm && !waiting && !shutdown?.progress && <Button size="sm" onClick={() => setConfirmation(view!.release)}>
             <Download aria-hidden="true" />{view?.phase === 'deferred' ? '稍后重试更新' : '查看并更新'}
           </Button>}
         </div>
       </div>
-      {(download || stage) && <div className="mt-3 space-y-2" role="status" aria-atomic="true">
+      {waiting ? <div className="mt-3"><ShutdownProgress shutdown={updateShutdown} onCancelWait={onCancelWait} /></div> : (download || stage) && <div className="mt-3 space-y-2" role="status" aria-atomic="true">
         <p className="text-xs leading-5 tabular-nums">{download?.text ?? stage}</p>
-        <Progress value={download?.value ?? null} aria-label={download ? '更新包下载进度' : '更新处理进度'} aria-valuetext={download?.text ?? stage ?? undefined} />
+        {download && <Progress value={download.value} aria-label="更新包下载进度" aria-valuetext={download.text} />}
       </div>}
       {view?.recovery && <p className="mt-2 text-xs leading-5">{view.recovery}</p>}
       {error && <p role="alert" className="mt-2 text-xs leading-5 text-destructive">{error}</p>}
@@ -61,7 +64,7 @@ export function UpdatePanel({ state, onCheck, onConfirm }: UpdatePanelProps) {
           <AlertDialogHeader>
             <AlertDialogTitle>下载并安装 AG Relay v{confirmation?.version}？</AlertDialogTitle>
             <AlertDialogDescription>
-              确认后才下载，完整验签通过后再优雅排空在途请求。排空超时会取消安装并恢复接单，请稍后重试；不会强制结束请求。安装器启动后本窗口会退出，完成后重开将恢复更新前的运行或停止状态。
+              确认后才下载，完整验签通过后暂停接收新请求，等待已有请求完成。等待时可以取消，最长10分钟；超时取消安装，不强制结束请求或退出。安装器启动后本窗口会退出，完成后重开将恢复更新前的运行或停止状态。
             </AlertDialogDescription>
           </AlertDialogHeader>
           <p className="max-h-48 overflow-auto whitespace-pre-wrap break-words text-xs leading-5 text-muted-foreground">{confirmation?.notes || '此版本未提供更新说明。'}</p>

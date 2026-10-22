@@ -6,6 +6,7 @@ import '../src/index.css'
 import App from '../src/App'
 import type { UpdateView } from '../src/lib/update'
 import type { CloseRequest } from '../src/lib/window'
+import type { ShutdownProgress } from '../src/lib/shutdown'
 import type { PolicySettings, PolicySettingsView } from '../src/lib/types'
 import policyDefaults from './fixtures/policy-settings.json'
 
@@ -19,7 +20,7 @@ const scenarios = {
   download0: '下载 0%', download40: '下载 40%', download100: '下载 100%',
   unknown: '未知总量', zero: '总量为零', overflow: '已下载超过总量',
   verifying: '签名校验', quiescing: '优雅排空', install_pending: '原生安装交接',
-  failed: '下载失败', needs_attention: '恢复需处理',
+  failed: '下载失败', deferred: '稍后更新', needs_attention: '恢复需处理',
 } as const
 type Scenario = keyof typeof scenarios
 const candidate = { id: 'fixture-candidate-034', version: '0.3.4', notes: '隔离模拟更新说明，不会下载任何文件。\n<strong>这是纯文本，不执行 HTML。</strong>\n修复更新进度与关闭选择。' }
@@ -38,6 +39,7 @@ function makeView(scenario: Scenario): UpdateView {
     case 'quiescing': return { ...base, phase: 'quiescing', detail: '正在等待在途请求完成（隔离模拟）' }
     case 'install_pending': return { ...base, phase: 'install_pending', detail: '已交给原生安装器（隔离模拟，未启动安装器）' }
     case 'failed': return { ...base, phase: 'failed', detail: '下载失败：隔离模拟的网络异常' }
+    case 'deferred': return { ...base, phase: 'deferred', detail: '已取消更新等待，后端已恢复接单（隔离模拟）' }
     case 'needs_attention': return { ...base, phase: 'needs_attention', detail: '更新恢复需要处理（隔离模拟）', recovery: '网关未自动恢复，请在检查后手动处理。' }
     default: return { ...base }
   }
@@ -45,6 +47,24 @@ function makeView(scenario: Scenario): UpdateView {
 let selected = new URLSearchParams(location.search).get('scenario') as Scenario
 if (!(selected in scenarios)) selected = 'available'
 let update = makeView(selected)
+let shutdown: ShutdownProgress | null = null
+let shutdownId = 0
+let shutdownStarted = 0
+let cancelTimer: ReturnType<typeof setTimeout> | null = null
+const beginWait = (kind: ShutdownProgress['kind']) => {
+  if (cancelTimer) clearTimeout(cancelTimer)
+  cancelTimer = null
+  shutdownStarted = Date.now() - 12_000
+  shutdown = { operationId: ++shutdownId, kind, phase: 'waiting', elapsedMs: 12_000, remainingMs: 588_000, remainingRequests: 3 }
+}
+if (selected === 'quiescing') beginWait('update')
+const selectScenario = (scenario: Scenario) => {
+  selected = scenario
+  update = makeView(scenario)
+  if (scenario === 'quiescing' && shutdown?.kind !== 'exit') beginWait('update')
+  else if (shutdown?.kind === 'update') { shutdown = null; if (cancelTimer) clearTimeout(cancelTimer); cancelTimer = null }
+  repaint()
+}
 let pendingClose: CloseRequest | null = null
 let closeId = 0
 let exitMode = 'failure'
@@ -67,10 +87,20 @@ const finish = async (action: string) => {
   log = `模拟操作 ${action} 已受理；没有执行真实退出或隐藏`
   repaint()
   if (exitMode === 'failure') throw new Error('排空超时，已取消退出并恢复接单（隔离模拟，不强杀）。')
-  if (exitMode === 'hold') await new Promise<void>((resolve, reject) => {
-    finishExit = error => { finishExit = null; repaint(); if (error) reject(new Error(error)); else resolve() }
-    repaint()
-  })
+  if (exitMode === 'hold') {
+    beginWait('exit')
+    await new Promise<void>((resolve, reject) => {
+      finishExit = error => {
+        finishExit = null
+        shutdown = null
+        if (cancelTimer) clearTimeout(cancelTimer)
+        cancelTimer = null
+        repaint()
+        if (error) reject(new Error(error)); else resolve()
+      }
+      repaint()
+    })
+  }
   pendingClose = null
 }
 const connection = { saved: { upstream: 'https://fixture.invalid', port: 18787 }, active: null, restartRequired: false, endpoint: 'http://127.0.0.1:18787' }
@@ -84,6 +114,35 @@ Object.assign(globalThis, { __TAURI__: {
   app: { getVersion: async () => '0.3.3' },
   core: { invoke: async (command: string, args: Record<string, unknown> = {}) => {
     switch (command) {
+      case 'get_shutdown_progress': {
+        if (!shutdown) return null
+        const elapsedMs = Date.now() - shutdownStarted
+        return { ...shutdown, elapsedMs, remainingMs: Math.max(0, 600_000 - elapsedMs) }
+      }
+      case 'cancel_shutdown': {
+        if (!shutdown || args.operationId !== shutdown.operationId) throw new Error('等待操作编号已失效（隔离模拟）')
+        if (shutdown.phase !== 'waiting') throw new Error('当前阶段不能取消（隔离模拟）')
+        const operationId = shutdown.operationId
+        const kind = shutdown.kind
+        shutdown = { ...shutdown, phase: 'cancelling' }
+        log = `取消 ${operationId} 已受理；尚未恢复接单（隔离模拟）`
+        repaint()
+        cancelTimer = setTimeout(() => {
+          cancelTimer = null
+          if (shutdown?.operationId !== operationId) return
+          if (kind === 'update') {
+            shutdown = null
+            selectScenario('deferred')
+          } else {
+            const detail = '已取消退出等待，后端已恢复接单（隔离模拟）'
+            finishExit?.(detail)
+            emit('app-exit-failed', { detail })
+          }
+          log = `操作 ${operationId} 已确认取消完成（隔离模拟）`
+          repaint()
+        }, 2500)
+        return
+      }
       case 'get_update_state': updateReads++; repaint(); return structuredClone(update)
       case 'check_for_update': {
         update = makeView('checking')
@@ -163,7 +222,7 @@ export function Fixture() {
         <label>策略网关 <select id="fixture-policy-gateway" className={controlClass} value={policyGateway} onChange={event => { policyGateway = event.target.value; repaint() }}><option value="stopped">未运行</option><option value="running">支持策略的核心</option><option value="legacy">旧核心未知</option></select></label>
         <label>重启结果 <select id="fixture-policy-restart" className={controlClass} value={policyRestart} onChange={event => { policyRestart = event.target.value; repaint() }}><option value="success">成功</option><option value="timeout">排空超时</option><option value="failure">失败</option></select></label>
         <label><input id="fixture-policy-save-fails" type="checkbox" checked={policySaveFails} onChange={event => { policySaveFails = event.target.checked; repaint() }} />模拟策略保存失败</label>
-        <label>更新场景 <select id="fixture-scenario" className={controlClass} value={selected} onChange={event => { selected = event.target.value as Scenario; update = makeView(selected); repaint() }}>
+        <label>更新场景 <select id="fixture-scenario" className={controlClass} value={selected} onChange={event => selectScenario(event.target.value as Scenario)}>
           {Object.entries(scenarios).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
         </select></label>
         <button id="fixture-close" className={controlClass} onClick={() => closeWindow(true)}>关闭窗口（有托盘）</button>
@@ -171,6 +230,10 @@ export function Fixture() {
         <label>关闭结果 <select id="fixture-exit-mode" className={controlClass} value={exitMode} onChange={event => { exitMode = event.target.value; repaint() }}>
           <option value="failure">失败</option><option value="hold">保持进行中</option><option value="success">模拟完成</option>
         </select></label>
+        <button id="fixture-tray-exit" className={controlClass} disabled={Boolean(shutdown)} onClick={() => { void finish('quit_app_from_tray').catch(error => emit('app-exit-failed', { detail: String(error) })) }}>托盘直接退出</button>
+        <button id="fixture-wait-less" className={controlClass} disabled={!shutdown || shutdown.phase !== 'waiting'} onClick={() => { if (shutdown) shutdown = { ...shutdown, remainingRequests: Math.max(0, (shutdown.remainingRequests ?? 3) - 1) }; repaint() }}>剩余请求减一</button>
+        <button id="fixture-wait-unknown" className={controlClass} disabled={!shutdown} onClick={() => { if (shutdown) shutdown = { ...shutdown, remainingRequests: null }; repaint() }}>请求数量未知</button>
+        <button id="fixture-wait-commit" className={controlClass} disabled={!shutdown || shutdown.phase !== 'waiting'} onClick={() => { if (shutdown) shutdown = { ...shutdown, phase: 'committing', remainingRequests: 0 }; repaint() }}>进入完成阶段</button>
         <button id="fixture-exit-failed" className={controlClass} onClick={() => emit('app-exit-failed', { detail: '托盘退出失败，已唤回窗口（隔离模拟）' })}>托盘退出失败事件</button>
         <button id="fixture-resolve-failure" className={controlClass} disabled={!finishExit} onClick={() => finishExit?.('排空超时，已取消退出（隔离模拟）')}>结束等待为失败</button>
         <button id="fixture-resolve-success" className={controlClass} disabled={!finishExit} onClick={() => finishExit?.()}>结束等待为模拟完成</button>
