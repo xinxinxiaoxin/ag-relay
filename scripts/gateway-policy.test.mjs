@@ -54,9 +54,31 @@ const recoveredHistory = {
 }
 const crossResource = 'The requested item was created under a different Azure OpenAI resource'
 const staleReasoning = 'encrypted content could not be verified'
+const encryptedHistoryError = 'The encrypted content for item rs_00cbda8800eaf361006ad97abe00688196b46d51ab11f628fa could not be verified. Reason: Encrypted content could not be decrypted or parsed. (request id: 2026102203531550247527f9nrqKAP) [trace_id=905d77a03b5a684794bb9e7c2b652611]'
+const toolHistory = {
+  model: 'fixture-model',
+  input: [
+    { type: 'message', role: 'user', content: 'classification fixture prompt' },
+    { type: 'reasoning', id: 'rs_classification', encrypted_content: 'classification fixture ciphertext' },
+    { type: 'function_call', call_id: 'call_classification', name: 'fixture', arguments: '{"value":402}' },
+    { type: 'function_call_output', call_id: 'call_classification', output: 'classification fixture result' },
+  ],
+}
+const recoveredToolHistory = {
+  model: 'fixture-model', input: [toolHistory.input[0], toolHistory.input[2], toolHistory.input[3]],
+}
+
+function classificationError(message, carrier = 'http', code, type = 'invalid_request_error', status = 400) {
+  const body = { error: { message, type, ...(code === undefined ? {} : { code }) } }
+  return {
+    status: carrier === 'http' ? status : 200,
+    type: carrier === 'sse' ? 'text/event-stream' : 'application/json',
+    body: carrier === 'sse' ? `data: ${JSON.stringify(body)}\n\n` : body,
+  }
+}
 
 function historyError(message = missingReasoning) {
-  return { status: 400, body: { error: { type: 'invalid_request_error', message } } }
+  return classificationError(message)
 }
 
 async function listen(server) {
@@ -162,6 +184,215 @@ async function fixture(t, respond, settings = policy(), extraEnv = {}, startupOn
       return { status: response.status, body: await response.text() }
     },
   }
+}
+
+for (const client of ['claude', 'codex']) {
+  test(`错误分类 ${client} 加密历史报错中的请求编号不阻止修复`, async t => {
+    const f = await fixture(t, (_, count) => count === 1 ? historyError(encryptedHistoryError) : success,
+      policy({ stripItemIds: false, rememberSession: false }, { rememberSession: false }))
+    const response = await f.request(toolHistory, { 'x-relay-client': client })
+    assert.equal(response.status, 200, response.body)
+    assert.equal(f.captured.length, 2)
+    assert.deepEqual(f.captured[0].body, toolHistory)
+    assert.deepEqual(f.captured[1].body, recoveredToolHistory, '只移除失效推理，保留消息与完整工具配对')
+  })
+}
+
+for (const carrier of ['http', 'json', 'sse']) {
+  test(`错误分类 ${carrier} 编号与URL噪声不改变历史恢复`, async t => {
+    const noise = '(request id: 502) [trace_id=gateway_balance_unauthorized_content-blocked] https://example.invalid/503/504/payment-required'
+    const f = await fixture(t, (_, count) => count === 1
+      ? classificationError(`${staleReasoning}. ${noise}`, carrier) : success,
+    policy({ stripItemIds: false, rememberSession: false }, { rememberSession: false }))
+    const response = await f.request(toolHistory, { 'x-relay-client': 'claude' })
+    assert.equal(response.status, 200, response.body)
+    assert.equal(f.captured.length, 2)
+    assert.deepEqual(f.captured[1].body, recoveredToolHistory)
+  })
+}
+
+for (const carrier of ['http', 'json', 'sse']) {
+  test(`错误分类 ${carrier} 具体临时错误码原体重试而不删历史`, async t => {
+    const raw = ` \n${JSON.stringify(toolHistory)}\n `
+    const reply = classificationError(`${staleReasoning}. [trace_id=balance_502]`, carrier, 'server_error')
+    const f = await fixture(t, (_, count) => count === 1 ? reply : success,
+      policy({ stripItemIds: false, rememberSession: false }, { rememberSession: false }))
+    const response = await f.request(raw, { 'x-relay-client': 'claude' })
+    assert.equal(response.status, 200, response.body)
+    assert.equal(f.captured.length, 2)
+    assert.ok(f.captured.every(request => request.raw === raw), '具体临时错误必须原体重试，不触发历史修复')
+  })
+}
+
+test('错误分类 HTTP错误信封外的调试字段不把临时故障变成永久错误', async t => {
+  const raw = ` \n${JSON.stringify(toolHistory)}\n `
+  const reply = {
+    status: 503,
+    body: { error: { code: 'server_error', message: 'temporary outage' }, debug: { note: 'balance invalid_request_error unauthorized' } },
+  }
+  const f = await fixture(t, (_, count) => count === 1 ? reply : success)
+  const response = await f.request(raw, { 'x-relay-client': 'claude' })
+  assert.equal(response.status, 200, response.body)
+  assert.equal(f.captured.length, 2)
+  assert.ok(f.captured.every(request => request.raw === raw))
+})
+
+for (const [name, message, code] of [
+  ['裸gateway', `${staleReasoning}. The gateway rejected this history`, undefined],
+  ['裸balance', `${staleReasoning}. Preserve the balance of this history`, undefined],
+  ['单词子串', `${staleReasoning}. flaggedness unauthorizedness`, undefined],
+  ['伪错误码', staleReasoning, 'prefix_invalid_api_key_suffix'],
+  ['非字符串字段', staleReasoning, { nested: 'invalid_api_key' }],
+]) {
+  test(`错误分类 ${name} 不是明确故障原因，仍允许历史修复`, async t => {
+    const reply = classificationError(message, 'json', code)
+    const f = await fixture(t, (_, count) => count === 1 ? reply : success)
+    const response = await f.request(toolHistory, { 'x-relay-client': 'claude' })
+    assert.equal(response.status, 200, response.body)
+    assert.equal(f.captured.length, 2)
+    assert.deepEqual(f.captured[1].body, recoveredToolHistory)
+  })
+}
+
+for (const carrier of ['http', 'json', 'sse']) {
+  test(`错误分类 ${carrier} 明确永久原因优先于部署和历史文案`, async t => {
+    const reply = classificationError(`Insufficient balance; no deployment to match this model; ${staleReasoning}`, carrier, 'insufficient_quota')
+    const f = await fixture(t, () => reply)
+    const response = await f.request(toolHistory, { 'x-relay-client': 'claude' })
+    assert.equal(response.status, carrier === 'http' ? 400 : 402, response.body)
+    assert.equal(f.captured.length, 1)
+    assert.deepEqual(f.captured[0].body, toolHistory)
+  })
+}
+
+for (const status of [401, 402, 403]) {
+  test(`错误分类 真实HTTP ${status} 不被暂时错误码或字段修复文案覆盖`, async t => {
+    const body = { input: [{ type: 'message', role: 'user', content: 'fixture', status: 'completed' }] }
+    const reply = classificationError("Unknown parameter: 'input[0].status'.", 'http', 'server_error', undefined, status)
+    const f = await fixture(t, () => reply)
+    const response = await f.request(body)
+    assert.equal(response.status, status, response.body)
+    assert.equal(f.captured.length, 1)
+    assert.deepEqual(f.captured[0].body, body)
+  })
+}
+
+test('错误分类 仅第一句加密条目校验失败也可识别，条目编号不参与判断', async t => {
+  const message = 'The encrypted content for item rs_gateway_balance_502 could not be verified. [trace_id=503]'
+  const f = await fixture(t, (_, count) => count === 1 ? historyError(message) : success)
+  const response = await f.request(toolHistory, { 'x-relay-client': 'claude' })
+  assert.equal(response.status, 200, response.body)
+  assert.equal(f.captured.length, 2)
+  assert.deepEqual(f.captured[1].body, recoveredToolHistory)
+})
+
+test('错误分类 明确上下文超限文案不能被部署缺失覆盖', async t => {
+  const reply = classificationError('maximum context length exceeded; no deployment to match this model', 'json')
+  const f = await fixture(t, () => reply)
+  const response = await f.request(toolHistory)
+  assert.equal(response.status, 400, response.body)
+  assert.equal(f.captured.length, 1)
+})
+
+for (const carrier of ['http', 'json', 'sse']) {
+  test(`错误分类 ${carrier} 旧配置的鉴权错误与明确历史错误分别处理`, async t => {
+    const replies = [classificationError(staleReasoning, carrier, 'invalid_api_key'), classificationError(staleReasoning, carrier), success]
+    const f = await fixture(t, (_, count) => replies[count - 1], legacyPolicy)
+    const failed = await f.request(toolHistory, { 'x-relay-client': 'claude' })
+    assert.equal(failed.status, 400, failed.body)
+    assert.equal(f.captured.length, 1)
+    assert.deepEqual(f.captured[0].body, toolHistory)
+    assert.equal((await f.request(toolHistory, { 'x-relay-client': 'claude' })).status, 200)
+    assert.equal(f.captured.length, 3)
+    assert.deepEqual(f.captured[2].body, recoveredToolHistory)
+  })
+}
+
+test('错误分类 401/402/403/408/429/502/503/504仅在编号中出现不改变恢复', async t => {
+  const tokens = ['401', '402', '403', '408', '429', '502', '503', '504']
+  const f = await fixture(t, (_, count) => count % 2
+    ? historyError(`${staleReasoning}. (request id: ${tokens[(count - 1) / 2]})`) : success,
+  policy({ rememberSession: false }, { rememberSession: false }))
+  for (const token of tokens) {
+    assert.equal((await f.request(toolHistory, { 'x-relay-client': 'claude' })).status, 200, token)
+  }
+  assert.equal(f.captured.length, 16)
+  assert.ok(f.captured.filter((_, index) => index % 2).every(request => JSON.stringify(request.body) === JSON.stringify(recoveredToolHistory)))
+})
+
+for (const [name, reply] of [
+  ['无错误信封的400', { status: 400, body: { detail: 'no deployment invalid_request_error balance 502', output: { code: 'invalid_api_key' } } }],
+  ['字段类型错误的400', { status: 400, body: { error: { code: ['invalid_api_key'], type: { name: 'server_error' }, message: { text: 'no deployment' } } } }],
+  ['成功JSON', { status: 200, body: { output: [{ type: 'message', content: 'invalid_api_key balance 402 502 no deployment' }] } }],
+  ['成功纯文本', { status: 200, type: 'text/plain', body: 'invalid_api_key balance 402 502 no deployment' }],
+  ['成功SSE', { status: 200, type: 'text/event-stream', body: 'data: {"type":"response.output_text.delta","delta":"invalid_api_key balance 402 502 no deployment"}\n\ndata: {"type":"response.completed"}\n\n' }],
+]) {
+  test(`错误分类 ${name} 无关字段与正文逐字节保留`, async t => {
+    const f = await fixture(t, () => reply)
+    const response = await f.request(toolHistory)
+    assert.equal(response.status, reply.status, response.body)
+    assert.equal(response.body, typeof reply.body === 'string' ? reply.body : JSON.stringify(reply.body))
+    assert.equal(f.captured.length, 1)
+  })
+}
+
+test('错误分类 明确状态表达是暂时原因而不是编号', async t => {
+  const reply = classificationError(`${staleReasoning}. HTTP status: 502`, 'http')
+  const f = await fixture(t, (_, count) => count === 1 ? reply : success)
+  const response = await f.request(toolHistory, { 'x-relay-client': 'claude' })
+  assert.equal(response.status, 200, response.body)
+  assert.equal(f.captured.length, 2)
+  assert.ok(f.captured.every(request => JSON.stringify(request.body) === JSON.stringify(toolHistory)))
+})
+
+test('错误分类 字段修复保留参数下标并忽略trace编号', async t => {
+  const body = { input: [{ type: 'message', role: 'user', content: 'fixture', status: 'completed' }] }
+  const reply = historyError("Unknown parameter: 'input[0].status'. [trace_id=balance_502]")
+  const f = await fixture(t, (_, count) => count === 1 ? reply : success)
+  const response = await f.request(body)
+  assert.equal(response.status, 200, response.body)
+  assert.equal(f.captured.length, 2)
+  assert.deepEqual(f.captured[1].body, { input: [{ type: 'message', role: 'user', content: 'fixture' }] })
+})
+
+for (const carrier of ['http', 'json', 'sse']) {
+  test(`错误分类 ${carrier} 部署不存在仍换通道且不改历史`, async t => {
+    const reply = classificationError('The requested deployment does not exist; no deployment to match this model.', carrier)
+    const f = await fixture(t, (_, count) => count === 1 ? reply : success)
+    const response = await f.request(toolHistory, { 'x-relay-client': 'claude' })
+    assert.equal(response.status, 200, response.body)
+    assert.equal(f.captured.length, 2)
+    assert.ok(f.captured.every(request => JSON.stringify(request.body) === JSON.stringify(toolHistory)))
+  })
+}
+
+for (const code of ['content-filter', 'flagged', 'moderation']) {
+  test(`错误分类 仅${code}错误码的审核失败仍及时返回`, async t => {
+    const reply = classificationError('provider error', 'sse', code)
+    const f = await fixture(t, () => reply)
+    const response = await f.request(toolHistory)
+    assert.equal(response.status, 400, response.body)
+    assert.equal(f.captured.length, 1)
+  })
+}
+
+test('错误分类 Claude跨资源原因不被附带Codex缺推理句式阻断', async t => {
+  const reply = historyError(`${crossResource}. ${missingReasoning}`)
+  const f = await fixture(t, (_, count) => count === 1 ? reply : success)
+  const response = await f.request(toolHistory, { 'x-relay-client': 'claude' })
+  assert.equal(response.status, 200, response.body)
+  assert.equal(f.captured.length, 2)
+  assert.deepEqual(f.captured[1].body, recoveredToolHistory)
+})
+
+for (const carrier of ['http', 'json', 'sse']) {
+  test(`错误分类 ${carrier} 具体code优先于备用type`, async t => {
+    const reply = classificationError('provider error', carrier, 'server_error', 'authentication_error')
+    const f = await fixture(t, (_, count) => count === 1 ? reply : success)
+    const response = await f.request(toolHistory)
+    assert.equal(response.status, 200, response.body)
+    assert.equal(f.captured.length, 2)
+  })
 }
 
 test('policy 两组重试参数独立：Codex 两次、general 四次并回报实际设置', async t => {

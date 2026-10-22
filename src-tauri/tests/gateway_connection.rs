@@ -2090,6 +2090,52 @@ fn 重试边界_临时错误与部署缺失仍可恢复_未知流错误保留原
 }
 
 #[test]
+fn 重试边界_错误编号与无关字段不改变暂时错误分类() {
+    for (name, status, ct, body) in [
+        ("http-id", 400, "application/json", r#"{"error":{"code":"server_error","message":"provider error [trace_id=balance_502_unauthorized]"},"debug":"invalid_api_key insufficient_quota"}"#.to_string()),
+        ("json-id", 200, "application/json", r#"{"error":{"code":"server_error","message":"provider error [trace_id=balance_502_unauthorized]"},"debug":"invalid_api_key insufficient_quota"}"#.to_string()),
+        ("sse-id", 200, "text/event-stream", "data: {\"error\":{\"code\":\"server_error\",\"message\":\"provider error [trace_id=balance_502_unauthorized]\"},\"debug\":\"invalid_api_key insufficient_quota\"}\n\n".to_string()),
+        ("http-unrelated", 503, "application/json", r#"{"error":{"type":"invalid_request_error","message":"provider error"},"debug":"invalid_api_key insufficient_quota"}"#.to_string()),
+    ] {
+        let upstream = RetryUpstream::new(vec![
+            upstream_reply(status, ct, &body),
+            upstream_reply(200, "application/json", r#"{"ok":true}"#),
+        ]);
+        let port = free_port();
+        let mut fixture = Fixture::new(&format!("classify-{name}"), &upstream.url, port);
+        fixture.gateway.start().unwrap();
+        let response = request(port, "/v1/chat/completions");
+        assert_eq!(upstream.attempts(), 2, "{name} 应按真正错误恢复");
+        assert!(response.contains(r#"{"ok":true}"#), "{name}: {response}");
+        let bodies = upstream.bodies();
+        assert_eq!(bodies[0], bodies[1], "编号与调试字段不能触发改写");
+    }
+}
+
+#[test]
+fn 重试边界_加密历史错误的请求编号不能阻止恢复() {
+    let error = r#"{"error":{"type":"invalid_request_error","message":"The encrypted content for item rs_gateway_balance_502 could not be verified. Reason: Encrypted content could not be decrypted or parsed. (request id: 2026102203531550247527f9nrqKAP) [trace_id=503]"}}"#;
+    let upstream = RetryUpstream::new(vec![
+        upstream_reply(400, "application/json", error),
+        upstream_reply(200, "application/json", r#"{"ok":true}"#),
+    ]);
+    let port = free_port();
+    let mut fixture = Fixture::new("classify-encrypted-history", &upstream.url, port);
+    fixture.gateway.start().unwrap();
+    let body = r#"{"input":[{"type":"message","role":"user","content":"fixture prompt"},{"type":"reasoning","id":"rs_fixture","encrypted_content":"fixture ciphertext"}]}"#;
+    let response = responses_request(port, body, "claude");
+    assert!(response.contains(r#"{"ok":true}"#), "{response}");
+    assert_eq!(upstream.attempts(), 2);
+    let bodies = upstream.bodies();
+    assert_eq!(bodies[0], body.as_bytes());
+    let repaired: serde_json::Value = serde_json::from_slice(&bodies[1]).unwrap();
+    assert_eq!(repaired, serde_json::json!({"input":[{"type":"message","role":"user","content":"fixture prompt"}]}));
+    let diagnostics = std::fs::read_to_string(fixture.dir.join("logs/diagnostics.jsonl")).unwrap();
+    assert!(!diagnostics.contains("rs_gateway_balance_502"));
+    assert!(!diagnostics.contains("fixture ciphertext"));
+}
+
+#[test]
 fn 重试边界_内容下发后不重新生成_成功流不改写内容() {
     for (name, ending) in [
         ("complete", "data: [DONE]\n\n"),

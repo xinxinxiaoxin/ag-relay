@@ -232,9 +232,9 @@ for (const carrier of ['http', 'json', 'sse']) {
     test(`Codex ${carrier}/${code} 不被缺推理文案误判`, async t => {
       const f = await fixture(t, (body, count) => count === 1 ? historyError(missingReasoning, carrier, code) : validateSearch(body))
       const response = await f.request()
-      // 普通 HTTP 400 沿用原信封透传；200 内嵌错误才按既有 code 规则归类。
-      assert.equal(response.status, carrier === 'http' ? 400 : status, response.body)
-      assert.equal(f.captured.length, carrier === 'http' ? 1 : sends)
+      // 三种载体按同一具体原因恢复；HTTP 永久错误仍保留上游原状态/信封。
+      assert.equal(response.status, carrier === 'http' && sends === 1 ? 400 : status, response.body)
+      assert.equal(f.captured.length, sends)
       assert.ok(f.captured.every(({ body }) => JSON.stringify(body) === JSON.stringify(expectedHistory)))
       assert.ok(!f.rows().some(row => ['item_error', 'repair_applied', 'session_compat_enabled', 'codex_resource_retry'].includes(row.event)))
     })
@@ -295,6 +295,16 @@ test('成功正文引用同一错误不会触发恢复', async t => {
   assert.deepEqual(JSON.parse(response.body), responseBody)
   assert.equal(f.captured.length, 1)
   assert.ok(!f.rows().some(row => row.event === 'item_error'))
+})
+
+test('错误分类 SSE诊断指纹不把trace编号当作故障原因', async t => {
+  const f = await fixture(t, (_, count) => count === 1
+    ? historyError('encrypted content could not be verified. [trace_id=balance_unavailable_deployment_502]', 'sse') : success)
+  assert.equal((await f.request()).status, 200)
+  const failure = f.rows().find(row => row.event === 'precommit_failure')
+  assert.ok(failure)
+  assert.equal(failure.hints, 'encrypted', '诊断应与真实原因一致，而不是提取编号里的关键词')
+  assert.equal(failure.retryable, false)
 })
 
 test('已交付 SSE 内容后出现缺推理错误不重放', async t => {
