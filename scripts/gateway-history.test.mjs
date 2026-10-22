@@ -412,6 +412,31 @@ for (const temporary of [false, true]) {
   })
 }
 
+// 生产回归：会话记忆的预清理覆盖了整个 Codex 会话，若仍按「修复版」限制三次发送，
+// 纯限流也只能试 3 次（实测一天 83 次失败，配置的 110 次形同虚设）。
+test('Codex 会话记忆预清理不占用三次发送上限，纯限流按通用预算重试', async t => {
+  const rateLimited = { status: 200, type: 'text/event-stream',
+    body: `data: ${JSON.stringify({ error: { code: 'rate_limit_exceeded', message: 'fixture rate limit' } })}\n\n` }
+  const seed = { ...history, input: history.input.filter(item => item.type !== 'web_search_call') }
+  // 计数：1 历史错误、2 修复后成功（登记会话）、3 该会话第 2 次请求成功；
+  // 第 3 次请求从 4 起连续 4 次限流，第 8 次才成功。
+  const f = await fixture(t, (body, count) => {
+    if (count === 1) return { status: 400, body: { error: { type: 'invalid_request_error', message: 'encrypted content could not be verified' } } }
+    if (count <= 3) return success
+    return count <= 7 ? rateLimited : success
+  })
+  const headers = { 'x-relay-session-id': 'fixture-rate-session' }
+  assert.equal((await f.request(seed, headers)).status, 200)
+  assert.equal((await f.request(history, headers)).status, 200)
+  const response = await f.request(history, headers)
+  assert.equal(response.status, 200, '预清理后的请求不应被三次上限截断')
+  assert.equal(f.captured.length, 8, '第 3 次请求应实际发送 5 次（首发 + 4 次限流重试）')
+  assert.ok(f.rows().some(row => row.event === 'session_compat_applied' && row.removedReasoning === 1),
+    '该请求确实做过会话语义预清理')
+  assert.ok(!f.rows().some(row => row.event === 'codex_resource_exhausted'),
+    '没有历史错误证据时不得按资源上限收手')
+})
+
 for (const change of ['session', 'model', 'credentials']) {
   test(`Codex 兼容模式不污染新的 ${change}`, async t => {
     const f = await fixture(t, (_, count) => count === 1 ? historyError(missingReasoning) : success)

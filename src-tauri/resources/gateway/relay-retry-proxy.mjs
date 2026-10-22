@@ -254,8 +254,11 @@ function isPermanentError(info) {
     || PERMANENT_TEXT.test(errorCauseText(info.message)));
 }
 
-// 「找不到部署 / 上游没有该模型部署」——通道抖动，重试换通道即可，值得多试几次
-const DEPLOYMENT_TEXT = /\b(?:no deployment|deployment to match)\b/i;
+// 「找不到部署 / 上游没有该模型部署」——通道抖动，重试换通道即可，值得多试几次。
+// 中文站点常把同一件事说成「无可用渠道 / 无可用模型」：模型名在该分组下没有通道，
+// 属于通道问题而非限流。以前只认英文，中文文案会落进通用 503 重试，白白跑满
+// 110 次、约 200 秒才放弃（实测 Codex 后台辅助请求整晚如此），现按通道抖动快速收手。
+const DEPLOYMENT_TEXT = /\b(?:no deployment|deployment to match)\b|无可用渠道|无可用模型|无可用线路|模型不存在/i;
 function isDeploymentError(info) {
   return !!info && DEPLOYMENT_TEXT.test(errorCauseText(info.message));
 }
@@ -1198,6 +1201,11 @@ async function handle(req, res, state) {
   const codexResourceRetry = isResponses && clientClass(headers) === 'codex'
     && (hasPolicySettings ? policySettings.profiles.codex.retryHistory : cfg.codexResourceRetry);
   let historyRepairChecked = false;
+  // 「修复版最多再发三次」只约束本次确实按历史错误做过有损降级的请求。
+  // 会话记忆的预清理（首发前就剥离）不构成历史错误证据：实测它覆盖了 Codex 的
+  // 全部请求，再叠上这条上限，纯限流也只能试 3 次就放弃（生产一天 83 次，配置的
+  // 110 次形同虚设）。没报过历史错误的请求按通用预算重试。
+  let historyRepairApplied = false;
   let postRepairSends = 0;
   let frozenHistoryKind = null;
   diagnose('received', isResponses ? { shape: summarizeResponsesBody(body) } : {});
@@ -1258,7 +1266,7 @@ async function handle(req, res, state) {
   const deadline = Date.now() + policy.totalBudgetMs;
   const outOfBudget = () => Date.now() >= deadline;
   // A capped attempt must not spend another backoff interval before discovering the cap.
-  const retrySleep = (ms) => eligibleCodex && repairedItems && postRepairSends >= 3
+  const retrySleep = (ms) => eligibleCodex && historyRepairApplied && postRepairSends >= 3
     ? Promise.resolve() : sleep(ms, ac.signal);
   // 大请求（长对话）要等更久才等到首个响应头
   const attemptTimeoutMs = connectTimeoutFor(body.length, policy.totalBudgetMs);
@@ -1362,7 +1370,7 @@ async function handle(req, res, state) {
     }
     activeBody = repaired.body;
     repairedItems = true;
-    if (eligibleCodex) frozenHistoryKind = kind;
+    if (eligibleCodex) { frozenHistoryKind = kind; historyRepairApplied = true; }
     repairCount++;
     diagnose('repair_applied', { kind, source, status, removedIds: repaired.removedIds, removedReasoning: repaired.removedReasoning });
     maxAttempts = Math.max(maxAttempts, attempt + (eligibleCodex ? 3 : 1));
@@ -1437,7 +1445,7 @@ async function handle(req, res, state) {
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     if (ac.signal.aborted || res.destroyed) return;
-    if (eligibleCodex && repairedItems && postRepairSends >= 3) {
+    if (eligibleCodex && historyRepairApplied && postRepairSends >= 3) {
       diagnose('codex_resource_exhausted', { kind: frozenHistoryKind, resourceFailures,
         refusal: 'resource_attempt_limit' });
       return sendRetryable(res, 503, lastReason, attemptCount, policy);
@@ -1475,7 +1483,7 @@ async function handle(req, res, state) {
         // `connection: close`。代价是每条请求多一次握手（相对 20–40 秒的请求可忽略）。
         // `connection` 是逐跳头，站点看到的其它请求头与指纹没有任何变化。
         // Count actual fetch calls, even when no HTTP response arrives (network failure).
-        if (eligibleCodex && repairedItems) postRepairSends++;
+        if (eligibleCodex && historyRepairApplied) postRepairSends++;
         upstream = await fetch(target, {
           method: req.method,
           headers: { ...headers, connection: 'close' },

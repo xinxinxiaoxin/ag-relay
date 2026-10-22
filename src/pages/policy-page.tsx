@@ -77,7 +77,7 @@ export function PolicyPage({ editor, snapshot, onAction }: {
     <dl className="mt-2 grid gap-1.5 text-xs leading-5 text-muted-foreground">
       <div><dt className="inline font-medium text-foreground">触发与范围：</dt><dd className="inline">{module.trigger}</dd></div>
       <div><dt className="inline font-medium text-foreground">保留：</dt><dd className="inline">{module.preserves}</dd></div>
-      {module.id === 'historyMode' && <div><dt className="inline font-medium text-foreground">本组规则：</dt><dd className="inline">{group === 'codex' ? '搜索关联的历史必须成组处理，并保留可验证的搜索载荷。每个请求最多一次成组改写，历史错误累计第 5 次停止，改写后实际发送最多 3 次。' : '只使用通用 Responses 规则，不套用 Codex 专属的搜索处理。'}</dd></div>}
+      {module.id === 'historyMode' && <div><dt className="inline font-medium text-foreground">本组规则：</dt><dd className="inline">{group === 'codex' ? '搜索关联的历史必须成组处理，并保留可验证的搜索载荷。每个请求最多一次成组改写，历史错误累计第 5 次停止；报错后改写的请求最多再发 3 次，仅做会话预清理而没有历史错误的请求按本组常规次数重试。' : '只使用通用 Responses 规则，不套用 Codex 专属的搜索处理。'}</dd></div>}
       <div><dt className="inline font-medium text-foreground">桌面默认：</dt><dd className="inline">{view ? moduleTiming(module, view.defaults.profiles[group]) : '等待读取'}</dd></div>
     </dl>
   </details>
@@ -135,7 +135,7 @@ export function PolicyPage({ editor, snapshot, onAction }: {
               <CardHeader><CardTitle><h2>历史错误怎么恢复</h2></CardTitle><CardDescription>仅累计明确的历史兼容错误：当前请求同类累计，不要求连续；不混入限流、空回应或网络错误。等待确认也会消耗尝试预算。</CardDescription></CardHeader>
               <CardContent className="grid gap-3 sm:grid-cols-[minmax(0,16rem)_1fr] sm:items-center">
                 {field('historyConfirmations', '执行历史降级前，明确错误达到（次）')}
-                <p className={hintClass}>{group === 'codex' ? '可选 1–4 次。历史错误累计第 5 次停止；每请求只改写一次，改写后实际发送最多 3 次。' : '可选 1–1000 次，不能超过本组常规尝试次数。'}{profile.historyMode === 'off' ? ' 历史模块已关闭，此门槛暂不触发历史降级。' : profile.historyMode === 'always' ? ' 提前模式会先尝试安全处理，不等待此门槛。' : ''}</p>
+                <p className={hintClass}>{group === 'codex' ? '可选 1–4 次。历史错误累计第 5 次停止；每请求只改写一次，报错后改写的请求最多再发 3 次，仅做会话预清理的请求按本组常规次数重试。' : '可选 1–1000 次，不能超过本组常规尝试次数。'}{profile.historyMode === 'off' ? ' 历史模块已关闭，此门槛暂不触发历史降级。' : profile.historyMode === 'always' ? ' 提前模式会先尝试安全处理，不等待此门槛。' : ''}</p>
               </CardContent>
             </Card>
 
