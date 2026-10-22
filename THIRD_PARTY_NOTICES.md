@@ -61,7 +61,7 @@ Lightning CSS 的 npm 原生包用于 Tailwind/Vite 构建，本项目只分发�
 
 ## 核验方法、范围与更新
 
-本材料来自 **2026-10-12** 的锁定依赖快照，不是根据常见许可名称猜测：
+本材料最初依据 **2026-10-12** 的锁定依赖取证建立，后续核验随依赖与发行输入更新；最近核验日期以 [`licenses/inventory.json`](licenses/inventory.json) 的 `verifiedAt` 为准，索引的快照日期不等于每次输入复核日期。取证方法如下，不根据常见许可名称猜测：
 
 1. 使用 `npm ci --ignore-scripts` 安装 `package-lock.json` 的 Windows x64 可用包，对照实际 `package.json` 的版本/许可并复制包内许可原文（包括嵌套 NOTICE）。源码中导入的 shadcn 组件和 CSS 也计算在内。其他平台未安装的可选构建工具二进制单独列于 `excludedNpmPlatformPackages`，不是静默遗漏。
 2. 使用 `cargo metadata --locked --filter-platform x86_64-pc-windows-msvc --format-version 1 --manifest-path src-tauri/Cargo.toml` 的已解析节点，读取实际 Cargo 元数据和 crate 原文。普通依赖与构建/过程宏依赖标注范围；保守包含完整解析树，不声称这是经链接器裁剪后的精确二进制 SBOM。
@@ -75,4 +75,4 @@ Lightning CSS 的 npm 原生包用于 Tailwind/Vite 构建，本项目只分发�
 
 升级依赖、改变目标平台、替换 Node、更新 Rust 工具链或新增发行包中嵌入的工具/二进制后，应重新执行上述核验、补齐原文和适用源码、更新 `inventory.json` / `COMPONENTS.md` 并重跑检查，不能只改指纹让旧清单通过。完整性校验不是版权权属审核或法律结论，也不能替代对安装包实际资源的检查。
 
-本材料不包含用户系统预装的 Windows / WebView2 Runtime / 系统字体本体，也不授予它们新的许可。若发行方式增加离线 WebView2 Runtime、安装器附加二进制或其他资源，应按实际版本补相应许可后再发布。正式公开/Release 及历史资产的核查由独立发布流程完成。本材料描述的是许可与来源现状，不重复声明仓库可见性或发布状态（2026-10-13 起 `ag-relay` 已公开并发布 `v0.3.0`/`v0.3.1`，`relay-retry-proxy` 仍私有）。
+本材料不包含用户系统预装的 Windows / WebView2 Runtime / 系统字体本体，也不授予它们新的许可。若发行方式增加离线 WebView2 Runtime、安装器附加二进制或其他资源，应按实际版本补相应许可后再发布。正式公开／Release 及历史资产的核查由 [独立发布流程](docs/release-runbook.md)完成；本材料只说明许可与来源，当前发布状态见 [Releases](https://github.com/xinxinxiaoxin/ag-relay/releases)，不在这里维护另一份版本列表。
