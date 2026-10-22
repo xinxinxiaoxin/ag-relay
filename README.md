@@ -172,7 +172,28 @@ node scripts/release.mjs test-build --out C:\Temp\ag-relay-test-artifacts
 
 注：网关核心的四个 `.mjs` 与 `gateway-config.bat` 已由 `.gitattributes` 固定为不做换行符转换（`-text`），因此任何机器上检出内容与仓库内容一致、哈希唯一。此前 `.bat` 未固定：仓库内容为 LF、Windows 检出为 CRLF，两者哈希不同。下表 v0.2.0/v0.3.1 条目记录的是当时**磁盘检出**（CRLF）的值 `102865c8…`，属历史留档不回填；v0.3.2 及以后记录的是**仓库内容**（LF）的值 `9a8a483e…`。
 
-### v0.3.11（当前）
+### v0.3.12（当前）
+
+| 项 | 值 |
+| --- | --- |
+| 打包日期 | 2026-10-22 15:17（UTC+8） |
+| 发布日期 | 2026-10-22 15:26（UTC+8） |
+| 本仓构建提交 | `550ae4ddc0f0e7a9f41a8a607197ce85aac3eafd`（tag `v0.3.12`，在干净工作区构建） |
+| 构建方式 | 维护者本机，原生产更新签名；不运行安装器 |
+| 验证 | 本轮 Node 196 项（含 5 项旧核心差分）、Rust 网关连接 43 项与诊断字典 17 项、发布工具 44 项通过；正式预检、两种安装器更新签名、版本绑定、随包许可与本机路径隐私检查通过；7 个上传文件摘要与本地一致；匿名 latest 清单返回 0.3.12 且与本地逐字节一致；未执行本机安装/升级 |
+| `relay-retry-proxy.mjs` sha256 | `82e25245ef795b7628db948972360c0e3497fc95905e51880f40c5217267d846` |
+| `relay-supervisor.mjs` sha256 | `f2f030b46999f84afc77f7f92643075c1d1f1ddf7ad3c327fbd92f5593dff77c` |
+| `relay-start-check.mjs` sha256 | `bb54cc7255b4f570ba1bdcfda255f19f0ca0a70fa6d028d0ed4e44f8146037c4` |
+| `bounded-file-log.mjs` sha256 | `3841b877ce76e6ff37497bfbcd65e3dd4f478442dc7fff9eaf4b39612b25c205` |
+| `gateway-config.bat` sha256 | `3a70fbf73d5d0a000b745c2e7692e40617fc7346c7f2fa88021a335072b261ee` |
+| `ag-relay_0.3.12_x64-setup.exe` sha256 | `a0dbb62f8be2cba69d8525e5871cf996a5794383c50b94b5b560ace1dd49a23c` |
+| `ag-relay_0.3.12_x64_zh-CN.msi` sha256 | `7e0e9188b315f36970e59d49c953817b975dd799cf597abed112f235bbcd1d44` |
+| `third-party-sources.tar.gz` sha256 | `e8e46d33ecdca0df302928ee840f7233c0234ee43811b2484d188357fdca5386` |
+| Release | [v0.3.12](https://github.com/xinxinxiaoxin/ag-relay/releases/tag/v0.3.12)（NSIS + MSI + 各自 `.sig` + `latest.json` + `SHA256SUMS` + 第三方源码附件） |
+
+长请求不再被固定 10 秒退出等待打断，等待期间可查看进度或取消并恢复接单；同时统一错误分类，请求编号、trace、条目编号、链接与无关 JSON 字段不再被当作故障原因，加密历史错误不会再因编号里的 `502` 等数字被跳过修复后直接透传。安全边界不变：不强制中断在途请求，历史修复仍有损且不承诺所有上游错误可恢复。说明见 [v0.3.12](docs/releases/v0.3.12.md)，构建与发布详情见 [构建记录](docs/releases/v0.3.12-build.md)。
+
+### v0.3.11（历史）
 
 | 项 | 值 |
 | --- | --- |
