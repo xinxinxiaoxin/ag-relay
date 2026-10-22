@@ -3,6 +3,7 @@ use tauri::Manager;
 pub mod app_exit;
 mod exit_requests;
 pub mod app_update;
+pub mod shutdown_wait;
 mod update_commands;
 mod update_journal;
 pub mod atomic_write;
@@ -71,6 +72,8 @@ pub fn run() {
             update_commands::get_update_state,
             update_commands::check_for_update,
             update_commands::confirm_update,
+            update_commands::get_shutdown_progress,
+            update_commands::cancel_shutdown,
             gateway_commands::get_connection_settings,
             gateway_commands::save_connection_settings,
             gateway_commands::get_policy_settings,

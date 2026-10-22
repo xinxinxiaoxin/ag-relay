@@ -258,6 +258,247 @@ mod safe_exit {
     }
 
     #[test]
+    fn 可取消等待_长请求超过十秒仍完整完成才退出且等待时拒绝新请求() {
+        use ag_relay_lib::shutdown_wait::{ShutdownKind, ShutdownWaits};
+        const BODY: &str = r#"{"ok":true,"request":"long-held","complete":true}"#;
+        let (seen_tx, seen_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let mut upstream = ExitHttpServer::new(move |stream, headers, stop| {
+            assert!(headers.starts_with("GET /long-hold HTTP/"));
+            let _ = seen_tx.send(());
+            let deadline = Instant::now() + Duration::from_secs(25);
+            loop {
+                if stop.load(Ordering::SeqCst) { return Ok(()); }
+                if Instant::now() >= deadline {
+                    return Err(io::Error::new(io::ErrorKind::TimedOut, "长请求未被测试释放"));
+                }
+                match release_rx.recv_timeout(Duration::from_millis(10)) {
+                    Ok(()) => break,
+                    Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
+                }
+            }
+            stream.write_all(upstream_reply(200, "application/json", BODY).as_bytes())
+        });
+        let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = reservation.local_addr().unwrap().port();
+        let fixture = ExitFixture::new(
+            "wait-long-success", &format!("http://127.0.0.1:{}", upstream.port()), port,
+        );
+        drop(reservation);
+        fixture.host.with_gateway(|gateway| gateway.start()).unwrap().unwrap();
+        let client = exit_request(port, "/long-hold");
+        client.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+        seen_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let waits = ShutdownWaits::default();
+        let wait = waits.begin(ShutdownKind::Exit).unwrap();
+        let started = Instant::now();
+        thread::scope(|scope| {
+            let release = scope.spawn(|| {
+                wait_retry_status(port, |status| status["draining"] == true);
+                let deadline = Instant::now() + Duration::from_secs(3);
+                while waits.progress().unwrap().remaining_requests != Some(1) {
+                    assert!(Instant::now() < deadline, "面板应显示仍有一个请求");
+                    thread::sleep(Duration::from_millis(10));
+                }
+                assert!(request(port, "/must-not-reach-upstream").starts_with("HTTP/1.1 503"));
+                // 跨过旧十秒停机预算，也跨过一次 lease，必须靠 refresh 继续等待。
+                while started.elapsed() < Duration::from_secs(11) {
+                    thread::sleep(Duration::from_millis(20));
+                }
+                let status = retry_status(port);
+                assert_eq!(status["draining"], true);
+                assert_eq!(status["activeRequests"], 1);
+                release_tx.send(()).unwrap();
+            });
+            assert!(fixture.host.with_gateway(|gateway| gateway.safe_shutdown_wait(&wait))
+                .unwrap().unwrap());
+            release.join().unwrap();
+        });
+        assert!(started.elapsed() >= Duration::from_secs(11));
+        assert_complete_response(client, BODY);
+        fixture.host.with_gateway(|gateway| {
+            assert!(!gateway.holds_managed());
+            assert_eq!(gateway.managed_supervisor_pid(), None);
+        }).unwrap();
+        let requests = upstream.finish();
+        assert_eq!(requests.len(), 1, "排空期间的503请求不能到达上游，原请求不能重放");
+        drop(wait);
+        assert!(waits.progress().is_none());
+        // 退出成功后不探测/控制端口，fixture Drop 只释放自己的 Job。
+    }
+
+    #[test]
+    fn 可取消等待_取消恢复接单保留原请求与句柄且明确重试才退出() {
+        use ag_relay_lib::gateway_connection::ConnectionError;
+        use ag_relay_lib::shutdown_wait::{ShutdownKind, ShutdownPhase, ShutdownWaits};
+        const HELD_BODY: &str = r#"{"ok":true,"request":"cancel-held","complete":true}"#;
+        const NEXT_BODY: &str = r#"{"ok":true,"request":"after-wait-cancel","complete":true}"#;
+        let (seen_tx, seen_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let mut upstream = ExitHttpServer::new(move |stream, headers, stop| {
+            let held = headers.starts_with("GET /cancel-hold HTTP/");
+            if held {
+                let _ = seen_tx.send(());
+                let deadline = Instant::now() + Duration::from_secs(15);
+                loop {
+                    if stop.load(Ordering::SeqCst) { return Ok(()); }
+                    if Instant::now() >= deadline {
+                        return Err(io::Error::new(io::ErrorKind::TimedOut, "取消测试未释放请求"));
+                    }
+                    match release_rx.recv_timeout(Duration::from_millis(10)) {
+                        Ok(()) => break,
+                        Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                        Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
+                    }
+                }
+            }
+            stream.write_all(upstream_reply(
+                200, "application/json", if held { HELD_BODY } else { NEXT_BODY },
+            ).as_bytes())
+        });
+        let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = reservation.local_addr().unwrap().port();
+        let fixture = ExitFixture::new(
+            "wait-cancel", &format!("http://127.0.0.1:{}", upstream.port()), port,
+        );
+        drop(reservation);
+        let original_supervisor = fixture.host.with_gateway(|gateway| gateway.start()).unwrap().unwrap();
+        let original_core = retry_status(port)["pid"].clone();
+        let client = exit_request(port, "/cancel-hold");
+        seen_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let waits = ShutdownWaits::default();
+        let wait = waits.begin(ShutdownKind::Exit).unwrap();
+        let failure = thread::scope(|scope| {
+            let cancel = scope.spawn(|| {
+                wait_retry_status(port, |status| status["draining"] == true);
+                // 生命周期锁正在被停机调用持有，取消只取等待状态锁，不能卡住。
+                assert!(fixture.host.0.try_lock().is_err());
+                assert!(request(port, "/reject-during-wait").starts_with("HTTP/1.1 503"));
+                waits.cancel(wait.operation_id()).unwrap();
+            });
+            let failure = fixture.host.with_gateway(|gateway| gateway.safe_shutdown_wait(&wait))
+                .unwrap().unwrap_err();
+            cancel.join().unwrap();
+            failure
+        });
+        assert_eq!(failure, ConnectionError::Failed(
+            "已取消等待，网关已恢复接单；未强制结束请求。".into(),
+        ));
+        assert_eq!(waits.progress().unwrap().phase, ShutdownPhase::Cancelling);
+        let status = retry_status(port);
+        assert_eq!(status["pid"], original_core);
+        assert_eq!(status["draining"], false);
+        assert_eq!(status["activeRequests"], 1);
+        fixture.host.with_gateway(|gateway| {
+            assert!(gateway.holds_managed());
+            assert_eq!(gateway.managed_supervisor_pid(), Some(original_supervisor));
+        }).unwrap();
+        release_tx.send(()).unwrap();
+        assert_complete_response(client, HELD_BODY);
+        assert_complete_response(exit_request(port, "/after-wait-cancel"), NEXT_BODY);
+        wait_retry_status(port, |status| status["activeRequests"] == 0);
+        let status = retry_status(port);
+        assert_eq!(status["pid"], original_core, "取消不能暗中重启或延迟退出");
+        assert_eq!(status["draining"], false);
+        let requests = upstream.finish();
+        assert_eq!(requests.len(), 2, "拒绝的新请求不能转发，原请求不能重放");
+        assert!(requests[0].starts_with("GET /cancel-hold HTTP/"));
+        assert!(requests[1].starts_with("GET /after-wait-cancel HTTP/"));
+        let old_id = wait.operation_id();
+        drop(wait);
+        assert!(waits.progress().is_none());
+        let retry = waits.begin(ShutdownKind::Exit).unwrap();
+        assert!(waits.cancel(old_id).is_err(), "旧编号不得取消明确重试");
+        assert!(fixture.host.with_gateway(|gateway| gateway.safe_shutdown_wait(&retry))
+            .unwrap().unwrap());
+        fixture.host.with_gateway(|gateway| assert!(!gateway.holds_managed())).unwrap();
+    }
+
+    #[test]
+    fn 可取消等待_预算耗尽确认撤销后才报超时且不丢受管句柄() {
+        use ag_relay_lib::gateway_connection::ConnectionError;
+        use ag_relay_lib::shutdown_wait::{ShutdownKind, ShutdownWaits};
+        const BODY: &str = r#"{"ok":true,"request":"timeout-held","complete":true}"#;
+        let (seen_tx, seen_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let mut upstream = ExitHttpServer::new(move |stream, _, stop| {
+            let _ = seen_tx.send(());
+            loop {
+                if stop.load(Ordering::SeqCst) { return Ok(()); }
+                match release_rx.recv_timeout(Duration::from_millis(10)) {
+                    Ok(()) => break,
+                    Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
+                }
+            }
+            stream.write_all(upstream_reply(200, "application/json", BODY).as_bytes())
+        });
+        let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = reservation.local_addr().unwrap().port();
+        let fixture = ExitFixture::new(
+            "wait-budget", &format!("http://127.0.0.1:{}", upstream.port()), port,
+        );
+        drop(reservation);
+        let supervisor = fixture.host.with_gateway(|gateway| gateway.start()).unwrap().unwrap();
+        let core = retry_status(port)["pid"].clone();
+        let client = exit_request(port, "/timeout-hold");
+        seen_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let waits = ShutdownWaits::default();
+        let wait = waits.begin_with_timeout(ShutdownKind::Update, Duration::from_millis(500)).unwrap();
+        assert_eq!(fixture.host.with_gateway(|gateway| gateway.safe_shutdown_wait(&wait)).unwrap(),
+            Err(ConnectionError::Timeout));
+        let status = retry_status(port);
+        assert_eq!(status["pid"], core);
+        assert_eq!(status["draining"], false);
+        assert_eq!(status["activeRequests"], 1);
+        fixture.host.with_gateway(|gateway| {
+            assert!(gateway.holds_managed());
+            assert_eq!(gateway.managed_supervisor_pid(), Some(supervisor));
+        }).unwrap();
+        release_tx.send(()).unwrap();
+        assert_complete_response(client, BODY);
+        upstream.finish();
+        drop(wait);
+        let retry = waits.begin(ShutdownKind::Update).unwrap();
+        assert!(fixture.host.with_gateway(|gateway| gateway.safe_shutdown_wait(&retry))
+            .unwrap().unwrap());
+    }
+
+    #[test]
+    fn 可取消等待_旧能力明确拒绝且绝不退回旧十秒协议() {
+        use ag_relay_lib::gateway_connection::ConnectionError;
+        use ag_relay_lib::shutdown_wait::{ShutdownKind, ShutdownWaits};
+        for version in [None, Some(0), Some(2)] {
+            let mut body = serde_json::json!({
+                "pid": std::process::id(), "safeShutdownVersion": 1,
+                "draining": false, "activeRequests": 0
+            });
+            if let Some(version) = version { body["drainWaitVersion"] = serde_json::json!(version); }
+            let mut server = ExitHttpServer::new(move |stream, headers, _| {
+                let reply = if headers.starts_with("GET /_relay/status HTTP/") {
+                    upstream_reply(200, "application/json", &body.to_string())
+                } else {
+                    upstream_reply(403, "application/json", r#"{"error":"unexpected_control"}"#)
+                };
+                stream.write_all(reply.as_bytes())
+            });
+            let fixture = ExitFixture::new(
+                "wait-unsupported", &format!("http://127.0.0.1:{}", server.port()), server.port(),
+            );
+            let waits = ShutdownWaits::default();
+            let wait = waits.begin(ShutdownKind::Exit).unwrap();
+            assert_eq!(fixture.host.with_gateway(|gateway| gateway.safe_shutdown_wait(&wait)).unwrap(),
+                Err(ConnectionError::Failed(
+                    "此网关不支持可取消等待，请先手动处理旧实例；不会强制停止".into(),
+                )));
+            let requests = server.finish();
+            assert_eq!(requests.len(), 1, "旧能力仅查状态，不能控制任意PID或回退旧停机");
+            assert!(requests[0].starts_with("GET /_relay/status HTTP/"));
+        }
+    }
+
+    #[test]
     fn 安全退出_旧协议拒绝保留具体原因且不授权退出() {
         for version in [None, Some(0), Some(2)] {
             let mut body = serde_json::json!({
@@ -268,10 +509,11 @@ mod safe_exit {
                 "restarting": false,
                 "draining": false,
                 "activeRequests": 0,
+                "safeShutdownVersion": 1,
                 "requests": []
             });
             if let Some(version) = version {
-                body["safeShutdownVersion"] = serde_json::json!(version);
+                body["drainWaitVersion"] = serde_json::json!(version);
             }
             let mut server = ExitHttpServer::new(move |stream, headers, _| {
                 let reply = if headers.starts_with("GET /_relay/status HTTP/") {
@@ -289,7 +531,7 @@ mod safe_exit {
             // 协议检查必须先于父链查询；本测试 PID 不是网关，不得拿它解析父链。
             let failure = updates.prepare_exit(&fixture.host).unwrap_err();
             assert_eq!(failure.reason.as_str(), "safe_shutdown_unsupported", "{version:?}");
-            assert_eq!(failure.detail, "此网关不支持有界安全停机，请先手动处理旧实例；不会强制停止");
+            assert_eq!(failure.detail, "此网关不支持可取消等待，请先手动处理旧实例；不会强制停止");
             assert_eq!(updates.view().detail, failure.detail);
             assert!(!updates.exit_authorized());
             assert!(!updates.controls_blocked());
@@ -302,7 +544,7 @@ mod safe_exit {
     }
 
     #[test]
-    fn 安全退出_真实十秒超时恢复接单且可再次明确退出() {
+    fn 旧安全停机_真实十秒超时恢复接单且可再次明确停机() {
         const HELD_BODY: &str = r#"{"ok":true,"request":"held","complete":true}"#;
         const NEXT_BODY: &str = r#"{"ok":true,"request":"after-cancel","complete":true}"#;
         let (seen_tx, seen_rx) = mpsc::channel();
@@ -341,16 +583,12 @@ mod safe_exit {
         let original_core = retry_status(port)["pid"].clone();
         let client = exit_request(port, "/hold");
         seen_rx.recv_timeout(Duration::from_secs(5)).expect("假上游必须先持有在途请求");
-        let updates = UpdateService::<()>::new(false, "0.3.10".into());
         let started = Instant::now();
-        let failure = updates.prepare_exit(&fixture.host).unwrap_err();
-        // 不缩短生产 10 秒预算；100ms 只容忍跨进程计时器的边界精度。
+        let failure = fixture.host.with_gateway(|gateway| gateway.safe_shutdown(Duration::from_secs(10)))
+            .unwrap().unwrap_err();
+        // 保留旧配置切换入口的真实10秒回归；退出/更新的新入口已由上方测试覆盖。
         assert!(started.elapsed() >= Duration::from_millis(9900));
-        assert_eq!(failure.reason.as_str(), "drain_timeout_cancelled");
-        assert_eq!(failure.detail, "退出已取消：排空超时，网关已恢复接单；未强制结束，请稍后重试。");
-        assert_eq!(updates.view().detail, failure.detail);
-        assert!(!updates.exit_authorized());
-        assert!(!updates.controls_blocked());
+        assert_eq!(failure, ag_relay_lib::gateway_connection::ConnectionError::Timeout);
         fixture.host.with_gateway(|gateway| {
             assert!(gateway.holds_managed(), "超时不能丢失自己持有的 Job");
             assert_eq!(gateway.managed_supervisor_pid(), Some(original_supervisor));
@@ -370,9 +608,8 @@ mod safe_exit {
         assert!(requests[0].starts_with("GET /hold HTTP/"));
         assert!(requests[1].starts_with("GET /after-cancel HTTP/"));
         assert!(requests.iter().all(|headers| headers.contains("fixture-only-not-a-key")));
-        updates.prepare_exit(&fixture.host).expect("用户明确重试后可以安全退出");
-        assert!(updates.exit_authorized());
-        assert!(updates.controls_blocked());
+        assert!(fixture.host.with_gateway(|gateway| gateway.safe_shutdown(Duration::from_secs(3)))
+            .unwrap().expect("用户明确重试后可以安全停机"));
         fixture.host.with_gateway(|gateway| {
             assert!(!gateway.holds_managed());
             assert_eq!(gateway.managed_supervisor_pid(), None);

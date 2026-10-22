@@ -201,7 +201,7 @@ export function SettingsPage(props: SettingsPageProps & { update: UpdatePanelPro
               <h3 className="text-sm font-medium leading-5">关闭行为</h3>
               <p className="text-sm leading-6">关闭窗口时选择保留在托盘或彻底退出</p>
               <p className="text-xs leading-5 text-muted-foreground">
-                保留在托盘不停止网关。彻底退出先排空在途请求，最多等待 10 秒，超时取消退出、不强杀；托盘不可用时不能隐藏窗口。
+                保留在托盘不停止网关。彻底退出会暂停接收新请求，最多等待 10 分钟，支持取消等待且不强制中断已有请求；托盘不可用时不能隐藏窗口。
               </p>
             </div>
           </CardContent>
@@ -264,7 +264,7 @@ export function SettingsPage(props: SettingsPageProps & { update: UpdatePanelPro
               <h2>退出应用</h2>
             </CardTitle>
             <CardDescription className="text-xs leading-5">
-              退出前会先优雅排空在途请求（最多等待 10 秒），再停止网关并退出。
+              退出时暂停接收新请求，显示等待进度；已有请求完成后才停止网关，可取消等待。
             </CardDescription>
           </div>
           <Button

@@ -2,8 +2,9 @@
 use crate::{
     connection_settings::{ConnectionSettings, ConnectionSettingsStore},
     gateway_process::{self, GatewayPaths, ManagedChild},
-    gateway_safe_shutdown::safe_shutdown_at,
+    gateway_safe_shutdown::{safe_shutdown_at, safe_shutdown_wait_at},
     policy_settings::{ActivePolicy, PolicySettings, PolicySettingsStore, PolicySettingsView},
+    shutdown_wait::ShutdownWait,
 };
 use serde::Serialize;
 use std::{
@@ -248,6 +249,35 @@ impl GatewayConnection {
             }
         }
         let was_running = safe_shutdown_at(port, self.managed_supervisor_pid(), timeout)?;
+        self.managed = None;
+        Ok(was_running)
+    }
+
+    /// 退出/更新的可取消等待入口；只在完整确认成功（或确认已停）后释放受管句柄。
+    /// 失败不丢 Job、不重启、不回滚，取消也须核心明确恢复接单后才报告。
+    pub fn safe_shutdown_wait(&mut self, wait: &ShutdownWait) -> Result<bool, ConnectionError> {
+        let port = self.port()?;
+        if let Some(child) = self.managed.as_mut() {
+            match child.child.try_wait() {
+                Ok(Some(_)) => {
+                    if gateway_process::port_in_use(gateway_process::GATEWAY_HOST, port) {
+                        return Err(ConnectionError::Failed(
+                            "受管网关已退出，但端口出现其它实例；未执行停机".into(),
+                        ));
+                    }
+                    wait.claim_commit().map_err(ConnectionError::Failed)?;
+                    self.managed = None;
+                    return Ok(false);
+                }
+                Ok(None) => {}
+                Err(_) => {
+                    return Err(ConnectionError::Failed(
+                        "无法读取受管网关状态，未执行停机".into(),
+                    ))
+                }
+            }
+        }
+        let was_running = safe_shutdown_wait_at(port, self.managed_supervisor_pid(), wait)?;
         self.managed = None;
         Ok(was_running)
     }

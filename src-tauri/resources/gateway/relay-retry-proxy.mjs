@@ -155,6 +155,34 @@ let closing = false;
 let restartError = null;
 // 一次有界、安全停机尝试。超时或调用者断连时撤销，不保留延迟退出任务。
 let safeShutdown = null;
+// 可取消的两阶段等待：排空后仍存活，由同一操作显式确认退出。
+let drainWait = null;
+// 只保留最近 128 个操作的封闭终态：旧 start 不续预算，取消确认可安全重试。
+const finishedDrainOperations = new Map();
+
+function clearDrainWait(attempt = drainWait, outcome = 'cancelled') {
+  if (!attempt || drainWait !== attempt) return;
+  clearTimeout(attempt.budgetTimer);
+  clearTimeout(attempt.leaseTimer);
+  finishedDrainOperations.set(attempt.operation, outcome);
+  if (finishedDrainOperations.size > 128) finishedDrainOperations.delete(finishedDrainOperations.keys().next().value);
+  drainWait = null;
+  draining = false;
+  // 到期/实际停机撤销尚未送完的 commit，不能留下成功确认后又继续接单。
+  if (attempt.commitRes && !attempt.commitRes.writableFinished) attempt.commitRes.destroy();
+}
+
+function expireDrainWait(attempt = drainWait) {
+  if (!attempt || drainWait !== attempt) return;
+  const now = performance.now();
+  if (now >= attempt.deadline || now >= attempt.leaseDeadline) clearDrainWait(attempt);
+}
+
+function renewDrainLease(attempt) {
+  clearTimeout(attempt.leaseTimer);
+  attempt.leaseDeadline = performance.now() + attempt.leaseMs;
+  attempt.leaseTimer = setTimeout(() => clearDrainWait(attempt), attempt.leaseMs);
+}
 
 function requestSnapshot(state) {
   const now = Date.now();
@@ -1654,7 +1682,7 @@ function localControl(req, res, pathname) {
   if (pathname === '/_relay/status' && req.method === 'GET') {
     controlResponse(res, 200, {
       loadedVersion, startedAt, pid: process.pid, supervisorEnabled, restarting, draining, restartError,
-      safeShutdownVersion: 1,
+      safeShutdownVersion: 1, drainWaitVersion: 1,
       policy: { revision: policyRevision, settings: policySettings },
       activeRequests: activeRequests.size,
       config: { statusIntervalMs: cfg.statusIntervalMs, streamIdleMs: cfg.streamIdleMs,
@@ -1665,6 +1693,70 @@ function localControl(req, res, pathname) {
       requestsTruncated: activeRequests.size > 100,
     });
     return;
+  }
+  if (pathname === '/_relay/drain' && req.method === 'POST') {
+    if (req.headers['x-relay-control'] !== '1') return controlResponse(res, 403, { error: 'control_header_required' });
+    if (req.headers['x-relay-pid'] !== String(process.pid)) return controlResponse(res, 409, { error: 'instance_changed' });
+    const operation = req.headers['x-relay-operation'];
+    const action = req.headers['x-relay-action'];
+    if (typeof operation !== 'string' || !/^[a-f0-9]{32}$/.test(operation)) {
+      return controlResponse(res, 400, { error: 'invalid_operation' });
+    }
+    if (!['start', 'refresh', 'cancel', 'commit'].includes(action)) return controlResponse(res, 400, { error: 'invalid_action' });
+    expireDrainWait();
+    if (action === 'start') {
+      const budgetHeader = req.headers['x-relay-timeout-ms'];
+      const leaseHeader = req.headers['x-relay-lease-ms'];
+      const budget = Number(budgetHeader);
+      const leaseMs = Number(leaseHeader);
+      if (!/^[0-9]+$/.test(budgetHeader || '') || !Number.isInteger(budget) || budget < 1 || budget > 600000) {
+        return controlResponse(res, 400, { error: 'invalid_timeout' });
+      }
+      if (!/^[0-9]+$/.test(leaseHeader || '') || !Number.isInteger(leaseMs) || leaseMs < 100 || leaseMs > 10000) {
+        return controlResponse(res, 400, { error: 'invalid_lease' });
+      }
+      if (drainWait) {
+        if (drainWait.operation !== operation || drainWait.committing) return controlResponse(res, 409, { error: 'control_busy' });
+        renewDrainLease(drainWait);
+        return controlResponse(res, 202, { operation, activeRequests: activeRequests.size, draining: true });
+      }
+      if (finishedDrainOperations.has(operation)) return controlResponse(res, 409, { error: 'unknown_operation' });
+      if (draining || restarting) return controlResponse(res, 409, { error: 'control_busy' });
+      const attempt = { operation, leaseMs, deadline: performance.now() + budget, leaseDeadline: 0,
+        budgetTimer: null, leaseTimer: null, committing: false };
+      drainWait = attempt;
+      draining = true;
+      attempt.budgetTimer = setTimeout(() => clearDrainWait(attempt), budget);
+      renewDrainLease(attempt);
+      return controlResponse(res, 202, { operation, activeRequests: activeRequests.size, draining: true });
+    }
+    const attempt = drainWait;
+    if (action === 'cancel' && finishedDrainOperations.get(operation) === 'cancelled') {
+      return controlResponse(res, 200, { operation, cancelled: true });
+    }
+    if (!attempt || attempt.operation !== operation) return controlResponse(res, 409, { error: 'unknown_operation' });
+    if (attempt.committing) return controlResponse(res, 409, { error: 'control_busy' });
+    if (action === 'cancel') {
+      clearDrainWait(attempt);
+      return controlResponse(res, 200, { operation, cancelled: true });
+    }
+    if (action === 'commit') {
+      if (activeRequests.size) return controlResponse(res, 409, { error: 'active_requests', activeRequests: activeRequests.size });
+      attempt.committing = true;
+      attempt.commitRes = res;
+      // 只有完整确认交给 socket 后才真正停机；确认前断连撤销整个等待。
+      res.once('close', () => clearDrainWait(attempt));
+      res.once('finish', () => {
+        expireDrainWait(attempt);
+        if (drainWait !== attempt) return;
+        clearDrainWait(attempt, 'committed');
+        beginDrain(0);
+      });
+      if (res.destroyed || req.socket.destroyed) { clearDrainWait(attempt); return; }
+      return controlResponse(res, 200, { operation, drained: true, pid: process.pid });
+    }
+    renewDrainLease(attempt);
+    return controlResponse(res, 200, { operation, activeRequests: activeRequests.size, draining: true });
   }
   if (pathname === '/_relay/shutdown' && req.method === 'POST') {
     if (req.headers['x-relay-control'] !== '1') return controlResponse(res, 403, { error: 'control_header_required' });
@@ -1708,7 +1800,7 @@ function localControl(req, res, pathname) {
 }
 
 function finishDrain() {
-  if (!draining || closing || activeRequests.size) return;
+  if (!draining || closing || activeRequests.size || drainWait) return;
   if (safeShutdown) {
     const attempt = safeShutdown;
     if (attempt.committing) return;
@@ -1729,6 +1821,7 @@ function finishDrain() {
 }
 
 function beginDrain(code) {
+  clearDrainWait(drainWait, 'shutdown');
   draining = true;
   drainExitCode = code;
   safeDiagnostic({ event: 'gateway_draining', activeRequests: activeRequests.size, restart: code === 75 });
@@ -1739,6 +1832,8 @@ const server = http.createServer((req, res) => {
   let pathname;
   try { pathname = new URL(req.url, 'http://localhost').pathname; }
   catch { controlResponse(res, 400, { error: 'invalid_path' }); return; }
+  // 回调可能晚于真实截止：任何新 HTTP 访问都先校验，不续已到期租约/预算。
+  expireDrainWait();
   if (pathname.startsWith('/_relay/')) return localControl(req, res, pathname);
   if (draining) {
     res.setHeader('retry-after', '2');
