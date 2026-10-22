@@ -366,6 +366,21 @@ for (const carrier of ['http', 'json', 'sse']) {
   })
 }
 
+// 生产回归：中文站点把「该模型在该分组没有通道」说成「无可用渠道」，原分类只认英文，
+// 于是落进通用 503 重试，把 Codex 后台辅助请求拖满 110 次、约 200 秒才放弃。
+test('错误分类 中文无可用渠道按通道抖动快速换道并收手', async t => {
+  const reply = { status: 503, body: { error: { message: '当前分组 core 下模型 gpt-5.6-terra 无可用渠道', type: 'new_api_error' } } }
+  const f = await fixture(t, () => reply)
+  const started = Date.now()
+  const response = await f.request(toolHistory, { 'x-relay-client': 'codex' })
+  const elapsed = Date.now() - started
+  assert.equal(response.status, 429, '通道抖动耗尽按可重试的错误返回：' + response.body)
+  assert.ok(f.captured.length <= 8, `应在通道抖动预算内收手，实际发送 ${f.captured.length} 次`)
+  assert.ok(elapsed < 5000, `不应拖满通用重试预算，实际 ${elapsed}ms`)
+  assert.ok(!f.captured.some(request => JSON.stringify(request.body).includes('"id"')),
+    '通道抖动不得改写或删除历史')
+})
+
 for (const code of ['content-filter', 'flagged', 'moderation']) {
   test(`错误分类 仅${code}错误码的审核失败仍及时返回`, async t => {
     const reply = classificationError('provider error', 'sse', code)
