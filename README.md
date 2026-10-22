@@ -172,7 +172,28 @@ node scripts/release.mjs test-build --out C:\Temp\ag-relay-test-artifacts
 
 注：网关核心的四个 `.mjs` 与 `gateway-config.bat` 已由 `.gitattributes` 固定为不做换行符转换（`-text`），因此任何机器上检出内容与仓库内容一致、哈希唯一。此前 `.bat` 未固定：仓库内容为 LF、Windows 检出为 CRLF，两者哈希不同。下表 v0.2.0/v0.3.1 条目记录的是当时**磁盘检出**（CRLF）的值 `102865c8…`，属历史留档不回填；v0.3.2 及以后记录的是**仓库内容**（LF）的值 `9a8a483e…`。
 
-### v0.3.9（当前）
+### v0.3.11（当前）
+
+| 项 | 值 |
+| --- | --- |
+| 打包日期 | 2026-10-22 09:16（UTC+8） |
+| 发布日期 | 2026-10-22 09:23（UTC+8） |
+| 本仓构建提交 | `8d4fda821b492f42b288c4901f049a5119e97e04`（tag `v0.3.11`，在干净工作区构建） |
+| 构建方式 | 维护者本机，原生产更新签名；不运行安装器 |
+| 验证 | 本轮退出相关 56 项、发布工具 44 项通过；正式预检、两种安装器更新签名、版本绑定、随包许可与本机路径隐私检查通过；7 个上传文件摘要与本地一致；匿名 latest 清单返回 0.3.11 且与本地逐字节一致；未执行本机安装/升级 |
+| `relay-retry-proxy.mjs` sha256 | `1e456b0835cf98258665aace9699955c4c58df74bf9014e6a665f9165f5199de` |
+| `relay-supervisor.mjs` sha256 | `f2f030b46999f84afc77f7f92643075c1d1f1ddf7ad3c327fbd92f5593dff77c` |
+| `relay-start-check.mjs` sha256 | `bb54cc7255b4f570ba1bdcfda255f19f0ca0a70fa6d028d0ed4e44f8146037c4` |
+| `bounded-file-log.mjs` sha256 | `3841b877ce76e6ff37497bfbcd65e3dd4f478442dc7fff9eaf4b39612b25c205` |
+| `gateway-config.bat` sha256 | `3a70fbf73d5d0a000b745c2e7692e40617fc7346c7f2fa88021a335072b261ee` |
+| `ag-relay_0.3.11_x64-setup.exe` sha256 | `2f447a0475192f545974047e473dd06164fc30dbea40c14c1f709bcbd4a9c53b` |
+| `ag-relay_0.3.11_x64_zh-CN.msi` sha256 | `730f0987c0b33f100cd9d4cfcdb91b1af7b34882b8d42ec1b2dda7ca4045373f` |
+| `third-party-sources.tar.gz` sha256 | `04377184a103e459f3e0e3a60971be3e1efbf4e55615a56792fb57fb3f821afe` |
+| Release | [v0.3.11](https://github.com/xinxinxiaoxin/ag-relay/releases/tag/v0.3.11)（NSIS + MSI + 各自 `.sig` + `latest.json` + `SHA256SUMS` + 第三方源码附件） |
+
+退出失败不再一律显示为“安全排空尚未完成”，而是保留具体原因并记录固定原因码；同时包含此前 v0.3.10 草稿中的诊断续写修复。安全等待与不强制中断请求的策略不变，不宣称所有退出故障已根治。说明见 [v0.3.11](docs/releases/v0.3.11.md)，构建与发布详情见 [构建记录](docs/releases/v0.3.11-build.md)。
+
+### v0.3.9（历史）
 
 | 项 | 值 |
 | --- | --- |
