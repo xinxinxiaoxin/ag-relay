@@ -4,9 +4,11 @@ use tauri::{AppHandle, Manager};
 use tauri_plugin_updater::{Update, UpdaterExt};
 
 use crate::{
+    app_exit::{log_exit_outcome, log_exit_source, ExitOutcome, ExitSource},
     app_update::{
-        BootPlan, DownloadEvent, GatewayHost, GatewayIdentity, Release, ShutdownFailure, UpdateGateway,
-        UpdateProvider, UpdateService, UpdateView,
+        BootPlan, DownloadEvent, ExitFailureReason, ExitPreparationFailure, GatewayHost,
+        GatewayIdentity, Release, ShutdownFailure, UpdateGateway, UpdateProvider, UpdateService,
+        UpdateView,
     },
     gateway_commands::with_connection,
     gateway_connection::{ConnectionError, GatewayConnection},
@@ -192,39 +194,175 @@ pub fn exit_authorized(app: &AppHandle) -> bool {
 /// 所有真正退出复用此等待型入口。同步抢占后才排入阻塞线程池，拒绝的请求不会稍后重试。
 pub fn request_exit(
     app: &AppHandle,
+    source: Option<ExitSource>,
 ) -> impl std::future::Future<Output = Result<(), String>> + Send + 'static {
+    if let Some(source) = source {
+        log_exit_source(app, source);
+    }
     let admitted = (|| {
         let state = app
             .try_state::<crate::app_exit::AppExitState>()
-            .ok_or("退出模块尚未就绪，请稍后重试。")?;
-        let attempt = state.exits.try_begin()?;
-        let updates = app
-            .try_state::<Updates>()
-            .ok_or("更新模块尚未就绪，暂不能安全退出。")?;
+            .ok_or_else(|| {
+                ExitPreparationFailure::new(
+                    ExitFailureReason::ExitModuleNotReady,
+                    "退出模块尚未就绪，请稍后重试。",
+                )
+            })?;
+        let attempt = state.exits.try_begin().map_err(|detail| {
+            ExitPreparationFailure::new(ExitFailureReason::ExitAlreadyRunning, detail)
+        })?;
+        let updates = app.try_state::<Updates>().ok_or_else(|| {
+            ExitPreparationFailure::new(
+                ExitFailureReason::UpdateModuleNotReady,
+                "更新模块尚未就绪，暂不能安全退出。",
+            )
+        })?;
         if updates.controls_blocked() {
-            return Err("更新或退出正在进行，请等待当前操作完成。".to_string());
+            return Err(ExitPreparationFailure::new(
+                ExitFailureReason::OperationBusy,
+                "更新或退出正在进行，请等待当前操作完成。",
+            ));
         }
         Ok(attempt)
     })();
+    if let Err(failure) = &admitted {
+        log_exit_outcome(app, source, ExitOutcome::Failed(failure.reason));
+    }
     let app = app.clone();
     async move {
-        let attempt = admitted?;
+        let attempt = admitted.map_err(|failure| failure.detail)?;
+        let worker = app.clone();
         tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
-            // 资格由实际排空任务持有，等待命令被取消也不能提前放行下一次退出。
+            // 资格及结果记录由实际任务持有，不因等待命令取消而提前放行或漏记。
             let _attempt = attempt;
-            let updates = app
-                .try_state::<Updates>()
-                .ok_or("更新模块尚未就绪，暂不能安全退出。")?;
-            // 仍以 UpdateService 的原子互斥门裁决与更新之间的竞态，不依赖上面的快照。
-            updates.prepare_exit(&ConnectedGateway(app.clone()))?;
-            if !updates.exit_authorized() {
-                return Err("退出未获安全授权，已保留当前窗口。".into());
-            }
-            app.exit(0);
-            Ok(())
+            run_exit_task(
+                || {
+                    let updates = worker.try_state::<Updates>().ok_or_else(|| {
+                        ExitPreparationFailure::new(
+                            ExitFailureReason::UpdateModuleNotReady,
+                            "更新模块尚未就绪，暂不能安全退出。",
+                        )
+                    })?;
+                    // 原子互斥门裁决与更新之间的竞态，不依赖准入时的快照。
+                    updates.prepare_exit(&ConnectedGateway(worker.clone()))?;
+                    if !updates.exit_authorized() {
+                        return Err(ExitPreparationFailure::new(
+                            ExitFailureReason::ExitUnauthorized,
+                            "退出未获安全授权，已保留当前窗口。",
+                        ));
+                    }
+                    Ok(())
+                },
+                |outcome| log_exit_outcome(&worker, source, outcome),
+                || worker.exit(0),
+            )
         })
         .await
-        .map_err(|_| "退出任务失败，已保留当前窗口，请重试。".to_string())?
+        .unwrap_or_else(|_| {
+            log_exit_outcome(
+                &app,
+                source,
+                ExitOutcome::Failed(ExitFailureReason::ExitTaskFailed),
+            );
+            Err("退出任务失败，已保留当前窗口，请重试。".into())
+        })
+    }
+}
+
+/// 实际退出任务的边界；进程退出与结果记录由外部提供，不依赖等待方存活。
+pub(crate) fn run_exit_task(
+    prepare: impl FnOnce() -> Result<(), ExitPreparationFailure>,
+    mut record: impl FnMut(ExitOutcome),
+    exit: impl FnOnce(),
+) -> Result<(), String> {
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        prepare()?;
+        record(ExitOutcome::Authorized);
+        exit();
+        Ok(())
+    }))
+    .unwrap_or_else(|_| {
+        Err(ExitPreparationFailure::new(
+            ExitFailureReason::ExitTaskFailed,
+            "退出任务失败，已保留当前窗口，请重试。",
+        ))
+    });
+    match outcome {
+        Ok(()) => Ok(()),
+        Err(failure) => {
+            record(ExitOutcome::Failed(failure.reason));
+            Err(failure.detail)
+        }
+    }
+}
+
+#[cfg(test)]
+mod exit_task_tests {
+    use super::*;
+    use crate::exit_requests::ExitRequests;
+    use std::sync::mpsc;
+
+    #[test]
+    fn 取消等待后_普通失败与任务异常均留证并释放资格() {
+        for panics in [false, true] {
+            let exits = ExitRequests::default();
+            let attempt = exits.try_begin().unwrap();
+            let (started, ready) = mpsc::channel();
+            let (resume, wait) = mpsc::channel();
+            let (recorded, records) = mpsc::channel();
+            let (completed, completion) = mpsc::channel();
+            let task = tauri::async_runtime::spawn_blocking(move || {
+                let result = {
+                    let _attempt = attempt;
+                    run_exit_task(
+                        || {
+                            started.send(()).unwrap();
+                            wait.recv_timeout(Duration::from_secs(5)).unwrap();
+                            if panics {
+                                panic!("fixture-only exit task panic");
+                            }
+                            Err(ExitPreparationFailure::new(
+                                ExitFailureReason::StatusUnverified,
+                                "无法核实当前网关状态，未执行停机",
+                            ))
+                        },
+                        |outcome| recorded.send(outcome).unwrap(),
+                        || panic!("失败不能关闭应用"),
+                    )
+                };
+                completed.send(result).unwrap();
+            });
+            ready.recv_timeout(Duration::from_secs(5)).unwrap();
+            drop(task);
+            assert!(
+                exits.try_begin().is_err(),
+                "取消等待不能提前释放实际任务的资格"
+            );
+            resume.send(()).unwrap();
+            let expected = if panics {
+                ExitFailureReason::ExitTaskFailed
+            } else {
+                ExitFailureReason::StatusUnverified
+            };
+            assert_eq!(
+                records.recv_timeout(Duration::from_secs(5)).unwrap(),
+                ExitOutcome::Failed(expected)
+            );
+            let error = completion
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .unwrap_err();
+            assert_eq!(
+                error,
+                if panics {
+                    "退出任务失败，已保留当前窗口，请重试。"
+                } else {
+                    "无法核实当前网关状态，未执行停机"
+                }
+            );
+            assert!(records.try_recv().is_err(), "同一失败不能重复记录");
+            assert!(exits.try_begin().is_ok(), "实际任务结束后才允许显式重试");
+        }
     }
 }
 

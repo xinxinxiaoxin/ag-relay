@@ -1,4 +1,5 @@
 use ag_relay_lib::{
+    app_update::{GatewayHost, UpdateService},
     connection_settings::ConnectionSettingsStore,
     gateway_connection::GatewayConnection,
     gateway_process::GatewayPaths,
@@ -48,6 +49,16 @@ impl Fixture {
     fn build(name: &str, upstream: &str, port: u16, with_policy: bool) -> Self {
         let dir =
             std::env::temp_dir().join(format!("ag-relay-connection-{name}-{}", std::process::id()));
+        let gateway = Self::gateway_at(&dir, upstream, port, with_policy);
+        Self { dir, gateway }
+    }
+
+    fn gateway_at(
+        dir: &std::path::Path,
+        upstream: &str,
+        port: u16,
+        with_policy: bool,
+    ) -> GatewayConnection {
         std::fs::create_dir_all(dir.join("gateway")).unwrap();
         let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         // 完整资源闭包，包含后继日志模块；核心绝不从真实安装目录运行。
@@ -64,13 +75,12 @@ impl Fixture {
             gateway_dir: dir.join("gateway"),
             diagnostics_file: dir.join("logs/diagnostics.jsonl"),
         };
-        let gateway = if with_policy {
+        if with_policy {
             let policy_store = PolicySettingsStore::new(dir.join("policy-settings.json"));
             GatewayConnection::new_with_policy_store(paths, store, policy_store)
         } else {
             GatewayConnection::new(paths, store)
-        };
-        Self { dir, gateway }
+        }
     }
 }
 impl Drop for Fixture {
@@ -78,6 +88,296 @@ impl Drop for Fixture {
         // 正常完成先走安全停机；断言 panic 时只回收自己持有的 Job，不按端口杀进程。
         let _ = self.gateway.safe_shutdown(Duration::from_secs(2));
         let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+// 贯通公开退出入口；不伪造 UpdateGateway，也不把 restart 当作 prepare_exit。
+mod safe_exit {
+    use super::*;
+    use std::{
+        io,
+        net::SocketAddr,
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            mpsc, Arc, Mutex,
+        },
+        thread::{self, JoinHandle},
+        time::{Instant, SystemTime, UNIX_EPOCH},
+    };
+
+    struct ExitHost(Mutex<GatewayConnection>);
+    impl GatewayHost for ExitHost {
+        type Gateway = GatewayConnection;
+
+        fn with_gateway<T>(
+            &self,
+            action: impl FnOnce(&mut GatewayConnection) -> T,
+        ) -> Result<T, String> {
+            let mut gateway = self.0.try_lock().map_err(|_| "测试网关锁不可用".to_string())?;
+            Ok(action(&mut gateway))
+        }
+    }
+
+    struct ExitDirectory(PathBuf);
+    impl ExitDirectory {
+        fn new(name: &str) -> Self {
+            let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+            let dir = std::env::temp_dir().join(format!(
+                "ag-relay-safe-exit-{name}-{}-{nonce}",
+                std::process::id()
+            ));
+            // 不复用旧目录；从这里起，后续资源复制/配置写入失败也会清理。
+            std::fs::create_dir(&dir).unwrap();
+            Self(dir)
+        }
+    }
+    impl Drop for ExitDirectory {
+        fn drop(&mut self) {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            loop {
+                match std::fs::remove_dir_all(&self.0) {
+                    Ok(()) => break,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => break,
+                    Err(error) if Instant::now() >= deadline => {
+                        eprintln!("隔离退出测试目录未能清理 {}：{error}", self.0.display());
+                        break;
+                    }
+                    Err(_) => thread::sleep(Duration::from_millis(20)),
+                }
+            }
+        }
+    }
+
+    struct ExitFixture {
+        // 字段按声明顺序释放：先关闭自己持有的 Job，再删除该子进程的临时目录。
+        // 析构不发任何 HTTP 控制请求，尤其不访问成功退出后可能被复用的端口。
+        host: ExitHost,
+        _dir: ExitDirectory,
+    }
+    impl ExitFixture {
+        fn new(name: &str, upstream: &str, port: u16) -> Self {
+            assert_ne!(port, ag_relay_lib::gateway_process::GATEWAY_PORT);
+            let dir = ExitDirectory::new(name);
+            let gateway = Fixture::gateway_at(&dir.0, upstream, port, false);
+            Self { host: ExitHost(Mutex::new(gateway)), _dir: dir }
+        }
+    }
+
+    // 父对象始终保有监听器，即使 worker 出错也不提前释放端口；Drop 停止并回收线程。
+    struct ExitHttpServer {
+        listener: TcpListener,
+        stop: Arc<AtomicBool>,
+        worker: Option<JoinHandle<io::Result<Vec<String>>>>,
+    }
+    impl ExitHttpServer {
+        fn new(
+            mut respond: impl FnMut(&mut TcpStream, &str, &AtomicBool) -> io::Result<()>
+                + Send
+                + 'static,
+        ) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            assert_ne!(listener.local_addr().unwrap().port(), ag_relay_lib::gateway_process::GATEWAY_PORT);
+            listener.set_nonblocking(true).unwrap();
+            let worker_listener = listener.try_clone().unwrap();
+            worker_listener.set_nonblocking(true).unwrap();
+            let stop = Arc::new(AtomicBool::new(false));
+            let stopped = stop.clone();
+            let worker = thread::spawn(move || {
+                let mut requests = Vec::new();
+                while !stopped.load(Ordering::SeqCst) {
+                    let mut stream = match worker_listener.accept() {
+                        Ok((stream, _)) => stream,
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_millis(5));
+                            continue;
+                        }
+                        Err(error) => return Err(error),
+                    };
+                    stream.set_nonblocking(false)?;
+                    stream.set_write_timeout(Some(Duration::from_secs(2)))?;
+                    let deadline = Instant::now() + Duration::from_secs(2);
+                    let mut bytes = Vec::new();
+                    while !bytes.windows(4).any(|part| part == b"\r\n\r\n") {
+                        let remaining = deadline.saturating_duration_since(Instant::now());
+                        if remaining.is_zero() || bytes.len() >= 16384 {
+                            return Err(io::Error::new(io::ErrorKind::TimedOut, "测试 HTTP 头未完整到达"));
+                        }
+                        stream.set_read_timeout(Some(remaining))?;
+                        let mut chunk = [0; 4096];
+                        let count = stream.read(&mut chunk)?;
+                        if count == 0 {
+                            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "测试 HTTP 头中断"));
+                        }
+                        bytes.extend_from_slice(&chunk[..count]);
+                    }
+                    let headers = String::from_utf8(bytes)
+                        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+                    respond(&mut stream, &headers, &stopped)?;
+                    requests.push(headers);
+                }
+                Ok(requests)
+            });
+            Self { listener, stop, worker: Some(worker) }
+        }
+
+        fn port(&self) -> u16 {
+            self.listener.local_addr().unwrap().port()
+        }
+
+        fn finish(&mut self) -> Vec<String> {
+            self.stop.store(true, Ordering::SeqCst);
+            self.worker.take().unwrap().join().expect("隔离 HTTP 线程 panic")
+                .expect("隔离 HTTP 服务失败")
+        }
+    }
+    impl Drop for ExitHttpServer {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::SeqCst);
+            if let Some(worker) = self.worker.take() {
+                // 断言失败时仍回收线程，但不在展开栈时二次 panic。
+                let _ = worker.join();
+            }
+        }
+    }
+
+    fn exit_request(port: u16, path: &str) -> TcpStream {
+        let address = SocketAddr::from(([127, 0, 0, 1], port));
+        let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(1)).unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        stream.set_write_timeout(Some(Duration::from_secs(2))).unwrap();
+        write!(stream, "GET {path} HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer fixture-only-not-a-key\r\n\r\n").unwrap();
+        stream
+    }
+
+    fn assert_complete_response(stream: TcpStream, expected: &str) {
+        let mut response = String::new();
+        stream.take(65536).read_to_string(&mut response).unwrap();
+        let (headers, body) = response.split_once("\r\n\r\n").expect("完整 HTTP 响应");
+        assert!(headers.starts_with("HTTP/1.1 200"), "{response}");
+        assert_eq!(body, expected, "响应必须逐字完整，不能仅含成功片段");
+    }
+
+    #[test]
+    fn 安全退出_旧协议拒绝保留具体原因且不授权退出() {
+        for version in [None, Some(0), Some(2)] {
+            let mut body = serde_json::json!({
+                "pid": std::process::id(),
+                "loadedVersion": "0".repeat(64),
+                "startedAt": "2026-10-22T00:00:00.000Z",
+                "supervisorEnabled": true,
+                "restarting": false,
+                "draining": false,
+                "activeRequests": 0,
+                "requests": []
+            });
+            if let Some(version) = version {
+                body["safeShutdownVersion"] = serde_json::json!(version);
+            }
+            let mut server = ExitHttpServer::new(move |stream, headers, _| {
+                let reply = if headers.starts_with("GET /_relay/status HTTP/") {
+                    upstream_reply(200, "application/json", &body.to_string())
+                } else {
+                    // 仅自持假服务，绝不转发控制请求到任何真实进程。
+                    upstream_reply(403, "application/json", r#"{"error":"unexpected_control"}"#)
+                };
+                stream.write_all(reply.as_bytes())
+            });
+            let fixture = ExitFixture::new(
+                "unsupported", &format!("http://127.0.0.1:{}", server.port()), server.port(),
+            );
+            let updates = UpdateService::<()>::new(false, "0.3.10".into());
+            // 协议检查必须先于父链查询；本测试 PID 不是网关，不得拿它解析父链。
+            let failure = updates.prepare_exit(&fixture.host).unwrap_err();
+            assert_eq!(failure.reason.as_str(), "safe_shutdown_unsupported", "{version:?}");
+            assert_eq!(failure.detail, "此网关不支持有界安全停机，请先手动处理旧实例；不会强制停止");
+            assert_eq!(updates.view().detail, failure.detail);
+            assert!(!updates.exit_authorized());
+            assert!(!updates.controls_blocked());
+            assert!(!fixture.host.with_gateway(|gateway| gateway.holds_managed()).unwrap());
+            let requests = server.finish();
+            assert_eq!(requests.len(), 1, "仅可读取状态，不能发送停机控制：{requests:?}");
+            assert!(requests[0].starts_with("GET /_relay/status HTTP/"));
+            // fixture 先于 server 析构；两者析构都不会再连接这个端口。
+        }
+    }
+
+    #[test]
+    fn 安全退出_真实十秒超时恢复接单且可再次明确退出() {
+        const HELD_BODY: &str = r#"{"ok":true,"request":"held","complete":true}"#;
+        const NEXT_BODY: &str = r#"{"ok":true,"request":"after-cancel","complete":true}"#;
+        let (seen_tx, seen_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let mut upstream = ExitHttpServer::new(move |stream, headers, stop| {
+            let held = headers.starts_with("GET /hold HTTP/");
+            if held {
+                let _ = seen_tx.send(());
+                let deadline = Instant::now() + Duration::from_secs(25);
+                loop {
+                    if stop.load(Ordering::SeqCst) {
+                        return Ok(());
+                    }
+                    if Instant::now() >= deadline {
+                        return Err(io::Error::new(io::ErrorKind::TimedOut, "测试未释放 hold 请求"));
+                    }
+                    match release_rx.recv_timeout(Duration::from_millis(10)) {
+                        Ok(()) => break,
+                        Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                        Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
+                    }
+                }
+            }
+            stream.write_all(upstream_reply(
+                200, "application/json", if held { HELD_BODY } else { NEXT_BODY },
+            ).as_bytes())
+        });
+        let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = reservation.local_addr().unwrap().port();
+        let fixture = ExitFixture::new(
+            "drain-timeout", &format!("http://127.0.0.1:{}", upstream.port()), port,
+        );
+        // 仅在真核心接管前释放随机非默认端口；生产 start 自己拒绝端口冲突。
+        drop(reservation);
+        let original_supervisor = fixture.host.with_gateway(|gateway| gateway.start()).unwrap().unwrap();
+        let original_core = retry_status(port)["pid"].clone();
+        let client = exit_request(port, "/hold");
+        seen_rx.recv_timeout(Duration::from_secs(5)).expect("假上游必须先持有在途请求");
+        let updates = UpdateService::<()>::new(false, "0.3.10".into());
+        let started = Instant::now();
+        let failure = updates.prepare_exit(&fixture.host).unwrap_err();
+        // 不缩短生产 10 秒预算；100ms 只容忍跨进程计时器的边界精度。
+        assert!(started.elapsed() >= Duration::from_millis(9900));
+        assert_eq!(failure.reason.as_str(), "drain_timeout_cancelled");
+        assert_eq!(failure.detail, "退出已取消：排空超时，网关已恢复接单；未强制结束，请稍后重试。");
+        assert_eq!(updates.view().detail, failure.detail);
+        assert!(!updates.exit_authorized());
+        assert!(!updates.controls_blocked());
+        fixture.host.with_gateway(|gateway| {
+            assert!(gateway.holds_managed(), "超时不能丢失自己持有的 Job");
+            assert_eq!(gateway.managed_supervisor_pid(), Some(original_supervisor));
+        }).unwrap();
+        let status = retry_status(port);
+        assert_eq!(status["pid"], original_core);
+        assert_eq!(status["draining"], false);
+        assert_eq!(status["activeRequests"], 1);
+        release_tx.send(()).unwrap();
+        assert_complete_response(client, HELD_BODY);
+        assert_complete_response(exit_request(port, "/after-cancel"), NEXT_BODY);
+        let status = retry_status(port);
+        assert_eq!(status["pid"], original_core, "恢复请求后仍是同一核心，不能暗中重启");
+        assert_eq!(status["draining"], false);
+        let requests = upstream.finish();
+        assert_eq!(requests.len(), 2, "原请求不可重放，新请求必须到达假上游");
+        assert!(requests[0].starts_with("GET /hold HTTP/"));
+        assert!(requests[1].starts_with("GET /after-cancel HTTP/"));
+        assert!(requests.iter().all(|headers| headers.contains("fixture-only-not-a-key")));
+        updates.prepare_exit(&fixture.host).expect("用户明确重试后可以安全退出");
+        assert!(updates.exit_authorized());
+        assert!(updates.controls_blocked());
+        fixture.host.with_gateway(|gateway| {
+            assert!(!gateway.holds_managed());
+            assert_eq!(gateway.managed_supervisor_pid(), None);
+        }).unwrap();
+        // 成功后不再按端口探测/停机；退出确认已经由真实进程句柄完成。
     }
 }
 

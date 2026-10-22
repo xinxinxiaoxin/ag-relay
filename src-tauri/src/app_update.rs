@@ -21,6 +21,125 @@ pub enum ShutdownFailure {
     Refused(String),
 }
 
+/// 退出结果只记录封闭原因码；详细错误仅用于本地界面。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExitFailureReason {
+    ExitModuleNotReady,
+    ExitAlreadyRunning,
+    UpdateModuleNotReady,
+    ExitUnauthorized,
+    ExitTaskFailed,
+    OperationBusy,
+    GatewayAccessFailed,
+    GatewayBusy,
+    DrainTimeoutCancelled,
+    StatusUnverified,
+    StatusIdentityMissing,
+    StatusInvalid,
+    SafeShutdownUnsupported,
+    SupervisorChainUnverified,
+    InstanceChanged,
+    ManagedExitedPortReoccupied,
+    ProcessHandleUnavailable,
+    DrainBudgetInvalid,
+    ShutdownConnectFailed,
+    ShutdownTimeoutSetupFailed,
+    ShutdownSendFailed,
+    ShutdownResponseInterrupted,
+    ShutdownResponseIncomplete,
+    ShutdownResponseInvalid,
+    ShutdownRejected,
+    ProcessChainExitUnconfirmed,
+    ShutdownFailureUnclassified,
+}
+impl ExitFailureReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ExitModuleNotReady => "exit_module_not_ready",
+            Self::ExitAlreadyRunning => "exit_already_running",
+            Self::UpdateModuleNotReady => "update_module_not_ready",
+            Self::ExitUnauthorized => "exit_unauthorized",
+            Self::ExitTaskFailed => "exit_task_failed",
+            Self::OperationBusy => "operation_busy",
+            Self::GatewayAccessFailed => "gateway_access_failed",
+            Self::GatewayBusy => "gateway_busy",
+            Self::DrainTimeoutCancelled => "drain_timeout_cancelled",
+            Self::StatusUnverified => "status_unverified",
+            Self::StatusIdentityMissing => "status_identity_missing",
+            Self::StatusInvalid => "status_invalid",
+            Self::SafeShutdownUnsupported => "safe_shutdown_unsupported",
+            Self::SupervisorChainUnverified => "supervisor_chain_unverified",
+            Self::InstanceChanged => "instance_changed",
+            Self::ManagedExitedPortReoccupied => "managed_exited_port_reoccupied",
+            Self::ProcessHandleUnavailable => "process_handle_unavailable",
+            Self::DrainBudgetInvalid => "drain_budget_invalid",
+            Self::ShutdownConnectFailed => "shutdown_connect_failed",
+            Self::ShutdownTimeoutSetupFailed => "shutdown_timeout_setup_failed",
+            Self::ShutdownSendFailed => "shutdown_send_failed",
+            Self::ShutdownResponseInterrupted => "shutdown_response_interrupted",
+            Self::ShutdownResponseIncomplete => "shutdown_response_incomplete",
+            Self::ShutdownResponseInvalid => "shutdown_response_invalid",
+            Self::ShutdownRejected => "shutdown_rejected",
+            Self::ProcessChainExitUnconfirmed => "process_chain_exit_unconfirmed",
+            Self::ShutdownFailureUnclassified => "shutdown_failure_unclassified",
+        }
+    }
+
+    // 与安全停机的固定文案集中对应；文案变更须同步此表，未知文本不猜测、不落盘。
+    fn shutdown_refusal(detail: &str) -> Self {
+        match detail {
+            "无法核实当前网关状态，未执行停机" => Self::StatusUnverified,
+            "网关状态缺少实例身份" => Self::StatusIdentityMissing,
+            "网关状态无效" => Self::StatusInvalid,
+            "此网关不支持有界安全停机，请先手动处理旧实例；不会强制停止" => {
+                Self::SafeShutdownUnsupported
+            }
+            "无法核实 supervisor 父链，未执行停机" => Self::SupervisorChainUnverified,
+            "端口实例已变化，未执行停机" => Self::InstanceChanged,
+            "受管网关已退出，但端口出现其它实例；未执行停机" => {
+                Self::ManagedExitedPortReoccupied
+            }
+            "无法取得网关进程句柄，未执行停机" => Self::ProcessHandleUnavailable,
+            "排空预算须为 1 到 60000 毫秒" => Self::DrainBudgetInvalid,
+            "无法连接网关，未确认停机" => Self::ShutdownConnectFailed,
+            "无法设置停机超时" => Self::ShutdownTimeoutSetupFailed,
+            "发送安全停机请求失败" => Self::ShutdownSendFailed,
+            "安全停机响应中断，未确认停机；不会强杀" => {
+                Self::ShutdownResponseInterrupted
+            }
+            "安全停机响应不完整" => Self::ShutdownResponseIncomplete,
+            "安全停机响应无效" => Self::ShutdownResponseInvalid,
+            "网关拒绝安全停机，实例或运行状态可能已变化" => {
+                Self::ShutdownRejected
+            }
+            "排空已完成，但未能确认整个网关进程链退出；未强杀，请稍后核实" => {
+                Self::ProcessChainExitUnconfirmed
+            }
+            _ => Self::ShutdownFailureUnclassified,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct ExitPreparationFailure {
+    pub reason: ExitFailureReason,
+    pub detail: String,
+}
+impl ExitPreparationFailure {
+    pub(crate) fn new(reason: ExitFailureReason, detail: impl Into<String>) -> Self {
+        Self {
+            reason,
+            detail: detail.into(),
+        }
+    }
+}
+impl std::fmt::Display for ExitPreparationFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.detail)
+    }
+}
+impl std::error::Error for ExitPreparationFailure {}
+
 /// 进程 adapter 必须调用公共安全排空，不能以活动请求数为零或 202 代替完整退出。
 pub trait UpdateGateway {
     fn identity(&mut self) -> Result<GatewayIdentity, String>;
@@ -211,18 +330,40 @@ impl<C: Clone + Send + Sync> UpdateService<C> {
         OperationState::load(&self.operation) == OperationState::ExitAuthorized
     }
 
-    pub fn prepare_exit(&self, host: &impl GatewayHost) -> Result<(), String> {
-        let _operation = self.begin_operation()?;
-        let outcome = host.with_gateway(|g| g.safe_shutdown(Duration::from_secs(10)))?;
+    pub fn prepare_exit(&self, host: &impl GatewayHost) -> Result<(), ExitPreparationFailure> {
+        let _operation = self.begin_operation().map_err(|detail| {
+            ExitPreparationFailure::new(ExitFailureReason::OperationBusy, detail)
+        })?;
+        let outcome = host
+            .with_gateway(|g| g.safe_shutdown(Duration::from_secs(10)))
+            .map_err(|detail| {
+                let reason = if detail == "网关正在执行另一项操作，请稍后重试" {
+                    ExitFailureReason::GatewayBusy
+                } else {
+                    ExitFailureReason::GatewayAccessFailed
+                };
+                ExitPreparationFailure::new(reason, detail)
+            })
+            .and_then(|outcome| {
+                outcome.map_err(|failure| match failure {
+                    ShutdownFailure::Refused(detail) => ExitPreparationFailure::new(
+                        ExitFailureReason::shutdown_refusal(&detail),
+                        detail,
+                    ),
+                    ShutdownFailure::Timeout => ExitPreparationFailure::new(
+                        ExitFailureReason::DrainTimeoutCancelled,
+                        "退出已取消：排空超时，网关已恢复接单；未强制结束，请稍后重试。",
+                    ),
+                })
+            });
         match outcome {
             Ok(_) => {
                 OperationState::ExitAuthorized.store(&self.operation);
                 Ok(())
             }
-            Err(_) => {
-                let detail = "退出已取消：安全排空尚未完成，未强制结束网关，请稍后重试。";
-                self.set_phase(UpdatePhase::Failed, detail);
-                Err(detail.into())
+            Err(failure) => {
+                self.set_phase(UpdatePhase::Failed, &failure.detail);
+                Err(failure)
             }
         }
     }
@@ -573,6 +714,194 @@ mod tests {
         fn with_gateway<T>(&self, f: impl FnOnce(&mut G) -> T) -> Result<T, String> {
             Ok(f(&mut self.0.lock().unwrap()))
         }
+    }
+
+    struct ExitGateway {
+        running: bool,
+        failure: Option<ShutdownFailure>,
+    }
+    impl UpdateGateway for ExitGateway {
+        fn identity(&mut self) -> Result<GatewayIdentity, String> {
+            Ok(GatewayIdentity {
+                running: self.running,
+                token: "退出测试实例".into(),
+            })
+        }
+        fn safe_shutdown(&mut self, timeout: Duration) -> Result<bool, ShutdownFailure> {
+            assert_eq!(timeout, Duration::from_secs(10));
+            if let Some(failure) = self.failure.take() {
+                return Err(failure);
+            }
+            let running = self.running;
+            self.running = false;
+            Ok(running)
+        }
+        fn restore(&mut self) -> Result<(), String> {
+            panic!("退出失败不能自动恢复或重启网关")
+        }
+    }
+
+    #[test]
+    fn 安全退出_拒绝原因原样保留() {
+        let detail = "无法核实当前网关状态，未执行停机";
+        let updates = UpdateService::<()>::new(false, "0.3.10".into());
+        let host = Sandbox(Mutex::new(ExitGateway {
+            running: true,
+            failure: Some(ShutdownFailure::Refused(detail.into())),
+        }));
+
+        let error = updates.prepare_exit(&host).unwrap_err();
+
+        assert_eq!(error.to_string(), detail);
+        assert_eq!(updates.view().detail, detail);
+    }
+
+    #[test]
+    fn 安全退出_排空超时说明恢复接单且可显式重试() {
+        let updates = UpdateService::<()>::new(false, "0.3.10".into());
+        let host = Sandbox(Mutex::new(ExitGateway {
+            running: true,
+            failure: Some(ShutdownFailure::Timeout),
+        }));
+
+        let error = updates.prepare_exit(&host).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "退出已取消：排空超时，网关已恢复接单；未强制结束，请稍后重试。"
+        );
+        assert_eq!(updates.view().detail, error.to_string());
+        assert!(!updates.exit_authorized());
+        assert!(!updates.controls_blocked());
+        assert!(host
+            .with_gateway(|gateway| gateway.identity().unwrap().running)
+            .unwrap());
+
+        updates.prepare_exit(&host).unwrap();
+        assert!(updates.exit_authorized());
+        assert!(!host
+            .with_gateway(|gateway| gateway.identity().unwrap().running)
+            .unwrap());
+    }
+
+    #[test]
+    fn 安全退出_获取网关失败同步说明并释放操作资格() {
+        struct BusyHost;
+        impl GatewayHost for BusyHost {
+            type Gateway = ExitGateway;
+            fn with_gateway<T>(&self, _: impl FnOnce(&mut ExitGateway) -> T) -> Result<T, String> {
+                Err("网关正在执行另一项操作，请稍后重试".into())
+            }
+        }
+        let updates = UpdateService::<()>::new(false, "0.3.10".into());
+
+        let error = updates.prepare_exit(&BusyHost).unwrap_err();
+
+        assert_eq!(error.to_string(), "网关正在执行另一项操作，请稍后重试");
+        assert_eq!(updates.view().detail, error.to_string());
+        assert_eq!(updates.view().phase, UpdatePhase::Failed);
+        assert!(!updates.exit_authorized());
+        assert!(!updates.controls_blocked());
+    }
+
+    #[test]
+    fn 安全退出_具体拒绝保留原文并生成封闭原因码() {
+        for (detail, reason) in [
+            ("无法核实当前网关状态，未执行停机", "status_unverified"),
+            ("网关状态缺少实例身份", "status_identity_missing"),
+            ("网关状态无效", "status_invalid"),
+            (
+                "此网关不支持有界安全停机，请先手动处理旧实例；不会强制停止",
+                "safe_shutdown_unsupported",
+            ),
+            (
+                "无法核实 supervisor 父链，未执行停机",
+                "supervisor_chain_unverified",
+            ),
+            ("端口实例已变化，未执行停机", "instance_changed"),
+            (
+                "受管网关已退出，但端口出现其它实例；未执行停机",
+                "managed_exited_port_reoccupied",
+            ),
+            (
+                "无法取得网关进程句柄，未执行停机",
+                "process_handle_unavailable",
+            ),
+            ("排空预算须为 1 到 60000 毫秒", "drain_budget_invalid"),
+            ("无法连接网关，未确认停机", "shutdown_connect_failed"),
+            ("无法设置停机超时", "shutdown_timeout_setup_failed"),
+            ("发送安全停机请求失败", "shutdown_send_failed"),
+            (
+                "安全停机响应中断，未确认停机；不会强杀",
+                "shutdown_response_interrupted",
+            ),
+            ("安全停机响应不完整", "shutdown_response_incomplete"),
+            ("安全停机响应无效", "shutdown_response_invalid"),
+            (
+                "网关拒绝安全停机，实例或运行状态可能已变化",
+                "shutdown_rejected",
+            ),
+            (
+                "排空已完成，但未能确认整个网关进程链退出；未强杀，请稍后核实",
+                "process_chain_exit_unconfirmed",
+            ),
+            (
+                "未知错误：fixture-only-not-a-key C:\\private\\fixture",
+                "shutdown_failure_unclassified",
+            ),
+            (
+                "外部错误提到排空超时，但不是核心确认",
+                "shutdown_failure_unclassified",
+            ),
+        ] {
+            let updates = UpdateService::<()>::new(false, "0.3.10".into());
+            let host = Sandbox(Mutex::new(ExitGateway {
+                running: true,
+                failure: Some(ShutdownFailure::Refused(detail.into())),
+            }));
+
+            let error = updates.prepare_exit(&host).unwrap_err();
+
+            assert_eq!(error.reason.as_str(), reason, "{detail}");
+            assert_eq!(error.detail, detail);
+            assert_eq!(updates.view().detail, detail);
+            assert!(!updates.exit_authorized());
+            assert!(!updates.controls_blocked());
+        }
+    }
+
+    #[test]
+    fn 安全退出_未知原因记录只含封闭码不泄漏错误原文() {
+        use crate::app_exit::{log_exit_outcome_in, ExitOutcome, ExitSource, EXIT_LOG_FILE};
+        let detail = "未知错误：fixture-only-not-a-key C:\\private\\fixture\ninjected=not-an-event";
+        let updates = UpdateService::<()>::new(false, "0.3.10".into());
+        let host = Sandbox(Mutex::new(ExitGateway {
+            running: true,
+            failure: Some(ShutdownFailure::Refused(detail.into())),
+        }));
+        let error = updates.prepare_exit(&host).unwrap_err();
+        let base = std::env::temp_dir().join(format!(
+            "ag-relay-exit-private-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+
+        log_exit_outcome_in(
+            &base,
+            0,
+            Some(ExitSource::PanelButton),
+            ExitOutcome::Failed(error.reason),
+        );
+        let record =
+            std::fs::read_to_string(crate::gateway_control::logs_dir(&base).join(EXIT_LOG_FILE));
+        let _ = std::fs::remove_dir_all(&base);
+
+        assert_eq!(error.detail, detail);
+        assert_eq!(record.unwrap(), "1970-01-01T00:00:00Z event=safe_exit_failed reason=shutdown_failure_unclassified exit_source=panel_button\n");
+        assert!(!updates.exit_authorized());
     }
 
     #[test]
@@ -1017,12 +1346,16 @@ mod tests {
             ready.recv_timeout(Duration::from_secs(10)).unwrap();
             let blocked = updates.controls_blocked();
             let second = tauri::async_runtime::block_on(updates.confirm(&duplicate, &host, &id));
+            let before_exit = updates.view();
             let exit = updates.prepare_exit(&host);
+            let after_exit = updates.view();
             resume.send(()).unwrap();
             assert!(first.join().unwrap().is_err());
             assert!(blocked);
             assert!(second.is_err());
-            assert!(exit.is_err());
+            assert_eq!(exit.unwrap_err().reason, ExitFailureReason::OperationBusy);
+            assert_eq!(after_exit.phase, before_exit.phase);
+            assert_eq!(after_exit.detail, before_exit.detail);
         });
         assert_eq!(duplicate.downloads.load(Ordering::SeqCst), 0);
         assert!(host.0.lock().unwrap().running);

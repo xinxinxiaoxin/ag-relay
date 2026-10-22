@@ -1,6 +1,7 @@
 //! 关闭选择与应用退出接线。关窗先保留请求供面板选择，不停止网关。
 //! 真正退出统一经过更新互斥模块；排空失败保留窗口与受管句柄。
 
+use crate::app_update::ExitFailureReason;
 use crate::bounded_log::{append_record, LogPolicy};
 use crate::exit_requests::{CloseRequests, CloseWindow, ExitRequests};
 
@@ -138,6 +139,48 @@ pub fn format_exit_record(unix_secs: u64, source: ExitSource) -> String {
     )
 }
 
+/// 授权成功不等同于桌面进程已经退出；失败只携带封闭原因码。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExitOutcome {
+    Authorized,
+    Failed(ExitFailureReason),
+}
+
+pub fn format_exit_outcome_record(
+    unix_secs: u64,
+    source: Option<ExitSource>,
+    outcome: ExitOutcome,
+) -> String {
+    let event = match outcome {
+        ExitOutcome::Authorized => "event=safe_exit_authorized".into(),
+        ExitOutcome::Failed(reason) => format!("event=safe_exit_failed reason={}", reason.as_str()),
+    };
+    let source = source
+        .map(|source| format!(" exit_source={}", source.as_str()))
+        .unwrap_or_default();
+    format!("{} {event}{source}", format_utc_timestamp(unix_secs))
+}
+
+/// 时间、路径可注入；日志不可写时也不得改变退出的实际结果。
+pub fn log_exit_outcome_in(
+    app_data: &std::path::Path,
+    unix_secs: u64,
+    source: Option<ExitSource>,
+    outcome: ExitOutcome,
+) {
+    let _ = append_shell_record_in(
+        app_data,
+        &format_exit_outcome_record(unix_secs, source, outcome),
+    );
+}
+
+pub fn log_exit_outcome(app: &AppHandle, source: Option<ExitSource>, outcome: ExitOutcome) {
+    let Ok(app_data) = app.path().app_data_dir() else {
+        return;
+    };
+    log_exit_outcome_in(&app_data, now_unix_secs(), source, outcome);
+}
+
 /// 外部网关停止事件（F1 白名单扩展；与退出来源写入同一 shell-exit.log，
 /// 只允许这三个枚举值，不写任何其他内容）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -206,9 +249,7 @@ pub fn request_exit(
     app: &AppHandle,
     source: ExitSource,
 ) -> impl std::future::Future<Output = Result<(), String>> + Send + 'static {
-    let exit = crate::update_commands::request_exit(app);
-    log_exit_source(app, source);
-    exit
+    crate::update_commands::request_exit(app, Some(source))
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -219,10 +260,7 @@ struct ExitFailure {
 /// 系统与托盘回调不能 await；先同步抢占，再等待同一结果并把失败呈现在主窗口。
 /// None 仅供没有可审计用户来源的 RunEvent::ExitRequested 使用。
 pub fn request_exit_from_event(app: &AppHandle, source: Option<ExitSource>) {
-    let exit = crate::update_commands::request_exit(app);
-    if let Some(source) = source {
-        log_exit_source(app, source);
-    }
+    let exit = crate::update_commands::request_exit(app, source);
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         if let Err(detail) = exit.await {
@@ -296,11 +334,77 @@ mod tests {
         std::fs::write(&path, &old).unwrap();
         append_shell_record_in(&base, &format_exit_record(0, ExitSource::WindowClose)).unwrap();
         append_shell_record_in(&base, &format_exit_record(1, ExitSource::PanelButton)).unwrap();
+        log_exit_outcome_in(
+            &base,
+            2,
+            Some(ExitSource::PanelButton),
+            ExitOutcome::Failed(ExitFailureReason::SupervisorChainUnverified),
+        );
         let result = std::fs::read_to_string(&path).unwrap();
         let backup = std::fs::read_to_string(logs_dir(&base).join("shell-exit.log.1"));
         std::fs::remove_dir_all(&base).unwrap();
-        assert_eq!(result, "1970-01-01T00:00:00Z exit_source=window_close\n1970-01-01T00:00:01Z exit_source=panel_button\n");
+        assert_eq!(result, "1970-01-01T00:00:00Z exit_source=window_close\n1970-01-01T00:00:01Z exit_source=panel_button\n1970-01-01T00:00:02Z event=safe_exit_failed reason=supervisor_chain_unverified exit_source=panel_button\n");
         assert_eq!(backup.unwrap(), old);
+    }
+
+    #[test]
+    fn 退出结果_区分失败与授权且不伪造系统事件来源() {
+        assert_eq!(
+            format_exit_outcome_record(0, Some(ExitSource::TrayMenu), ExitOutcome::Authorized),
+            "1970-01-01T00:00:00Z event=safe_exit_authorized exit_source=tray_menu"
+        );
+        assert_eq!(
+            format_exit_outcome_record(0, Some(ExitSource::WindowClose), ExitOutcome::Failed(ExitFailureReason::ProcessChainExitUnconfirmed)),
+            "1970-01-01T00:00:00Z event=safe_exit_failed reason=process_chain_exit_unconfirmed exit_source=window_close"
+        );
+        assert_eq!(
+            format_exit_outcome_record(
+                0,
+                None,
+                ExitOutcome::Failed(ExitFailureReason::DrainTimeoutCancelled)
+            ),
+            "1970-01-01T00:00:00Z event=safe_exit_failed reason=drain_timeout_cancelled"
+        );
+    }
+
+    #[test]
+    fn 退出结果_路径不可写或锁忙时不阻塞且稍后仍可写入() {
+        let base = std::env::temp_dir().join(format!(
+            "ag-relay-exit-unwritable-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+        let blocked = base.join("not-a-directory");
+        std::fs::write(&blocked, "keep").unwrap();
+        log_exit_outcome_in(&blocked, 0, None, ExitOutcome::Authorized);
+        assert_eq!(std::fs::read_to_string(&blocked).unwrap(), "keep");
+
+        log_exit_outcome_in(
+            &base,
+            0,
+            None,
+            ExitOutcome::Failed(ExitFailureReason::StatusUnverified),
+        );
+        let path = logs_dir(&base).join(EXIT_LOG_FILE);
+        let lock = std::fs::OpenOptions::new()
+            .write(true)
+            .open(logs_dir(&base).join("shell-exit.log.lock"))
+            .unwrap();
+        lock.lock().unwrap();
+        log_exit_outcome_in(&base, 1, None, ExitOutcome::Authorized);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "1970-01-01T00:00:00Z event=safe_exit_failed reason=status_unverified\n"
+        );
+        drop(lock);
+        log_exit_outcome_in(&base, 2, None, ExitOutcome::Authorized);
+        let result = std::fs::read_to_string(&path);
+        let _ = std::fs::remove_dir_all(&base);
+        assert_eq!(result.unwrap(), "1970-01-01T00:00:00Z event=safe_exit_failed reason=status_unverified\n1970-01-01T00:00:02Z event=safe_exit_authorized\n");
     }
 
     #[test]
