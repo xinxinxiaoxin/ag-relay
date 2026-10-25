@@ -174,6 +174,7 @@ fn 边界合法值_上下限及关闭依赖选项可保存() {
             profile.base_delay_ms = delay;
             profile.max_delay_ms = delay;
             profile.total_budget_ms = budget;
+            profile.connect_timeout_ms = budget.min(600_000);
             profile.empty_response_normalize_after = normalize;
             profile.empty_response_reasoning_after = reasoning;
             profile.history_mode = HistoryMode::Off;
@@ -207,6 +208,8 @@ fn 非法策略_读写均拒绝并保留上次有效设置() {
             ("maxDelayMs", json!(300001)),
             ("totalBudgetMs", json!(999)),
             ("totalBudgetMs", json!(3600001)),
+            ("connectTimeoutMs", json!(999)),
+            ("connectTimeoutMs", json!(600001)),
             ("historyConfirmations", json!(0)),
             ("emptyResponseNormalizeAfter", json!(0)),
             ("emptyResponseNormalizeAfter", json!(1001)),
@@ -308,7 +311,8 @@ fn 策略缺失_只读返回分组默认且不创建文件() {
         assert_eq!(profile["maxAttempts"], 110);
         assert_eq!(profile["baseDelayMs"], 500);
         assert_eq!(profile["maxDelayMs"], 1000);
-        assert_eq!(profile["totalBudgetMs"], 300000);
+        assert_eq!(profile["totalBudgetMs"], 500000);
+        assert_eq!(profile["connectTimeoutMs"], 220000);
         assert_eq!(profile["historyMode"], "on_error");
         assert_eq!(profile["historyConfirmations"], 1);
         assert_eq!(profile["rememberSession"], true);

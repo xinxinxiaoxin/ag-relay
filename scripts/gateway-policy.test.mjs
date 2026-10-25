@@ -27,7 +27,7 @@ const history = {
 // 产品默认值来自已批准的配置契约；只缩短本测试的重试参数。
 function policy(codex = {}, general = {}) {
   const defaults = {
-    maxAttempts: 5, baseDelayMs: 10, maxDelayMs: 10, totalBudgetMs: 10000,
+    maxAttempts: 5, baseDelayMs: 10, maxDelayMs: 10, totalBudgetMs: 10000, connectTimeoutMs: 2000,
     historyMode: 'on_error', historyConfirmations: 1,
     stripItemIds: true, rememberSession: true, repairStatus: true, retryHistory: true,
     emptyResponseRepair: false, emptyResponseDropReasoning: false,

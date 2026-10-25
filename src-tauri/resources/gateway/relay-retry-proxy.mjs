@@ -41,7 +41,7 @@ const cfg = {
   deployDelayMs: num(process.env.PROXY_DEPLOY_DELAY_MS, 800),  // 通道抖动用更短间隔，快速换通道
   // 响应头等待与重试准入预算；已经下发的流使用独立进展超时。
   // 不按总耗时截断仍在生成正文、推理或工具参数的长请求。
-  totalBudgetMs: num(process.env.PROXY_TOTAL_BUDGET_MS, 170000),
+  totalBudgetMs: num(process.env.PROXY_TOTAL_BUDGET_MS, 500000),
   baseDelayMs: num(process.env.PROXY_BASE_DELAY_MS, 2000),
   maxDelayMs: num(process.env.PROXY_MAX_DELAY_MS, 30000),
   peekIdleMs: num(process.env.PROXY_PEEK_IDLE_MS, 45000),   // 单次读取最长等待
@@ -54,11 +54,9 @@ const cfg = {
   streamProgressMs: num(process.env.PROXY_STREAM_PROGRESS_MS, 180000),
   // Responses completion events may contain the entire generated output.
   sseBufferMaxBytes: num(process.env.PROXY_SSE_BUFFER_MAX_BYTES, 64 * 1024 * 1024),
-  // 等待上游响应头的基础时长。
-  // 关键教训：长对话的预填充本来就慢（几十秒很正常），这不是故障。
-  // 之前默认 30s 会把健康的长请求当故障掐断，然后陷入「掐断→重试→再掐断」的死循环，
-  // 用户看到的就是对话一长就疯狂报错。所以默认给得很宽，靠总预算兜底。
-  connectTimeoutMs: num(process.env.PROXY_CONNECT_TIMEOUT_MS, 150000),
+  // 等待上游响应头的基础时长。拥堵时上游可能 150–230 秒才回首个字节，
+  // 默认给 220 秒，避免把本来能到的请求提前掐断；可在桌面策略里单独调整。
+  connectTimeoutMs: num(process.env.PROXY_CONNECT_TIMEOUT_MS, 220000),
   // 请求体越大（上下文越长），预填充越慢；每多 1MB 再额外放宽这么多。
   connectTimeoutPerMbMs: num(process.env.PROXY_CONNECT_TIMEOUT_PER_MB_MS, 30000),
   // 重试前至少要有这么多剩余预算，否则这次重试没意义（只会白等一轮）。
@@ -85,6 +83,7 @@ function defaultPolicyProfile(codex) {
   return {
     maxAttempts: cfg.maxAttempts, baseDelayMs: cfg.baseDelayMs,
     maxDelayMs: cfg.maxDelayMs, totalBudgetMs: cfg.totalBudgetMs,
+    connectTimeoutMs: cfg.connectTimeoutMs,
     historyMode: 'on_error', historyConfirmations: 1,
     stripItemIds: codex && cfg.codexStripIds, rememberSession: cfg.sessionCompat,
     repairStatus: true, retryHistory: codex && cfg.codexResourceRetry,
@@ -118,6 +117,8 @@ function compilePolicy(raw) {
     integer('baseDelayMs', 1, 300000);
     integer('maxDelayMs', 1, 300000);
     integer('totalBudgetMs', 1000, 3600000);
+    integer('connectTimeoutMs', 1000, 600000);
+    if (profile.connectTimeoutMs > profile.totalBudgetMs) reject(`${name}.connectTimeoutMs`);
     integer('historyConfirmations', 1, name === 'codex' ? 4 : 1000);
     integer('emptyResponseNormalizeAfter', 1, 1000);
     integer('emptyResponseReasoningAfter', 1, 1000);
@@ -626,9 +627,9 @@ const snippet = (b) => String(b).replace(/\s+/g, ' ').slice(0, 160);
  * 小请求 30s（快速失败、换通道重试很划算）；
  * 大请求即长上下文，预填充本来就慢，按每 MB 放宽，上限为总预算。
  */
-function connectTimeoutFor(bodyBytes, totalBudgetMs = cfg.totalBudgetMs) {
+function connectTimeoutFor(bodyBytes, totalBudgetMs = cfg.totalBudgetMs, connectTimeoutMs = cfg.connectTimeoutMs) {
   const mb = Math.max(0, bodyBytes) / (1024 * 1024);
-  const scaled = cfg.connectTimeoutMs + mb * cfg.connectTimeoutPerMbMs;
+  const scaled = connectTimeoutMs + mb * cfg.connectTimeoutPerMbMs;
   return Math.max(1000, Math.min(totalBudgetMs, scaled));
 }
 
@@ -1269,7 +1270,7 @@ async function handle(req, res, state) {
   const retrySleep = (ms) => eligibleCodex && historyRepairApplied && postRepairSends >= 3
     ? Promise.resolve() : sleep(ms, ac.signal);
   // 大请求（长对话）要等更久才等到首个响应头
-  const attemptTimeoutMs = connectTimeoutFor(body.length, policy.totalBudgetMs);
+  const attemptTimeoutMs = connectTimeoutFor(body.length, policy.totalBudgetMs, policy.connectTimeoutMs);
   log(`incoming ${req.method} ${req.url} body=${(body.length / 1024).toFixed(0)}KB ` +
       `waitHeader=${Math.round(attemptTimeoutMs / 1000)}s budget=${Math.round(policy.totalBudgetMs / 1000)}s`);
 
@@ -1499,7 +1500,7 @@ async function handle(req, res, state) {
           return sendRetryable(res, 503, lastReason, attempt, policy);
         }
         lastReason = connectTimedOut
-          ? `upstream connect timeout after ${cfg.connectTimeoutMs}ms`
+          ? `upstream connect timeout after ${attemptTimeoutMs}ms`
           : `upstream connect failed: ${describeFetchError(e)}`;
         log(`attempt ${attempt}: ${lastReason}`);
         // 连接超时/失败属于通道抖动：放宽次数、缩短间隔，快速换通道

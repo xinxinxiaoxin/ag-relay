@@ -90,6 +90,8 @@ test('保存拒绝非法整数、时间与依赖关系，合法边界值可透�
       ['codex', { maxAttempts: 0 }], ['general', { maxAttempts: 1001 }], ['codex', { maxAttempts: 1.5 }],
       ['codex', { baseDelayMs: 0 }], ['general', { maxDelayMs: 300001 }], ['codex', { baseDelayMs: 1500 }],
       ['codex', { totalBudgetMs: 999 }], ['general', { totalBudgetMs: 3600001 }],
+      ['codex', { connectTimeoutMs: 999 }], ['general', { connectTimeoutMs: 600001 }],
+      ['codex', { totalBudgetMs: 1000, connectTimeoutMs: 2000 }],
       ['codex', { historyConfirmations: 5 }], ['general', { maxAttempts: 2, historyConfirmations: 3 }],
       ['general', { emptyResponseNormalizeAfter: 6, emptyResponseReasoningAfter: 6 }],
       ['general', { emptyResponseRepair: false, emptyResponseDropReasoning: true }],
@@ -102,7 +104,7 @@ test('保存拒绝非法整数、时间与依赖关系，合法边界值可透�
     }
     assert.equal(writes, 0)
     const valid = structuredClone(defaults)
-    Object.assign(valid.profiles.codex, { maxAttempts: 1000, historyConfirmations: 4, baseDelayMs: 1, maxDelayMs: 300000, totalBudgetMs: 3600000 })
+    Object.assign(valid.profiles.codex, { maxAttempts: 1000, historyConfirmations: 4, baseDelayMs: 1, maxDelayMs: 300000, totalBudgetMs: 3600000, connectTimeoutMs: 600000 })
     Object.assign(valid.profiles.general, { maxAttempts: 1000, historyConfirmations: 1000 })
     assert.deepEqual((await savePolicySettings(valid)).saved, valid)
     assert.equal(writes, 1)

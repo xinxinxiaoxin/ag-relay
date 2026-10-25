@@ -9,6 +9,7 @@ export interface PolicyProfile {
   baseDelayMs: number
   maxDelayMs: number
   totalBudgetMs: number
+  connectTimeoutMs: number
   historyMode: PolicyMode
   historyConfirmations: number
   stripItemIds: boolean

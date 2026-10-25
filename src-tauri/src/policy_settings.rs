@@ -17,6 +17,8 @@ pub struct PolicyProfile {
     pub base_delay_ms: u64,
     pub max_delay_ms: u64,
     pub total_budget_ms: u64,
+    /// 单次尝试等待上游响应头的上限（毫秒）；请求体更大时核心还会按体积追加。
+    pub connect_timeout_ms: u64,
     pub history_mode: HistoryMode,
     pub history_confirmations: u32,
     pub strip_item_ids: bool,
@@ -55,6 +57,12 @@ impl PolicyProfile {
         if !(1000..=3_600_000).contains(&self.total_budget_ms) {
             return fail("总时间预算须为 1000 到 3600000 毫秒");
         }
+        if !(1000..=600_000).contains(&self.connect_timeout_ms) {
+            return fail("单次等待上限须为 1 到 600 秒");
+        }
+        if self.connect_timeout_ms > self.total_budget_ms {
+            return fail("单次等待上限不能大于总时间预算");
+        }
         if !(1..=1000).contains(&self.empty_response_normalize_after)
             || !(1..=1000).contains(&self.empty_response_reasoning_after)
             || self.empty_response_reasoning_after <= self.empty_response_normalize_after
@@ -89,6 +97,7 @@ impl PolicyProfile {
             base_delay_ms: retry_default("PROXY_BASE_DELAY_MS"),
             max_delay_ms: retry_default("PROXY_MAX_DELAY_MS"),
             total_budget_ms: retry_default("PROXY_TOTAL_BUDGET_MS"),
+            connect_timeout_ms: retry_default("PROXY_CONNECT_TIMEOUT_MS"),
             history_mode: HistoryMode::OnError,
             history_confirmations: 1,
             strip_item_ids: codex,

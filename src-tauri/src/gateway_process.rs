@@ -916,14 +916,14 @@ mod tests {
 
             // 独立真值：sha256sum 对本仓当前核心资源的结果（#22 有界日志 + #23 安全停机）。
             // 核心变更时显式更新，保持「运行的是打包脚本」的精确契约，不以长度检查代替。
-            assert_eq!(status.loaded_version, "9f2c196d2a2077fda192e41bb903222f3f8d87bb8d5c3b571f6159db01a299b8");
+            assert_eq!(status.loaded_version, "d9e6343175b5d0e619b7afe1227b2d3016301a743120d1da18b15cb48e9b7dfc");
             // supervisor 链路成立（gateway 由 supervisor fork，PROXY_SUPERVISED 由它自己注入）
             assert!(status.supervisor_enabled, "网关应处于 supervisor 托管模式");
             // status.config 暴露的配置项与环境变量表逐项对上（端到端证明环境变量生效；
             // max_attempts 默认值是 5，110 只能来自 PROXY_MAX_ATTEMPTS）
             assert_eq!(status.config.max_attempts, 110, "PROXY_MAX_ATTEMPTS 未生效");
-            assert_eq!(status.config.total_budget_ms, 300_000, "PROXY_TOTAL_BUDGET_MS 未生效");
-            assert_eq!(status.config.connect_timeout_ms, 150_000, "PROXY_CONNECT_TIMEOUT_MS 未生效");
+            assert_eq!(status.config.total_budget_ms, 500_000, "PROXY_TOTAL_BUDGET_MS 未生效");
+            assert_eq!(status.config.connect_timeout_ms, 220_000, "PROXY_CONNECT_TIMEOUT_MS 未生效");
             assert_eq!(status.config.status_interval_ms, 20_000, "PROXY_STATUS_INTERVAL_MS 未生效");
             assert_eq!(status.config.stream_idle_ms, 90_000, "PROXY_STREAM_IDLE_MS 未生效");
             assert_eq!(status.config.stream_progress_ms, 180_000, "PROXY_STREAM_PROGRESS_MS 未生效");

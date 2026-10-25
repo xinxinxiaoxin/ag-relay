@@ -120,6 +120,7 @@ export function PolicyPage({ editor, snapshot, onAction }: {
                   {field('baseDelayMs', '起始等待（秒）')}
                   {field('maxDelayMs', '最长等待（秒）')}
                   {field('totalBudgetMs', '总时间预算（秒）')}
+                  {field('connectTimeoutMs', '单次等待上限（秒）', '等待上游响应头的最长时间。请求体越大，核心会按体积再追加等待；不能大于总时间预算。')}
                 </div>
                 <details><summary className="w-fit cursor-pointer rounded text-xs text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring">其他重试限制与安全边界</summary>
                   <div className={`mt-2 space-y-2 ${hintClass}`}>

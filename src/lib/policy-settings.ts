@@ -13,9 +13,9 @@ export function savePolicySettings(settings: PolicySettings): Promise<PolicySett
 }
 
 export const policyGroupNames: Record<PolicyGroup, string> = { codex: 'Codex', general: 'Claude / Zcode' }
-const numberFields = ['maxAttempts', 'baseDelayMs', 'maxDelayMs', 'totalBudgetMs', 'historyConfirmations', 'emptyResponseNormalizeAfter', 'emptyResponseReasoningAfter'] as const
+const numberFields = ['maxAttempts', 'baseDelayMs', 'maxDelayMs', 'totalBudgetMs', 'connectTimeoutMs', 'historyConfirmations', 'emptyResponseNormalizeAfter', 'emptyResponseReasoningAfter'] as const
 export type PolicyNumberField = typeof numberFields[number]
-const timeFields = new Set<PolicyNumberField>(['baseDelayMs', 'maxDelayMs', 'totalBudgetMs'])
+const timeFields = new Set<PolicyNumberField>(['baseDelayMs', 'maxDelayMs', 'totalBudgetMs', 'connectTimeoutMs'])
 // 时间在草稿中以“秒”编辑，提交时精确换成整数毫秒；其余数值以次数编辑。
 export type PolicyDraftProfile = Omit<PolicyProfile, PolicyNumberField> & Record<PolicyNumberField, string>
 export interface PolicyDraft { schemaVersion: 1; profiles: Record<PolicyGroup, PolicyDraftProfile> }
@@ -53,6 +53,8 @@ export function policySettingsError(settings: PolicySettings): string | null {
     if (!integer(p.baseDelayMs, 1, 300000) || !integer(p.maxDelayMs, 1, 300000)) return `${prefix}等待须为 0.001–300 秒，最多三位小数（整数毫秒）。`
     if (p.baseDelayMs > p.maxDelayMs) return `${prefix}起始等待不能大于最长等待。`
     if (!integer(p.totalBudgetMs, 1000, 3600000)) return `${prefix}总时间预算须为 1–3600 秒，最多三位小数。`
+    if (!integer(p.connectTimeoutMs, 1000, 600000)) return `${prefix}单次等待上限须为 1–600 秒，最多三位小数。`
+    if (p.connectTimeoutMs > p.totalBudgetMs) return `${prefix}单次等待上限不能大于总时间预算。`
     if (!['off', 'on_error', 'always'].includes(p.historyMode)) return `${prefix}历史兼容处理时机无效。`
     if (!integer(p.historyConfirmations, 1, group === 'codex' ? 4 : 1000)) return `${prefix}历史错误确认次数须为 1–${group === 'codex' ? 4 : 1000} 的整数。`
     if (p.historyConfirmations > p.maxAttempts) return `${prefix}历史错误确认次数不能大于常规尝试次数。`
