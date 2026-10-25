@@ -172,7 +172,28 @@ node scripts/release.mjs test-build --out C:\Temp\ag-relay-test-artifacts
 
 注：网关核心的四个 `.mjs` 与 `gateway-config.bat` 已由 `.gitattributes` 固定为不做换行符转换（`-text`），因此任何机器上检出内容与仓库内容一致、哈希唯一。此前 `.bat` 未固定：仓库内容为 LF、Windows 检出为 CRLF，两者哈希不同。下表 v0.2.0/v0.3.1 条目记录的是当时**磁盘检出**（CRLF）的值 `102865c8…`，属历史留档不回填；v0.3.2 及以后记录的是**仓库内容**（LF）的值 `9a8a483e…`。
 
-### v0.3.13（当前）
+### v0.3.14（当前）
+
+| 项 | 值 |
+| --- | --- |
+| 打包日期 | 2026-10-25 16:55（UTC+8） |
+| 发布日期 | 2026-10-25 16:58（UTC+8） |
+| 本仓构建提交 | `495cd0be725c5ab596422abc60a6b96774aec1c3`（tag `v0.3.14`，在干净工作区构建） |
+| 构建方式 | 维护者本机，原生产更新签名；不运行安装器 |
+| 验证 | Node 网关隔离 65 项（5 项既有跳过）与策略 118 项、Rust 环境/策略/连接/网关共 60 项（1 项既有手动观察忽略）、前端策略与组件 8 项通过；正式预检、两种安装器更新签名、版本绑定、随包许可与本机路径隐私检查通过；7 个上传文件摘要与本地一致；匿名 latest 清单返回 0.3.14；未执行本机安装/升级 |
+| `relay-retry-proxy.mjs` sha256 | `d9e6343175b5d0e619b7afe1227b2d3016301a743120d1da18b15cb48e9b7dfc` |
+| `relay-supervisor.mjs` sha256 | `f2f030b46999f84afc77f7f92643075c1d1f1ddf7ad3c327fbd92f5593dff77c` |
+| `relay-start-check.mjs` sha256 | `bb54cc7255b4f570ba1bdcfda255f19f0ca0a70fa6d028d0ed4e44f8146037c4` |
+| `bounded-file-log.mjs` sha256 | `3841b877ce76e6ff37497bfbcd65e3dd4f478442dc7fff9eaf4b39612b25c205` |
+| `gateway-config.bat` sha256 | `5eff32b941b63708fa64104f09d7e28e15ff8dd569a49dc5c9d40bb1859b84f7` |
+| `ag-relay_0.3.14_x64-setup.exe` sha256 | `2eebc16d4ae01057bb76660dfc90627654cdc22f475fcfe7035acf32bc930e09` |
+| `ag-relay_0.3.14_x64_zh-CN.msi` sha256 | `5ea535e3fed90c9bb95befaf20eabaddd3cd93ce56a8899679cd055616b8a33f` |
+| `third-party-sources.tar.gz` sha256 | `334c7621ef3dc300cc2c13806afe8c3755940c8517ab939baf91a062658b0d34` |
+| Release | [v0.3.14](https://github.com/xinxinxiaoxin/ag-relay/releases/tag/v0.3.14)（NSIS + MSI + 各自 `.sig` + `latest.json` + `SHA256SUMS` + 第三方源码附件） |
+
+上游拥堵时段首个字节常需 150–233 秒，原来的 150 秒基础上限会把本来能到的请求提前中止，再重发重等；300 秒总预算又让第二次尝试只剩约 100 秒。本次把单次等待上限提高到 220 秒、总预算提高到 500 秒，并把单次等待上限纳入「重试与剥离」页面供按组调整（默认 220 秒，1–600 秒，不得大于总预算）。已开始输出内容的流仍不受总预算截断。说明见 [v0.3.14](docs/releases/v0.3.14.md)，构建详情见 [构建记录](docs/releases/v0.3.14-build.md)。
+
+### v0.3.13（历史）
 
 | 项 | 值 |
 | --- | --- |
