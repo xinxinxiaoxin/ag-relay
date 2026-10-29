@@ -12,7 +12,7 @@
  *   1. 在本地先自己对这两类失败做指数退避重试；
  *   2. 本地重试仍失败时，改写成一个真正的 429（带 retry-after），
  *      交给 ZCode 自身的重试机制继续兜底。
- *   3. 先缓冲开场事件，直到出现内容/输出条目才下发；
+ *   3. 先缓冲开场与已知空占位事件，真实内容或工具开始后才下发（未知载荷保守交付）；
  *      下发前错误可处理，下发后错误只能透传，不能保证整条流成功。
  *
  * 用法：
@@ -824,6 +824,12 @@ function requestProfile(bodyBuf, headers) {
   };
 }
 
+function responsePartHasContent(part) {
+  if (part?.type === 'output_text') return nonEmptyStr(part.text);
+  if (part?.type === 'refusal') return nonEmptyStr(part.refusal);
+  return true; // 未知载荷保守交付，不能把可能的真实输出当作空占位重放。
+}
+
 /**
  * 该事件是否携带「真实内容」。只有它出现，才认为上游确实开始正常回复。
  *
@@ -868,7 +874,19 @@ function contentBearing(obj) {
   // ── OpenAI Responses 风格 ──
   if (t === 'response.completed') return true;
   if (t.endsWith('.delta') && nonEmptyStr(obj.delta)) return true;
-  if (t === 'response.output_item.added' || t === 'response.content_part.added') return true;
+  if (t === 'response.output_item.added' && obj.item?.type === 'reasoning') {
+    const item = obj.item;
+    return nonEmptyStr(item.encrypted_content) || [item.summary, item.content].some((parts) =>
+      parts != null && (!Array.isArray(parts) || parts.some((part) =>
+        !['summary_text', 'reasoning_text'].includes(part?.type) || nonEmptyStr(part.text))));
+  }
+  if (t === 'response.output_item.added' && obj.item?.type === 'message') {
+    const parts = obj.item.content;
+    return parts != null && (!Array.isArray(parts) || parts.some(responsePartHasContent));
+  }
+  if (t === 'response.content_part.added') return responsePartHasContent(obj.part);
+  // 工具、搜索和未知条目仍在开始交付时锁定，避免重复执行。
+  if (t === 'response.output_item.added') return true;
 
   if (nonEmptyStr(obj.content) || nonEmptyStr(obj.text)) return true;
 

@@ -57,7 +57,8 @@ async function fixture(t, respond, config = {}, script = core) {
       const raw = Buffer.concat(chunks).toString('utf8')
       const body = JSON.parse(raw)
       captured.push({ raw, body })
-      const reply = await respond(body, captured.length, req)
+      const reply = await respond(body, captured.length, req, res)
+      if (reply === undefined) return // 流式用例自行控制分包和结束时机。
       res.writeHead(reply.status, { 'content-type': reply.type ?? 'application/json', connection: 'close' })
       res.end(typeof reply.body === 'string' ? reply.body : JSON.stringify(reply.body))
     } catch (error) {
@@ -305,6 +306,78 @@ test('错误分类 SSE诊断指纹不把trace编号当作故障原因', async t 
   assert.ok(failure)
   assert.equal(failure.hints, 'encrypted', '诊断应与真实原因一致，而不是提取编号里的关键词')
   assert.equal(failure.retryable, false)
+})
+
+const streamEvent = obj => `event: ${obj.type}\ndata: ${JSON.stringify(obj)}\n\n`
+const streamRateLimit = streamEvent({
+  type: 'response.failed',
+  response: { status: 'failed', error: { code: 'rate_limit_exceeded', message: 'fixture token rate limit exceeded' } },
+})
+const streamRecovery = streamEvent({ type: 'response.output_text.delta', delta: 'fixture recovered' })
+  + streamEvent({ type: 'response.completed', response: { status: 'completed' } })
+
+const emptyStreamItems = [
+  ['空推理', { type: 'reasoning', id: 'rs_empty', summary: [] }],
+  ['空消息', { type: 'message', id: 'msg_empty', role: 'assistant', status: 'in_progress', content: [] }],
+]
+
+const emptyStreamEvents = [
+  ...emptyStreamItems.map(([name, item]) => [name, { type: 'response.output_item.added', output_index: 0, item }]),
+  ['空正文块', { type: 'response.content_part.added', output_index: 0, content_index: 0,
+    part: { type: 'output_text', text: '', annotations: [] } }],
+  ['空拒绝块', { type: 'response.content_part.added', output_index: 0, content_index: 0,
+    part: { type: 'refusal', refusal: '' } }],
+]
+
+for (const [name, event] of emptyStreamEvents) {
+  for (const split of [false, true]) {
+    test(`SSE ${name}占位后限流仍在网关内恢复（${split ? '分包' : '同包'}）`, async t => {
+      const empty = streamEvent(event)
+      const f = await fixture(t, async (_, count, req, res) => {
+        if (count > 1) return { status: 200, type: 'text/event-stream', body: streamRecovery }
+        if (!split) return { status: 200, type: 'text/event-stream', body: empty + streamRateLimit }
+        res.writeHead(200, { 'content-type': 'text/event-stream', connection: 'close' })
+        res.write(empty)
+        await delay(20)
+        res.end(streamRateLimit)
+      })
+      const response = await f.request()
+      assert.equal(response.status, 200)
+      assert.equal(response.body, streamRecovery, '空占位和失败事件都不能漏给客户端')
+      assert.equal(f.captured.length, 2)
+      assert.equal(f.captured[0].raw, f.captured[1].raw, '纯限流不得改写重发的请求体')
+    })
+  }
+}
+
+for (const [name, event] of [
+  ['正文', { type: 'response.output_text.delta', delta: 'fixture delivered text' }],
+  ['思考', { type: 'response.reasoning_summary_text.delta', delta: 'fixture delivered reasoning' }],
+  ['带正文消息', { type: 'response.output_item.added', item: { type: 'message', content: [{ type: 'output_text', text: 'fixture delivered message' }] } }],
+  ['带摘要推理', { type: 'response.output_item.added', item: { type: 'reasoning', summary: [{ type: 'summary_text', text: 'fixture summary' }] } }],
+  ['加密推理', { type: 'response.output_item.added', item: { type: 'reasoning', encrypted_content: 'fixture ciphertext', summary: [] } }],
+  ['拒绝内容', { type: 'response.content_part.added', part: { type: 'refusal', refusal: 'fixture refusal' } }],
+  ['普通工具', { type: 'response.output_item.added', item: { type: 'function_call', name: 'fixture_lookup', call_id: 'call_fixture', arguments: '' } }],
+  ['自定义工具', { type: 'response.output_item.added', item: { type: 'custom_tool_call', name: 'fixture_custom', call_id: 'call_fixture', input: '' } }],
+  ['网页搜索', { type: 'response.output_item.added', item: { type: 'web_search_call', id: 'ws_fixture', status: 'in_progress' } }],
+  ['未知载荷', { type: 'response.content_part.added', part: { type: 'fixture_future_content', value: 'fixture data' } }],
+]) {
+  test(`SSE 已交付${name}后限流保持原字节且不重放`, async t => {
+    const stream = streamEvent(event) + streamRateLimit
+    const f = await fixture(t, () => ({ status: 200, type: 'text/event-stream', body: stream }))
+    const response = await f.request()
+    assert.equal(response.status, 200)
+    assert.equal(response.body, stream)
+    assert.equal(f.captured.length, 1, '已有内容或工具开始事件后不得重新发送整个请求')
+  })
+}
+
+test('SSE 空占位后正常输出保留完整流字节', async t => {
+  const stream = emptyStreamEvents.map(([, event]) => streamEvent(event)).join('') + streamRecovery
+  const f = await fixture(t, () => ({ status: 200, type: 'text/event-stream', body: stream }))
+  const response = await f.request()
+  assert.equal(response.body, stream, '只推迟交付，不能删除成功流中的占位事件')
+  assert.equal(f.captured.length, 1)
 })
 
 test('已交付 SSE 内容后出现缺推理错误不重放', async t => {
