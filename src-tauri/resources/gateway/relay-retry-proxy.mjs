@@ -12,7 +12,7 @@
  *   1. 在本地先自己对这两类失败做指数退避重试；
  *   2. 本地重试仍失败时，改写成一个真正的 429（带 retry-after），
  *      交给 ZCode 自身的重试机制继续兜底。
- *   3. 先缓冲开场与已知空占位事件，真实内容或工具开始后才下发（未知载荷保守交付）；
+ *   3. 缓冲开场、已知空占位及 Codex 未完成搜索；真实内容、搜索完成或客户端工具开始即下发；
  *      下发前错误可处理，下发后错误只能透传，不能保证整条流成功。
  *
  * 用法：
@@ -837,7 +837,7 @@ function responsePartHasContent(part) {
  *   - OpenAI 风格：choices[].delta.content / tool_calls
  *   - Anthropic 风格：content_block_delta（text_delta / thinking_delta / input_json_delta）
  */
-function contentBearing(obj) {
+function contentBearing(obj, codexResponses = false) {
   if (!obj || typeof obj !== 'object') return false;
 
   // ── OpenAI / OpenAI 兼容 ──
@@ -885,7 +885,16 @@ function contentBearing(obj) {
     return parts != null && (!Array.isArray(parts) || parts.some(responsePartHasContent));
   }
   if (t === 'response.content_part.added') return responsePartHasContent(obj.part);
-  // 工具、搜索和未知条目仍在开始交付时锁定，避免重复执行。
+  // 失败搜索没有可交付结果，留给后续响应错误走原有分类与重试。
+  if (codexResponses && ['response.output_item.added', 'response.output_item.done'].includes(t)
+      && obj.item?.type === 'web_search_call' && obj.item.status === 'failed') return false;
+  // 搜索已完成就交付，不能为隐藏后续限流而重新执行整轮搜索。
+  if (codexResponses && (t === 'response.web_search_call.completed'
+      || (t === 'response.output_item.done' && obj.item?.type === 'web_search_call'))) return true;
+  // Codex 的只读搜索开始不等于已有结果；客户端工具和未知状态仍保守交付。
+  if (codexResponses && t === 'response.output_item.added' && obj.item?.type === 'web_search_call') {
+    return obj.item.status != null && !['in_progress', 'searching'].includes(obj.item.status);
+  }
   if (t === 'response.output_item.added') return true;
 
   if (nonEmptyStr(obj.content) || nonEmptyStr(obj.text)) return true;
@@ -1037,13 +1046,14 @@ function generationProgress(obj, seenReasoning) {
   return false;
 }
 
-async function peekAndCommit(upstream, res, onCommit = () => {}, state) {
+async function peekAndCommit(upstream, res, onCommit = () => {}, state, codexResponses = false) {
   const reader = upstream.body.getReader();
   const decoder = new TextDecoder();
   let pending = '';
   const buffered = [];
   let bufferedBytes = 0;
   let committed = false;
+  let bufferedSearch = false;
   let sawTerminal = false;
   let terminalKind = null;   // 固定枚举，诊断用：区分正常完成与 failed / incomplete
   let idleAfterCommit = false;
@@ -1075,13 +1085,13 @@ async function peekAndCommit(upstream, res, onCommit = () => {}, state) {
 
   try {
     while (!stopReading) {
-      const remaining = (committed ? lastProgress + cfg.streamProgressMs : deadline) - Date.now();
+      const remaining = (committed || bufferedSearch ? lastProgress + cfg.streamProgressMs : deadline) - Date.now();
       if (remaining <= 0) {
         if (!committed) return failure('timed out waiting for first content (empty/stalled)', 'peek_timeout');
         stallReason = 'progress_timeout';
         break;
       }
-      const idleMs = committed ? cfg.streamIdleMs : cfg.peekIdleMs;
+      const idleMs = committed || bufferedSearch ? cfg.streamIdleMs : cfg.peekIdleMs;
       let chunk;
       try {
         chunk = await readWithTimeout(reader, Math.min(idleMs, remaining));
@@ -1142,7 +1152,16 @@ async function peekAndCommit(upstream, res, onCommit = () => {}, state) {
         }
         const madeProgress = !err && generationProgress(payload.obj, seenReasoning);
         if (madeProgress) lastProgress = Date.now();
-        if (!err && !committed && (madeProgress || contentBearing(payload.obj))) commit();
+        const hasContent = !err && !committed && contentBearing(payload.obj, codexResponses);
+        if (codexResponses && !committed && !err && !hasContent
+            && payload.obj.type === 'response.output_item.added' && payload.obj.item?.type === 'web_search_call') {
+          // 只推迟下发，等待容忍度仍从首次搜索开始沿用旧版已交付流的参数。
+          if (!bufferedSearch) lastProgress = Date.now();
+          bufferedSearch = true;
+        }
+        // 原先搜索开始已交付，明确的 incomplete 终态必须继续原样到达客户端。
+        if (!err && !committed && (madeProgress || hasContent
+            || (bufferedSearch && payload.obj.type === 'response.incomplete'))) commit();
         if (madeProgress) {
           state.lastProgress = Date.now();
           const kind = progressKind(payload.obj);
@@ -1572,7 +1591,7 @@ async function handle(req, res, state) {
 
       if (ct.includes('text/event-stream')) {   // 流式
         state.phase = 'waiting_first_content';
-        const outcome = await peekAndCommit(upstream, res, () => diagnose('sse_committed', { status: 200 }), state);
+        const outcome = await peekAndCommit(upstream, res, () => diagnose('sse_committed', { status: 200 }), state, clientCodex);
         if (outcome.committed) {
           diagnose('sse_ended', { status: 200, sawTerminal: outcome.sawTerminal, terminalKind: outcome.terminalKind, idleAfterCommit: outcome.idleAfterCommit, stallReason: outcome.stallReason });
           if (attempt > 1) log(`attempt ${attempt}: recovered on a later route (previous failures: ${attempt - 1})`);

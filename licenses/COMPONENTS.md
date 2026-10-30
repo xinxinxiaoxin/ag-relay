@@ -33,7 +33,7 @@
 
 | 组件 | 版本 | 许可元数据 | 原文 / 对应源码 | 来源 |
 | --- | --- | --- | --- | --- |
-| `Rust standard library` | 1.99.0 | MIT OR Apache-2.0; third-party exceptions in COPYRIGHT-library.html | [LICENSE-MIT](rust-std/LICENSE-MIT) / [LICENSE-APACHE](rust-std/LICENSE-APACHE) / [COPYRIGHT-library.html](rust-std/COPYRIGHT-library.html) | [固定版本](https://github.com/rust-lang/rust/tree/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4) |
+| `Rust standard library` | 1.99.1 | MIT OR Apache-2.0; third-party exceptions in COPYRIGHT-library.html | [LICENSE-MIT](rust-std/LICENSE-MIT) / [LICENSE-APACHE](rust-std/LICENSE-APACHE) / [COPYRIGHT-library.html](rust-std/COPYRIGHT-library.html) | [固定版本](https://github.com/rust-lang/rust/tree/58cf8f9c35b355199727627d07ae34a4e2846d67) |
 
 ## npm 完整安装树
 

@@ -1,27 +1,27 @@
 {
   "schemaVersion": 1,
   "target": "x86_64-pc-windows-msvc",
-  "verifiedAt": "2026-10-29",
+  "verifiedAt": "2026-10-30",
   "scope": "锁定安装的 npm 完整依赖树（含开发工具）、Windows cargo metadata 已解析依赖树（含构建/宏）、随包 Node、Rust 标准库和 WebView2Loader SDK。其他平台 npm 可选二进制单列排除；并非精确二进制 SBOM。",
   "inputs": [
     {
       "path": "package.json",
-      "sha256": "eec8079ef5440a11c85b925012abef6af39fa6fb6872ef4ed75aad359395cae8",
+      "sha256": "2f518e444bcb9b63d8e3b6d03c1d381b212083549eca60855a739e670ad675c2",
       "normalizeLf": true
     },
     {
       "path": "package-lock.json",
-      "sha256": "95bdb78a454042827c6fc4cfdc9fbc25c92a4518beacd974e3ef885a08c564e0",
+      "sha256": "539d46add5a698d1ad9c6e34f812fc71cba1fdb7670d79e5362f64cd79743c73",
       "normalizeLf": true
     },
     {
       "path": "src-tauri/Cargo.lock",
-      "sha256": "9094e81c89e8a5fec3a6f3e55383e9695dd851b0a7ec54f469ad4da7bebe911e",
+      "sha256": "d8f412d576d7eea9195a9a0b5bea41e9b5ff44dafe174b755f95e81ee42e4728",
       "normalizeLf": true
     },
     {
       "path": "src-tauri/Cargo.toml",
-      "sha256": "50e881dd049c1397902ab5ca637447c9dd9865ec5968612cf49822762b7ab363",
+      "sha256": "b88f73b850e8c11de4533d969c7c24a2aec08edf65e77e433d1409ed82a8b0ec",
       "normalizeLf": true
     },
     {
@@ -37,11 +37,11 @@
     "indexes": [
       {
         "path": "licenses/COMPONENTS.md",
-        "sha256": "69dd1f6d7f64444b7f057a372f2bba4b045e858be924835f920f535cfaa97db2",
+        "sha256": "5d05ec8d0c7b8e68d6ef85b68a4af7033fd0850876020803b8ca31a9f7d2505e",
         "normalizeLf": true
       }
     ],
-    "review": "两套完整安装器源码归档及 inventory.json/COMPONENTS.md 由每次发布的同版来源附件提供，其他许可材料继续随安装包提供。2026-10-16 新增 Windows 依赖 tauri-plugin-single-instance 2.5.4 与 tracing-attributes 0.1.31，已补齐原文与组件索引并刷新依赖输入指纹；修正单实例组件的 MIT 原文链接。2026-10-17 产品版本改为 0.3.9；已逐项确认四份清单仅产品版本变化，295 项 Windows Rust 解析依赖、422 个已安装 npm 包及锁定树中 74 个排除的平台包均与许可记录一致，仅刷新四份清单输入指纹，随包 Node 和第三方依赖未变。"
+    "review": "两套完整安装器源码归档及 inventory.json/COMPONENTS.md 由每次发布的同版来源附件提供，其他许可材料继续随安装包提供。2026-10-16 新增 Windows 依赖 tauri-plugin-single-instance 2.5.4 与 tracing-attributes 0.1.31，已补齐原文与组件索引并刷新依赖输入指纹；修正单实例组件的 MIT 原文链接。2026-10-17 产品版本改为 0.3.9；已逐项确认四份清单仅产品版本变化，295 项 Windows Rust 解析依赖、422 个已安装 npm 包及锁定树中 74 个排除的平台包均与许可记录一致，仅刷新四份清单输入指纹，随包 Node 和第三方依赖未变。 2026-10-30 v0.3.16：295 项 Windows Rust 解析依赖与496项npm锁定包（含74项排除平台包）逐项核对未变；Rust工具链实测1.99.1，其固定提交两份根许可与随工具链标准库版权原文均与已有材料逐字节相同，更新来源版本与输入指纹。"
   },
   "components": [
     {
@@ -16627,25 +16627,25 @@
     {
       "ecosystem": "toolchain-runtime",
       "name": "Rust standard library",
-      "version": "1.99.0",
+      "version": "1.99.1",
       "license": "MIT OR Apache-2.0; third-party exceptions in COPYRIGHT-library.html",
       "scope": "Rust 标准库及其内含第三方，按实际 rustc 工具链快照",
-      "source": "https://github.com/rust-lang/rust/tree/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4",
+      "source": "https://github.com/rust-lang/rust/tree/58cf8f9c35b355199727627d07ae34a4e2846d67",
       "materials": [
         {
           "path": "licenses/rust-std/LICENSE-MIT",
           "sha256": "b71bd43a069ca0641a9ecfe585ca7b3c53b5cc1608f8b68321168698e28b5ea1",
-          "source": "https://raw.githubusercontent.com/rust-lang/rust/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/LICENSE-MIT"
+          "source": "https://raw.githubusercontent.com/rust-lang/rust/58cf8f9c35b355199727627d07ae34a4e2846d67/LICENSE-MIT"
         },
         {
           "path": "licenses/rust-std/LICENSE-APACHE",
           "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a",
-          "source": "https://raw.githubusercontent.com/rust-lang/rust/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/LICENSE-APACHE"
+          "source": "https://raw.githubusercontent.com/rust-lang/rust/58cf8f9c35b355199727627d07ae34a4e2846d67/LICENSE-APACHE"
         },
         {
           "path": "licenses/rust-std/COPYRIGHT-library.html",
           "sha256": "5647be074c8edf7339fd863055923a8fc80bc5610a8d4661ec3b767b9d392c27",
-          "source": "rustup toolchain 1.99.0: share/doc/rust/COPYRIGHT-library.html"
+          "source": "rustup toolchain 1.99.1: share/doc/rust/COPYRIGHT-library.html"
         }
       ]
     },

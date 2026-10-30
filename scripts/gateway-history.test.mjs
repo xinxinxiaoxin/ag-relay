@@ -118,6 +118,7 @@ async function fixture(t, respond, config = {}, script = core) {
   const status = await (await fetch(`${url}/_relay/status`)).json()
   assert.equal(status.pid, child.pid)
   return {
+    url,
     captured,
     diagnostics,
     rows: () => readFileSync(diagnostics, 'utf8').trim().split(/\r?\n/).map(line => JSON.parse(line)),
@@ -350,6 +351,226 @@ for (const [name, event] of emptyStreamEvents) {
   }
 }
 
+const searchStart = streamEvent({ type: 'response.output_item.added', output_index: 0,
+  item: { type: 'web_search_call', id: 'ws_fixture', status: 'in_progress' } })
+
+for (const [name, prefix] of [
+  ['开始', searchStart],
+  ['无状态开始', streamEvent({ type: 'response.output_item.added', item: { type: 'web_search_call' } })],
+  ['搜索中', streamEvent({ type: 'response.output_item.added', item: { type: 'web_search_call', status: 'searching' } })],
+  ['进度通知', searchStart
+    + streamEvent({ type: 'response.web_search_call.in_progress', item_id: 'ws_fixture', output_index: 0 })
+    + streamEvent({ type: 'response.web_search_call.searching', item_id: 'ws_fixture', output_index: 0 })],
+]) {
+  for (const split of [false, true]) {
+    test(`Codex SSE 网页搜索${name}后限流仍在网关内恢复（${split ? '分包' : '同包'}）`, async t => {
+      const f = await fixture(t, async (_, count, req, res) => {
+        if (count > 1) return { status: 200, type: 'text/event-stream', body: streamRecovery }
+        if (!split) return { status: 200, type: 'text/event-stream', body: prefix + streamRateLimit }
+        res.writeHead(200, { 'content-type': 'text/event-stream', connection: 'close' })
+        res.write(prefix)
+        await delay(20)
+        res.end(streamRateLimit)
+      })
+      const response = await f.request({ ...history, stream: true })
+      assert.equal(response.status, 200)
+      assert.equal(response.body, streamRecovery, '搜索刚开始的失败流不得漏给客户端')
+      assert.equal(f.captured.length, 2)
+      assert.equal(f.captured[0].raw, f.captured[1].raw, '纯限流不得改写重发的请求体')
+    })
+  }
+}
+
+test('Codex SSE 搜索失败结束不是成功结果，后续限流仍内部恢复', async t => {
+  const failed = streamEvent({ type: 'response.output_item.done', output_index: 0,
+    item: { type: 'web_search_call', id: 'ws_fixture', status: 'failed' } })
+  const f = await fixture(t, (_, count) => ({ status: 200, type: 'text/event-stream',
+    body: count === 1 ? searchStart + failed + streamRateLimit : streamRecovery }))
+  const response = await f.request({ ...history, stream: true })
+  assert.equal(response.body, streamRecovery)
+  assert.equal(f.captured.length, 2)
+})
+
+for (const [name, complete] of [
+  ['完成通知', { type: 'response.web_search_call.completed', item_id: 'ws_fixture', output_index: 0 }],
+  ['完整结果', { type: 'response.output_item.done', output_index: 0,
+    item: { type: 'web_search_call', id: 'ws_fixture', status: 'completed', action: { type: 'search', query: 'fixture query' } } }],
+]) {
+  test(`Codex SSE 搜索${name}后限流不重放且保留完整字节`, async t => {
+    const stream = searchStart + streamEvent(complete) + streamRateLimit
+    const f = await fixture(t, () => ({ status: 200, type: 'text/event-stream', body: stream }))
+    const response = await f.request({ ...history, stream: true })
+    assert.equal(response.status, 200)
+    assert.equal(response.body, stream, '搜索已完成时不能丢弃结果重放')
+    assert.equal(f.captured.length, 1)
+  })
+}
+
+for (const reason of ['content_filter', 'max_output_tokens']) {
+  test(`Codex SSE 搜索后 incomplete/${reason} 原样返回，不当空回重试`, async t => {
+    const stream = searchStart + streamEvent({ type: 'response.incomplete', response: {
+      status: 'incomplete', incomplete_details: { reason }, output: [],
+    } })
+    const f = await fixture(t, () => ({ status: 200, type: 'text/event-stream', body: stream }))
+    const response = await f.request({ ...history, stream: true })
+    assert.equal(response.status, 200)
+    assert.equal(response.body, stream, '必须保留上游明确的未完成原因')
+    assert.equal(f.captured.length, 1)
+  })
+}
+
+for (const [name, headers, path] of [
+  ['Claude', { 'x-relay-client': 'claude' }, '/v1/responses'],
+  ['ZCode', { 'x-relay-client': 'zcode' }, '/v1/responses'],
+  ['未知客户端', { 'x-relay-client': 'fixture_unknown' }, '/v1/responses'],
+  ['冲突客户端标记', { 'x-relay-client': 'codex', 'user-agent': 'claude-code/fixture' }, '/v1/responses'],
+  ['非 Responses 端点', { 'x-relay-client': 'codex' }, '/v1/messages'],
+]) {
+  test(`${name} 的搜索开始仍保留原交付边界`, async t => {
+    const stream = searchStart + streamRateLimit
+    const f = await fixture(t, () => ({ status: 200, type: 'text/event-stream', body: stream }))
+    const response = await f.request({ ...history, stream: true }, headers, { path })
+    assert.equal(response.body, stream)
+    assert.equal(f.captured.length, 1)
+  })
+}
+
+for (const [name, config] of [
+  ['历史兼容关闭', { PROXY_CODEX_RESOURCE_RETRY: '0' }],
+  ['historyMode off', { PROXY_POLICY_JSON: JSON.stringify({ schemaVersion: 1,
+    profiles: { codex: { historyMode: 'off' } } }) }],
+]) {
+  test(`Codex 搜索缓冲不依赖${name}`, async t => {
+    const f = await fixture(t, (_, count) => ({ status: 200, type: 'text/event-stream',
+      body: count === 1 ? searchStart + streamRateLimit : streamRecovery }), config)
+    const response = await f.request({ ...history, stream: true })
+    assert.equal(response.body, streamRecovery)
+    assert.equal(f.captured.length, 2)
+  })
+}
+
+test('Codex SSE 搜索成功流的全部事件原字节保留', async t => {
+  const stream = streamEvent({ type: 'response.created', response: { status: 'in_progress', output: [] } })
+    + searchStart
+    + streamEvent({ type: 'response.web_search_call.searching', item_id: 'ws_fixture', output_index: 0 })
+    + streamEvent({ type: 'response.web_search_call.completed', item_id: 'ws_fixture', output_index: 0 })
+    + streamEvent({ type: 'response.output_item.done', item: { type: 'web_search_call', id: 'ws_fixture',
+      status: 'completed', action: { type: 'search', query: 'fixture query' } } })
+    + streamRecovery
+  const f = await fixture(t, () => ({ status: 200, type: 'text/event-stream', body: stream }))
+  const response = await f.request({ ...history, stream: true })
+  assert.equal(response.body, stream)
+  assert.equal(f.captured.length, 1)
+})
+
+for (const [name, progress] of [
+  ['正文', { type: 'response.output_text.delta', delta: 'fixture visible text' }],
+  ['客户端工具', { type: 'response.output_item.added', item: { type: 'custom_tool_call', name: 'fixture_tool', call_id: 'call_fixture', input: '' } }],
+  ['搜索完成', { type: 'response.web_search_call.completed', item_id: 'ws_fixture', output_index: 0 }],
+]) {
+  test(`Codex SSE 搜索后${name}立即交付，不等流结束`, async t => {
+    const prefix = searchStart + streamEvent(progress)
+    let upstreamResponse
+    const f = await fixture(t, (_, count, req, res) => {
+      upstreamResponse = res
+      res.writeHead(200, { 'content-type': 'text/event-stream', connection: 'close' })
+      res.write(prefix)
+    })
+    const response = await fetch(`${f.url}/v1/responses`, {
+      method: 'POST', signal: AbortSignal.timeout(3000),
+      headers: { authorization: 'Bearer fixture-only-not-a-key', 'content-type': 'application/json', 'x-relay-client': 'codex' },
+      body: JSON.stringify({ ...history, stream: true }),
+    })
+    const reader = response.body.getReader()
+    let received = ''
+    while (received.length < prefix.length) {
+      const chunk = await reader.read()
+      assert.equal(chunk.done, false, '真正内容出现后必须在流结束前可读')
+      received += Buffer.from(chunk.value).toString('utf8')
+    }
+    assert.equal(received, prefix)
+    assert.equal(upstreamResponse.writableEnded, false)
+    upstreamResponse.end(streamRateLimit)
+    for (;;) {
+      const chunk = await reader.read()
+      if (chunk.done) break
+      received += Buffer.from(chunk.value).toString('utf8')
+    }
+    assert.equal(received, prefix + streamRateLimit)
+    assert.equal(f.captured.length, 1, '真实输出后的错误不得重放')
+  })
+}
+
+for (const headers of [{ 'x-relay-client': 'claude' }, { 'x-relay-client': 'zcode' }]) {
+  test(`${headers['x-relay-client']} 搜索流与旧核心逐字一致`, { skip: !process.env.AG_RELAY_HISTORY_BASELINE }, async t => {
+    const results = []
+    for (const script of [resolve(process.env.AG_RELAY_HISTORY_BASELINE), core]) {
+      const f = await fixture(t, () => ({ status: 200, type: 'text/event-stream', body: searchStart + streamRateLimit }), {}, script)
+      results.push({ response: await f.request({ ...history, stream: true }, headers), sent: f.captured.map(x => x.raw) })
+    }
+    assert.deepEqual(results[1], results[0])
+  })
+}
+
+test('Codex SSE 慢搜索沿用原流式等待，不受首内容短超时截断', { skip: !process.env.AG_RELAY_HISTORY_BASELINE }, async t => {
+  const stream = searchStart + streamRecovery
+  const observations = []
+  for (const script of [resolve(process.env.AG_RELAY_HISTORY_BASELINE), core]) {
+    const f = await fixture(t, async (_, count, req, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream', connection: 'close' })
+      res.write(searchStart)
+      await delay(500)
+      if (!res.destroyed) res.end(streamRecovery)
+    }, { PROXY_PEEK_IDLE_MS: '150', PROXY_PEEK_TOTAL_MS: '300',
+      PROXY_STREAM_IDLE_MS: '1500', PROXY_STREAM_PROGRESS_MS: '3000' }, script)
+    const response = await f.request({ ...history, stream: true })
+    observations.push({ response, attempts: f.captured.length })
+  }
+  assert.deepEqual(observations[0], { response: { status: 200, body: stream }, attempts: 1 })
+  assert.deepEqual(observations[1], observations[0], '缓冲不能使旧版能成功的慢搜索被提前取消')
+})
+
+test('Codex SSE 搜索进度不能无限刷新等待窗口', async t => {
+  const f = await fixture(t, (_, count, req, res) => {
+    res.writeHead(200, { 'content-type': 'text/event-stream', connection: 'close' })
+    res.write(searchStart)
+    const heartbeat = setInterval(() => {
+      if (!res.destroyed) res.write(searchStart)
+    }, 40)
+    res.once('close', () => clearInterval(heartbeat))
+  }, { PROXY_MAX_ATTEMPTS: '1', PROXY_STREAM_IDLE_MS: '1000', PROXY_STREAM_PROGRESS_MS: '250' })
+  const response = await f.request({ ...history, stream: true }, {}, { signal: AbortSignal.timeout(3000) })
+  assert.equal(response.status, 429)
+  assert.equal(f.captured.length, 1)
+})
+
+test('Codex SSE 搜索等待中取消不再重发', async t => {
+  let sent
+  const started = new Promise(resolve => { sent = resolve })
+  const f = await fixture(t, (_, count, req, res) => {
+    res.writeHead(200, { 'content-type': 'text/event-stream', connection: 'close' })
+    res.write(searchStart)
+    sent()
+  })
+  const controller = new AbortController()
+  const pending = f.request({ ...history, stream: true }, {}, { signal: controller.signal })
+  const rejected = assert.rejects(pending, { name: 'AbortError' })
+  await Promise.race([started, delay(3000).then(() => { throw new Error('假上游未收到搜索请求') })])
+  controller.abort()
+  await rejected
+  await delay(100)
+  assert.equal(f.captured.length, 1)
+})
+
+test('Codex SSE 搜索失败仍受常规尝试上限约束', async t => {
+  const f = await fixture(t, () => ({ status: 200, type: 'text/event-stream', body: searchStart + streamRateLimit }),
+    { PROXY_MAX_ATTEMPTS: '3' })
+  const response = await f.request({ ...history, stream: true })
+  assert.equal(response.status, 429)
+  assert.equal(f.captured.length, 3)
+  assert.ok(!response.body.includes('event: response.output_item.added'))
+})
+
 for (const [name, event] of [
   ['正文', { type: 'response.output_text.delta', delta: 'fixture delivered text' }],
   ['思考', { type: 'response.reasoning_summary_text.delta', delta: 'fixture delivered reasoning' }],
@@ -359,17 +580,21 @@ for (const [name, event] of [
   ['拒绝内容', { type: 'response.content_part.added', part: { type: 'refusal', refusal: 'fixture refusal' } }],
   ['普通工具', { type: 'response.output_item.added', item: { type: 'function_call', name: 'fixture_lookup', call_id: 'call_fixture', arguments: '' } }],
   ['自定义工具', { type: 'response.output_item.added', item: { type: 'custom_tool_call', name: 'fixture_custom', call_id: 'call_fixture', input: '' } }],
-  ['网页搜索', { type: 'response.output_item.added', item: { type: 'web_search_call', id: 'ws_fixture', status: 'in_progress' } }],
+  ['已完成网页搜索', { type: 'response.output_item.added', item: { type: 'web_search_call', id: 'ws_fixture', status: 'completed', action: { type: 'search', query: 'fixture query' } } }],
+  ['未知搜索状态', { type: 'response.output_item.added', item: { type: 'web_search_call', status: 'fixture_future_status' } }],
+  ['未知工具', { type: 'response.output_item.added', item: { type: 'fixture_future_tool', value: 'fixture data' } }],
   ['未知载荷', { type: 'response.content_part.added', part: { type: 'fixture_future_content', value: 'fixture data' } }],
 ]) {
-  test(`SSE 已交付${name}后限流保持原字节且不重放`, async t => {
-    const stream = streamEvent(event) + streamRateLimit
-    const f = await fixture(t, () => ({ status: 200, type: 'text/event-stream', body: stream }))
-    const response = await f.request()
-    assert.equal(response.status, 200)
-    assert.equal(response.body, stream)
-    assert.equal(f.captured.length, 1, '已有内容或工具开始事件后不得重新发送整个请求')
-  })
+  for (const searchFirst of [false, true]) {
+    test(`SSE ${searchFirst ? '搜索缓冲后' : ''}已交付${name}后限流保持原字节且不重放`, async t => {
+      const stream = (searchFirst ? searchStart : '') + streamEvent(event) + streamRateLimit
+      const f = await fixture(t, () => ({ status: 200, type: 'text/event-stream', body: stream }))
+      const response = await f.request({ ...history, stream: true })
+      assert.equal(response.status, 200)
+      assert.equal(response.body, stream)
+      assert.equal(f.captured.length, 1, '已有内容、已完成搜索或客户端工具开始后不得重发整个请求')
+    })
+  }
 }
 
 test('SSE 空占位后正常输出保留完整流字节', async t => {
