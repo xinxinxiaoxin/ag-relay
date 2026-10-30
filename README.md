@@ -172,7 +172,28 @@ node scripts/release.mjs test-build --out C:\Temp\ag-relay-test-artifacts
 
 注：网关核心的四个 `.mjs` 与 `gateway-config.bat` 已由 `.gitattributes` 固定为不做换行符转换（`-text`），因此任何机器上检出内容与仓库内容一致、哈希唯一。此前 `.bat` 未固定：仓库内容为 LF、Windows 检出为 CRLF，两者哈希不同。下表 v0.2.0/v0.3.1 条目记录的是当时**磁盘检出**（CRLF）的值 `102865c8…`，属历史留档不回填；v0.3.2 及以后记录的是**仓库内容**（LF）的值 `9a8a483e…`。
 
-### v0.3.15（当前）
+### v0.3.16（当前）
+
+| 项 | 值 |
+| --- | --- |
+| 打包日期 | 2026-10-30 23:44（UTC+8） |
+| 发布日期 | 2026-10-30 23:52（UTC+8） |
+| 本仓构建提交 | `f45283825c7e8e7111c620572cd7253ff9d6fd0b`（tag `v0.3.16`；构建输入已提交，仅保留不参与构建的本地 `.gitignore` 改动） |
+| 构建方式 | 维护者本机，原生产更新签名；不运行安装器 |
+| 验证 | 78 项定向隔离检查通过，无失败或跳过，原始搜索复现转绿；正式预检、前端构建、两种安装器验签、版本绑定、随包许可及产物路径隐私检查通过；7 个远端文件摘要与本地一致；匿名 latest 清单返回 0.3.16；未安装或重启现用网关 |
+| `relay-retry-proxy.mjs` sha256 | `b197357c13305781acb00adfd87f3030059beebdb156b5287554bd59a5300b07` |
+| `relay-supervisor.mjs` sha256 | `f2f030b46999f84afc77f7f92643075c1d1f1ddf7ad3c327fbd92f5593dff77c` |
+| `relay-start-check.mjs` sha256 | `bb54cc7255b4f570ba1bdcfda255f19f0ca0a70fa6d028d0ed4e44f8146037c4` |
+| `bounded-file-log.mjs` sha256 | `3841b877ce76e6ff37497bfbcd65e3dd4f478442dc7fff9eaf4b39612b25c205` |
+| `gateway-config.bat` sha256 | `5eff32b941b63708fa64104f09d7e28e15ff8dd569a49dc5c9d40bb1859b84f7` |
+| `ag-relay_0.3.16_x64-setup.exe` sha256 | `eb837f7190f8ffcf0aee74520f0da4c6dfb63c87ade779a4d137f3f3a2833f19` |
+| `ag-relay_0.3.16_x64_zh-CN.msi` sha256 | `9c5190f7bd848b68afb95292dd8166acf97cfc9716ddd06ef0238bd6a0e31895` |
+| `third-party-sources.tar.gz` sha256 | `e0931444aeb6aa4db7ae7319a6b2c33d829d8d3c79535c2efa830f2f42a4e253` |
+| Release | [v0.3.16](https://github.com/xinxinxiaoxin/ag-relay/releases/tag/v0.3.16)（NSIS + MSI + 各自 `.sig` + `latest.json` + `SHA256SUMS` + 第三方源码附件） |
+
+修复 Codex 未完成网页搜索提前放行导致限流穿透的问题；搜索完成、真实输出和客户端工具交付后仍不重放，慢搜索沿用原等待、明确未完成原因保留，Claude/ZCode 与历史策略不变。说明见 [v0.3.16](docs/releases/v0.3.16.md)，详情见 [构建与发布记录](docs/releases/v0.3.16-build.md)。
+
+### v0.3.15（历史）
 
 | 项 | 值 |
 | --- | --- |
