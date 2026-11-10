@@ -576,7 +576,7 @@ for (const [name, event] of [
   ['思考', { type: 'response.reasoning_summary_text.delta', delta: 'fixture delivered reasoning' }],
   ['带正文消息', { type: 'response.output_item.added', item: { type: 'message', content: [{ type: 'output_text', text: 'fixture delivered message' }] } }],
   ['带摘要推理', { type: 'response.output_item.added', item: { type: 'reasoning', summary: [{ type: 'summary_text', text: 'fixture summary' }] } }],
-  ['加密推理', { type: 'response.output_item.added', item: { type: 'reasoning', encrypted_content: 'fixture ciphertext', summary: [] } }],
+  ['带可见摘要的加密推理', { type: 'response.output_item.added', item: { type: 'reasoning', encrypted_content: 'fixture ciphertext', summary: [{ type: 'summary_text', text: 'fixture visible summary' }] } }],
   ['拒绝内容', { type: 'response.content_part.added', part: { type: 'refusal', refusal: 'fixture refusal' } }],
   ['普通工具', { type: 'response.output_item.added', item: { type: 'function_call', name: 'fixture_lookup', call_id: 'call_fixture', arguments: '' } }],
   ['自定义工具', { type: 'response.output_item.added', item: { type: 'custom_tool_call', name: 'fixture_custom', call_id: 'call_fixture', input: '' } }],
@@ -1179,4 +1179,173 @@ test('归档无法替换时截断续写，诊断不会静默停摆', async t => 
   } finally {
     rmSync(live + '.1', { recursive: true, force: true })
   }
+})
+
+const encryptedReasoningStream = (value) => ['added', 'done'].map(stage => streamEvent({
+  type: `response.output_item.${stage}`, item: { type: 'reasoning', id: `rs_${value}`,
+    encrypted_content: value, summary: [], content: [] },
+})).join('')
+
+for (const client of ['claude', 'codex']) {
+  const headers = { 'x-relay-client': client }
+  for (const ending of ['eof', 'reset', 'rate', 'idle']) {
+    test(`${client} 内部推理 ${ending} 后重试，只交付成功轮次`, async t => {
+      const recovered = encryptedReasoningStream('recovered_cipher') + streamRecovery
+      const f = await fixture(t, async (_, count, req, res) => {
+        if (count > 1) return { status: 200, type: 'text/event-stream', body: recovered }
+        res.writeHead(200, { 'content-type': 'text/event-stream', connection: 'close' })
+        res.write(encryptedReasoningStream('discarded_cipher'))
+        if (ending === 'eof') res.end()
+        else if (ending === 'rate') res.end(streamRateLimit)
+        else if (ending === 'reset') { await delay(30); res.destroy() }
+      }, { PROXY_STREAM_IDLE_MS: '180', PROXY_STREAM_PROGRESS_MS: '400' })
+      const response = await f.request({ ...history, stream: true }, headers)
+      assert.equal(response.status, 200)
+      assert.equal(response.body, recovered)
+      assert.equal(f.captured.length, 2)
+      assert.equal(f.captured[0].raw, f.captured[1].raw)
+      assert.equal(f.rows().filter(row => row.event === 'sse_committed').length, 1)
+      assert.ok(f.rows().some(row => row.event === 'sse_committed' && row.attempt === 2))
+    })
+  }
+
+  test(`${client} 内部推理持续进展超过首内容及重试预算仍完整成功`, async t => {
+    let expected = ''
+    const f = await fixture(t, async (_, count, req, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream', connection: 'close' })
+      for (let i = 0; i < 5; i++) {
+        const chunk = encryptedReasoningStream(`progress_${i}`)
+        expected += chunk
+        res.write(chunk)
+        await delay(60)
+        if (res.destroyed) return
+      }
+      expected += streamRecovery
+      res.end(streamRecovery)
+    }, { PROXY_PEEK_IDLE_MS: '70', PROXY_PEEK_TOTAL_MS: '80', PROXY_TOTAL_BUDGET_MS: '180',
+      PROXY_STREAM_IDLE_MS: '300', PROXY_STREAM_PROGRESS_MS: '400' })
+    const response = await f.request({ ...history, stream: true }, headers)
+    assert.equal(response.status, 200)
+    assert.equal(response.body, expected)
+    assert.equal(f.captured.length, 1)
+    assert.equal(f.rows().filter(row => row.event === 'sse_committed').length, 1)
+  })
+
+  for (const terminal of [
+    streamEvent({ type: 'response.incomplete', response: { status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' } } }),
+    streamEvent({ type: 'response.incomplete', response: { status: 'incomplete', incomplete_details: { reason: 'content_filter' } } }),
+    streamEvent({ type: 'response.completed', response: { status: 'completed', output: [] } }),
+    'data: [DONE]\n\n',
+  ]) {
+    test(`${client} 内部推理明确终态 ${terminal.slice(0, 70)} 原样收尾`, async t => {
+      const stream = encryptedReasoningStream('terminal_cipher') + terminal
+      const f = await fixture(t, () => ({ status: 200, type: 'text/event-stream', body: stream }))
+      const response = await f.request({ ...history, stream: true }, headers)
+      assert.equal(response.body, stream)
+      assert.equal(f.captured.length, 1)
+    })
+  }
+
+  for (const visible of [
+    { type: 'response.reasoning_summary_text.delta', delta: 'visible reasoning' },
+    { type: 'response.output_item.done', item: { type: 'reasoning', encrypted_content: 'cipher', summary: [{ type: 'summary_text', text: 'visible summary' }] } },
+    { type: 'response.output_text.delta', delta: 'visible answer' },
+    { type: 'response.output_item.added', item: { type: 'function_call', name: 'fixture_tool', call_id: 'call_visible', arguments: '' } },
+    { type: 'response.output_item.added', item: { type: 'reasoning', encrypted_content: 'cipher', summary: [{ type: 'future_part', value: 'unknown payload' }] } },
+  ]) {
+    test(`${client} 内部推理后交付 ${visible.type}/${visible.item?.type || 'delta'} 再限流不重放`, async t => {
+      const prefix = encryptedReasoningStream('retained_cipher') + streamEvent(visible)
+      const f = await fixture(t, async (_, count, req, res) => {
+        res.writeHead(200, { 'content-type': 'text/event-stream', connection: 'close' })
+        res.write(prefix)
+        await delay(30)
+        res.end(streamRateLimit)
+      })
+      const response = await f.request({ ...history, stream: true }, headers)
+      assert.equal(response.body, prefix + streamRateLimit)
+      assert.equal(f.captured.length, 1)
+    })
+  }
+
+  test(`${client} 内部推理等待取消后不重试`, async t => {
+    let notify
+    const started = new Promise(resolve => { notify = resolve })
+    const f = await fixture(t, (_, count, req, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream', connection: 'close' })
+      res.write(encryptedReasoningStream('cancelled_cipher'))
+      notify()
+    })
+    const controller = new AbortController()
+    const pending = f.request({ ...history, stream: true }, headers, { signal: controller.signal })
+    const rejected = assert.rejects(pending, { name: 'AbortError' })
+    await started
+    controller.abort()
+    await rejected
+    await delay(100)
+    assert.equal(f.captured.length, 1)
+  })
+
+  test(`${client} 内部推理失败遵守实际发送上限`, async t => {
+    const f = await fixture(t, () => ({ status: 200, type: 'text/event-stream', body: encryptedReasoningStream('failed_cipher') }),
+      { PROXY_MAX_ATTEMPTS: '2', PROXY_DEPLOY_MAX_ATTEMPTS: '2' })
+    const response = await f.request({ ...history, stream: true }, headers)
+    assert.equal(response.status, 429)
+    assert.equal(f.captured.length, 2)
+    assert.ok(!response.body.includes('failed_cipher'))
+    assert.ok(!f.rows().some(row => row.event === 'sse_committed'))
+  })
+}
+
+test('内部推理重复完成与心跳不能续期生成进展', async t => {
+  const f = await fixture(t, async (_, count, req, res) => {
+    res.writeHead(200, { 'content-type': 'text/event-stream', connection: 'close' })
+    for (let i = 0; i < 15 && !res.destroyed; i++) {
+      res.write(encryptedReasoningStream('same_cipher') + ': heartbeat\n\n')
+      await delay(30)
+    }
+  }, { PROXY_MAX_ATTEMPTS: '1', PROXY_STREAM_IDLE_MS: '500', PROXY_STREAM_PROGRESS_MS: '180' })
+  const response = await f.request({ ...history, stream: true })
+  assert.equal(response.status, 429)
+  assert.equal(f.captured.length, 1)
+  assert.ok(!f.rows().some(row => row.event === 'sse_committed'))
+})
+
+for (const [client, path, extra] of [
+  ['zcode', '/v1/responses', {}], ['other', '/v1/responses', {}],
+  ['claude', '/v1/messages', {}], ['claude', '/v1/responses', { 'user-agent': 'codex_cli_rs/fixture' }],
+]) {
+  test(`内部推理旧核心差分 ${client}/${path}/${extra['user-agent'] || 'default'}`, { skip: !process.env.AG_RELAY_HISTORY_BASELINE }, async t => {
+    const results = []
+    for (const script of [resolve(process.env.AG_RELAY_HISTORY_BASELINE), core]) {
+      const stream = encryptedReasoningStream('legacy_cipher') + streamRateLimit
+      const f = await fixture(t, () => ({ status: 200, type: 'text/event-stream', body: stream }), {}, script)
+      results.push({ response: await f.request({ ...history, stream: true }, { 'x-relay-client': client, ...extra }, { path }), sends: f.captured.length })
+    }
+    assert.deepEqual(results[1], results[0])
+  })
+}
+
+test('内部推理缓冲超限时不下发失败轮次', async t => {
+  const f = await fixture(t, (_, count) => ({ status: 200, type: 'text/event-stream',
+    body: count === 1 ? encryptedReasoningStream('x'.repeat(3000)) : streamRecovery }),
+  { PROXY_SSE_BUFFER_MAX_BYTES: '1024' })
+  const response = await f.request({ ...history, stream: true })
+  assert.equal(response.body, streamRecovery)
+  assert.equal(f.captured.length, 2)
+  assert.ok(f.rows().some(row => row.event === 'precommit_failure' && row.kind === 'buffer_limit'))
+})
+
+test('内部推理耗尽重试时间预算后不再发送', async t => {
+  const f = await fixture(t, async (_, count, req, res) => {
+    res.writeHead(200, { 'content-type': 'text/event-stream', connection: 'close' })
+    for (let i = 0; i < 4; i++) {
+      res.write(encryptedReasoningStream(`budget_${i}`))
+      await delay(70)
+    }
+    res.end()
+  }, { PROXY_TOTAL_BUDGET_MS: '150', PROXY_STREAM_IDLE_MS: '500', PROXY_STREAM_PROGRESS_MS: '600' })
+  const response = await f.request({ ...history, stream: true })
+  assert.equal(response.status, 503)
+  assert.equal(f.captured.length, 1)
+  assert.ok(!f.rows().some(row => row.event === 'sse_committed'))
 })

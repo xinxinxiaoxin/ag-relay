@@ -14,9 +14,23 @@
 | 会话绑定失效 | 仅严格 Codex 的明确绑定失效错误，按确认次数做一次当次去编号；身份与推理保留，不登记有损缓存，不升级删推理 | [会话绑定恢复](#session-binding-recovery) |
 | 账号绑定推理 | 仅 Responses 且同时出现“upstream account bound to this conversation”和“without previous encrypted reasoning items”：去旧推理后连续同错最多再试两次，混入普通临时错误沿既有预算；不按客户端或模型写死，保留消息、工具与身份 | [账号绑定推理](#account-reasoning-unavailable) |
 | 历史安全 | 完整工具配对与搜索载荷保留；未知条目、服务端引用或不完整历史不能盲删，有损降级不等于还原完整历史 | [策略设置与安全边界](#policy-settings) |
-| 取消与交付 | 已知空消息／推理／正文块及 Codex 未完成的网页搜索不提前下发；真实内容、搜索完成、客户端工具或未知载荷交付后不重放；等待可取消，重试总预算不截断正常长流 | [Codex 搜索交付边界](#codex-search-commit)、[空占位交付边界](#empty-placeholder-commit)、[取消验证记录](#cancellation-record)、[定向验证流程](gateway-core-maintenance.md#快速工作流与定向验证) |
+| 取消与交付 | 已知空占位、Claude/Codex 不可见加密推理及 Codex 未完成搜索继续缓冲；可见思考、正文、搜索完成、客户端工具或未知载荷交付后不重放；等待可取消，重试总预算不截断正常长流 | [加密推理缓冲](#encrypted-reasoning-buffer)、[Codex 搜索交付边界](#codex-search-commit)、[空占位交付边界](#empty-placeholder-commit)、[取消验证记录](#cancellation-record)、[定向验证流程](gateway-core-maintenance.md#快速工作流与定向验证) |
 
 验证优先使用 `gateway-policy.test.mjs`、`gateway-history.test.mjs` 的相关用例；选择范围与补贯通测试的条件以 [核心维护说明](gateway-core-maintenance.md#快速工作流与定向验证) 为准。源码规则、发布版本和正在运行的核心是不同状态，现场判断须核对 `loadedVersion` 与实际生效策略。
+
+<a id="encrypted-reasoning-buffer"></a>
+
+## v0.3.21：不可见加密推理保持可重试
+
+明确、无冲突识别的 Claude/Codex `POST /v1/responses` 在仅收到不可见的加密 reasoning 项时，暂存该轮事件。`output_item.added/done` 含非空密文且没有可见摘要、推理正文或未知内容块时，不触发交付；完整推理仍参与原有生成进展与去重。普通可见思考、正文、工具及既有搜索边界沿用。
+
+- 首次内部推理沿用流式空闲与进展等待，新完整推理继续刷新进展；重复推理或心跳不续期，正常长思考不受首内容等待和重试准入预算截断。
+- 下发前遇到可重试错误、静默关流或读取失败，进入现有恢复流程；失败轮次的缓冲丢弃，成功轮次保留原始字节顺序。
+- 明确 `response.completed`、`response.incomplete` 和结束标记原样收尾，不把显式不完整原因当作静默断流。
+- 取消、已有次数和时间预算、缓冲容量限制保持；可见思考、正文、客户端工具、完成搜索或未知载荷交付后仍不重放。
+- ZCode、未知或冲突客户端、非 Responses 接口保持旧行为；不添加策略开关，不提前修改历史。
+
+定向用例见 `scripts/gateway-history.test.mjs` 的“内部推理”组，覆盖两类客户端、关流/断连/限流/空闲、持续及重复思考、终态、交付、取消、次数上限和旧核心差分。 本地历史/流式 231 项及策略相关 148 项通过，无未执行的必需用例；基线为 v0.3.20，同版本差分及既有恢复编排差分分别复用对应已提交核心。
 
 ## 实现与验收记录
 

@@ -12,7 +12,7 @@
  *   1. 在本地先自己对这两类失败做指数退避重试；
  *   2. 本地重试仍失败时，改写成一个真正的 429（带 retry-after），
  *      交给 ZCode 自身的重试机制继续兜底。
- *   3. 缓冲开场、已知空占位及 Codex 未完成搜索；真实内容、搜索完成或客户端工具开始即下发；
+ *   3. 缓冲开场、空占位、Claude/Codex 内部加密推理及 Codex 未完成搜索；可见内容或工具开始即下发；
  *      下发前错误可处理，下发后错误只能透传，不能保证整条流成功。
  *
  * 用法：
@@ -1067,6 +1067,14 @@ function contentBearing(obj, codexResponses = false) {
   return false;
 }
 
+function encryptedReasoningOnly(obj) {
+  if (!['response.output_item.added', 'response.output_item.done'].includes(obj?.type)
+      || obj.item?.type !== 'reasoning' || !nonEmptyStr(obj.item.encrypted_content)) return false;
+  return [obj.item.summary, obj.item.content].every(parts => parts == null
+    || (Array.isArray(parts) && parts.every(part =>
+      ['summary_text', 'reasoning_text'].includes(part?.type) && !nonEmptyStr(part.text))));
+}
+
 /** 非流式响应是否为「空回应」 */
 function isEmptyCompletion(obj) {
   if (!obj || typeof obj !== 'object') return false;
@@ -1211,7 +1219,7 @@ function generationProgress(obj, seenReasoning) {
   return false;
 }
 
-async function peekAndCommit(upstream, res, onCommit = () => {}, state, codexResponses = false) {
+async function peekAndCommit(upstream, res, onCommit = () => {}, state, codexResponses = false, bufferReasoning = false) {
   const reader = upstream.body.getReader();
   const decoder = new TextDecoder();
   let pending = '';
@@ -1219,6 +1227,7 @@ async function peekAndCommit(upstream, res, onCommit = () => {}, state, codexRes
   let bufferedBytes = 0;
   let committed = false;
   let bufferedSearch = false;
+  let bufferedReasoning = false;
   let sawTerminal = false;
   let terminalKind = null;   // 固定枚举，诊断用：区分正常完成与 failed / incomplete
   let idleAfterCommit = false;
@@ -1251,13 +1260,13 @@ async function peekAndCommit(upstream, res, onCommit = () => {}, state, codexRes
 
   try {
     while (!stopReading) {
-      const remaining = (committed || bufferedSearch ? lastProgress + cfg.streamProgressMs : deadline) - Date.now();
+      const remaining = (committed || bufferedSearch || bufferedReasoning ? lastProgress + cfg.streamProgressMs : deadline) - Date.now();
       if (remaining <= 0) {
         if (!committed) return failure('timed out waiting for first content (empty/stalled)', 'peek_timeout');
         stallReason = 'progress_timeout';
         break;
       }
-      const idleMs = committed || bufferedSearch ? cfg.streamIdleMs : cfg.peekIdleMs;
+      const idleMs = committed || bufferedSearch || bufferedReasoning ? cfg.streamIdleMs : cfg.peekIdleMs;
       let chunk;
       try {
         chunk = await readWithTimeout(reader, Math.min(idleMs, remaining));
@@ -1299,7 +1308,10 @@ async function peekAndCommit(upstream, res, onCommit = () => {}, state, codexRes
         const payload = ssePayload(event);
         state.eventCount++;
         if (!payload) continue;
-        if (payload.done) { sawTerminal = true; terminalKind = 'done_marker'; stopReading = true; continue; }
+        if (payload.done) {
+          if (!committed && bufferedReasoning) commit();
+          sawTerminal = true; terminalKind = 'done_marker'; stopReading = true; continue;
+        }
         if (!payload.obj) continue;
         const err = errorInfoFromJson(payload.obj);
         if (payload.obj.usage || payload.obj.response?.usage) observeRequest(state, 'usage', payload.obj);
@@ -1319,16 +1331,22 @@ async function peekAndCommit(upstream, res, onCommit = () => {}, state, codexRes
         }
         const madeProgress = !err && generationProgress(payload.obj, seenReasoning);
         if (madeProgress) lastProgress = Date.now();
-        const hasContent = !err && !committed && contentBearing(payload.obj, codexResponses);
+        const internalReasoning = bufferReasoning && encryptedReasoningOnly(payload.obj);
+        if (!committed && !err && internalReasoning) {
+          // 加密推理保持在本轮缓冲中；后续完整推理仍按原规则刷新生成进展。
+          if (!bufferedReasoning && !bufferedSearch) lastProgress = Date.now();
+          bufferedReasoning = true;
+        }
+        const hasContent = !err && !committed && !internalReasoning && contentBearing(payload.obj, codexResponses);
         if (codexResponses && !committed && !err && !hasContent
             && payload.obj.type === 'response.output_item.added' && payload.obj.item?.type === 'web_search_call') {
           // 只推迟下发，等待容忍度仍从首次搜索开始沿用旧版已交付流的参数。
-          if (!bufferedSearch) lastProgress = Date.now();
+          if (!bufferedSearch && !bufferedReasoning) lastProgress = Date.now();
           bufferedSearch = true;
         }
-        // 原先搜索开始已交付，明确的 incomplete 终态必须继续原样到达客户端。
-        if (!err && !committed && (madeProgress || hasContent
-            || (bufferedSearch && payload.obj.type === 'response.incomplete'))) commit();
+        // 明确的 incomplete 终态保留原语义，不能将其当作断流重试。
+        if (!err && !committed && ((madeProgress && !internalReasoning) || hasContent
+            || ((bufferedSearch || bufferedReasoning) && payload.obj.type === 'response.incomplete'))) commit();
         if (madeProgress) {
           state.lastProgress = Date.now();
           const kind = progressKind(payload.obj);
@@ -1400,6 +1418,7 @@ async function handle(req, res, state) {
   const historyErrorCounts = new Map();
   const isResponses = req.method === 'POST' && pathname === '/v1/responses';
   const clientCodex = isResponses && strictCodex(headers);
+  const bufferReasoning = isResponses && (clientCodex || strictClaude(headers));
   // Classification must not change when a user disables a recovery action.
   const eligibleCodex = clientCodex && (hasPolicySettings || cfg.codexResourceRetry);
   const policy = isResponses ? policySettings.profiles[eligibleCodex ? 'codex' : 'general'] : defaultPolicyProfile(false);
@@ -1986,7 +2005,7 @@ async function handle(req, res, state) {
 
       if (ct.includes('text/event-stream')) {   // 流式
         state.phase = 'waiting_first_content';
-        const outcome = await peekAndCommit(upstream, res, () => diagnose('sse_committed', { status: 200 }), state, clientCodex);
+        const outcome = await peekAndCommit(upstream, res, () => diagnose('sse_committed', { status: 200 }), state, clientCodex, bufferReasoning);
         if (outcome.committed) {
           observeRequest(state, 'terminal', outcome.terminalKind);
           observeRequest(state, 'result', outcome.terminalKind === 'response.completed' ? 'stream_completed' : 'stream_failed');
