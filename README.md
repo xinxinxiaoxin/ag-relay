@@ -173,7 +173,28 @@ node scripts/release.mjs test-build --out C:\Temp\ag-relay-test-artifacts
 
 注：网关核心的四个 `.mjs` 与 `gateway-config.bat` 已由 `.gitattributes` 固定为不做换行符转换（`-text`），因此任何机器上检出内容与仓库内容一致、哈希唯一。此前 `.bat` 未固定：仓库内容为 LF、Windows 检出为 CRLF，两者哈希不同。下表 v0.2.0/v0.3.1 条目记录的是当时**磁盘检出**（CRLF）的值 `102865c8…`，属历史留档不回填；v0.3.2 及以后记录的是**仓库内容**（LF）的值 `9a8a483e…`。
 
-### v0.3.20（当前）
+### v0.3.21（当前）
+
+| 项 | 值 |
+| --- | --- |
+| 打包日期 | 2026-11-10 20:09（UTC+8） |
+| 发布日期 | 2026-11-10 20:12（UTC+8） |
+| 本仓构建提交 | `1dd1c076aa54ff52891c1d14ec27da30dfd2f91b`（tag `v0.3.21`） |
+| 构建方式 | 维护者本机，原生产更新签名；构建及验签 385.68 秒 |
+| 验证 | 核心历史/流式 231 项、策略相关 148 项、发布工具 45 项通过；726 项许可材料校验通过；正式预检、安装器验签和版本绑定通过；7 份远端发布文件与本地一致；匿名更新清单返回 0.3.21。 |
+| `relay-retry-proxy.mjs` sha256 | `5c42367b19c7f71e83f81744566fa9534b271e5c96ec64f1b1b93ef4100af248` |
+| `relay-supervisor.mjs` sha256 | `f2f030b46999f84afc77f7f92643075c1d1f1ddf7ad3c327fbd92f5593dff77c` |
+| `relay-start-check.mjs` sha256 | `bb54cc7255b4f570ba1bdcfda255f19f0ca0a70fa6d028d0ed4e44f8146037c4` |
+| `bounded-file-log.mjs` sha256 | `3841b877ce76e6ff37497bfbcd65e3dd4f478442dc7fff9eaf4b39612b25c205` |
+| `gateway-config.bat` sha256 | `5eff32b941b63708fa64104f09d7e28e15ff8dd569a49dc5c9d40bb1859b84f7` |
+| `ag-relay_0.3.21_x64-setup.exe` sha256 | `4a1963f4ea2d40bece1e95c5ded149f916c1e964292dd61b1450f2824b21320c` |
+| `ag-relay_0.3.21_x64_zh-CN.msi` sha256 | `0450260aaf6f0410cf0453353ac7e85e46d95a262743af2a922d23b55c49300b` |
+| `third-party-sources.tar.gz` sha256 | `28add7e7bc55d883e713d4043d0b977e8a454a3a1c08dc03ef46a2df2e437b6e` |
+| Release | [v0.3.21](https://github.com/xinxinxiaoxin/ag-relay/releases/tag/v0.3.21)（NSIS、MSI、各自签名、更新清单、SHA256SUMS、第三方源码附件） |
+
+**思考阶段断流恢复**：Claude/Codex 的不可见加密推理继续缓冲，遇到可重试错误或无完成标记的关流时沿原预算恢复；可见思考、正文和客户端工具交付后仍不重放。正常成功流完整保留。详见 [v0.3.21](docs/releases/v0.3.21.md) 与[加密推理缓冲边界](docs/retry-boundaries.md#encrypted-reasoning-buffer)。
+
+### v0.3.20（历史）
 
 | 项 | 值 |
 | --- | --- |
