@@ -13,7 +13,6 @@ name = "ag-relay"
 version = "0.3.20"
 dependencies = [
  "base64 0.22.1",
- "minisign-verify",
  "notify",
  "same-file",
  "serde",
@@ -24,6 +23,16 @@ dependencies = [
  "tauri-plugin-updater",
  "windows-sys 0.61.2",
  "winreg 0.55.0",
+]
+
+[[package]]
+name = "ag-relay-update-verifier"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "minisign-verify",
+ "serde_json",
+ "tauri-plugin-updater",
 ]
 
 [[package]]

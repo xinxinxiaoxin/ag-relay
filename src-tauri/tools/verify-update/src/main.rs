@@ -1,4 +1,4 @@
-//! 只读发布物验证器：不构建 Tauri App、不联网、不执行安装器、不访问用户数据。
+//! 只读发布物验证器：不联网、不执行安装器、不访问用户数据。
 //! 与 tauri-plugin-updater 使用相同的清单解析器及 minisign-verify 验证库。
 use base64::{engine::general_purpose::STANDARD, Engine};
 use minisign_verify::{PublicKey, Signature};

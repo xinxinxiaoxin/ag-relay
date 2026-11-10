@@ -48,7 +48,7 @@ npm run release:build
 npm run release:upload
 ```
 
-它们减少手工步骤，不承诺 Rust 编译加速；沿用现有 target 缓存与并发参数，不改 CI。下文 `<版本>` 均指 `src-tauri/tauri.conf.json` 的本次发布版本，执行命令时替换占位符。
+两者共用现有 target 缓存，验签使用独立工作区成员 `ag-relay-update-verifier`。下文 `<版本>` 均指 `src-tauri/tauri.conf.json` 的本次发布版本，执行命令时替换占位符。
 
 ### 少重复验证与构建
 
@@ -56,6 +56,9 @@ npm run release:upload
 - 同一批最终输入通常只做一轮正式签名构建。复用原 `CARGO_TARGET_DIR` 和既有构建参数，不用 `cargo clean`、临时换 target 或改变优化参数来尝试加速。测试与正式发布可能使用不同编译配置，不能把测试编译产物冒充发布物。
 - 构建入口已包含前端构建和正式预检；到发布阶段不再手工追加一轮同样的前端构建或有效的业务回归。保留入口内部检查，不绕过签名、许可、安装器安全、资源与产物核验。
 - 已有同输入的有效产物时直接验证并上传，不因上传或公开再编译；产物不完整／校验失败或构建输入发生变化时，仍需重新构建，不能复用旧包。
+- 正常发版的 Rust 应用只构建 release。验签通过 `cargo run --package ag-relay-update-verifier` 复用独立工具；工具不依赖主应用，版本独立于产品版本。保留 Tauri 清单解析、两种安装器签名及签名版本核对，不调用主应用的 example 或以主应用 debug 构建替代验签。
+- 仅升版本、整理说明、提交、上传和公开，复用相关输入未变的验证结果。Rust 代码或接线变化时才选择对应 Rust 用例；共享核心行为变化时按影响范围补测。执行前说明要捕捉的具体失败，通过后进入下一阶段，不因进入发布再扩大测试范围。
+- 入口输出预检、前端／Rust／安装器构建、验签及命令总耗时。超过预期时按这些阶段定位；将开始发布到完成的总等待与实际编译时间分开报告。
 
 ### 准备版本与许可
 
@@ -133,9 +136,17 @@ gh release edit v<版本> --repo xinxinxiaoxin/ag-relay --draft=false --latest
 | 报「发布目录缺少文件或混入额外文件」/「发布文件校验和不匹配」 | 资产不齐或被改动，重新构建，不要手工增删文件 |
 | 上传时远端 tag 不存在 | 确认 tag 指向实际构建提交，再手工推送 |
 | 草稿中的同名文件摘要不匹配，或 Release 已公开 | 不覆盖远端文件、不修改公开版本；核对是否选错产物，需改版就用新版本号 |
-| 构建很慢 | 瘦身用的 LTO 与单 codegen unit 会拉长编译；确认在复用同一 `CARGO_TARGET_DIR` 缓存，新入口不改变编译参数 |
+| 构建很慢 | 先看阶段耗时，区分准备、编译、验签和上传；确认复用同一 target。独立验签不应编译 `ag-relay`。release 的 LTO 与单 codegen unit 取舍保持不变，调整前单独比较实际耗时与体积 |
 
 ## 4. 发完之后
+
+### 本地空间
+
+获准清理发布历史时，`release-artifacts/` 与 `target/x86_64-pc-windows-msvc/release/bundle/` 保留最近两个已完成版本；尚未发布、正在上传或用户指定留存的版本继续保留。只清理本地产物，不修改远端 Release。
+
+保留正式构建的 `release/deps`、`release/build`、目标平台编译目录，以及独立验签工具使用的 debug 依赖缓存。开发／测试缓存按当前使用情况处理，不能凭修改日期整批删除 `debug`、`incremental` 或 `.fingerprint`。主应用只输出 `rlib`；已停用的静态库、动态库与旧 example 成品可在新入口验证通过后定向清理。缓存改造后首次构建可能需要重新生成受影响产物，后续构建复用新缓存。
+
+### 成品验收
 
 真机验收（干净机器安装、旧的 ZIP 版升级、在途请求不被掐断、篡改包被拒等）按
 [真实 Windows 成品验收清单](windows-acceptance-checklist.md) 在独立沙箱/VM 中逐条执行。
@@ -150,8 +161,9 @@ gh release edit v<版本> --repo xinxinxiaoxin/ag-relay --draft=false --latest
 | `scripts/bump-version.mjs` | 一次同步上面五处版本号；先全部校验再落盘，中途失败不会留下半套版本号（测试：`scripts/bump-version.test.mjs`） |
 | `scripts/check-licenses.mjs` | 离线核验许可材料与输入指纹；依赖或二进制变化即拒绝 |
 | `scripts/smoke.ps1` | 只读冒烟：对已有发布物验签，不安装、不启动 |
+| `src-tauri/tools/verify-update/` | 独立 Rust 验签工具，与主应用共用锁文件及缓存，保持生产更新解析和验签规则 |
 
-改完发布脚本后运行定向回归（不构建安装包、不访问 GitHub）：
+修改发布脚本、验签工具或许可分发时，按改动选择下列对应测试文件；只有这些入口共同变化时才运行整组。纯版本发布直接复用已通过且输入未变的结果。这些回归不构建安装包、不访问 GitHub：
 
 ```bash
 node --test --test-concurrency=1 scripts/release-flow.test.mjs scripts/release.test.mjs scripts/check-licenses.test.mjs scripts/bump-version.test.mjs scripts/license-distribution.test.mjs

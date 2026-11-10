@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -8,6 +9,40 @@ import test from 'node:test';
 import * as release from './release.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
+
+test('发布验签命令选择独立工具，依赖图不包含主应用', () => {
+  let command;
+  release.verifyUpdaterSignatures('fixture-config', 'fixture-artifacts', {
+    env: {},
+    runCargo(executable, args) {
+      assert.equal(executable, 'cargo');
+      command = args;
+      return { status: 0 };
+    },
+  });
+  const manifest = command[command.indexOf('--manifest-path') + 1];
+  const result = spawnSync('cargo', ['metadata', '--locked', '--offline', '--format-version', '1',
+    '--filter-platform', 'x86_64-pc-windows-msvc', '--manifest-path', manifest],
+  { cwd: root, encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 });
+  assert.equal(result.status, 0, result.stderr);
+  const metadata = JSON.parse(result.stdout);
+  const selected = command.includes('--package')
+    ? metadata.packages.find(item => item.name === command[command.indexOf('--package') + 1])?.id
+    : metadata.resolve.root;
+  const application = metadata.packages.find(item => item.name === 'ag-relay').id;
+  assert.deepEqual(metadata.workspace_default_members, [application]);
+  assert.ok(selected, '验签命令必须选择一个实际存在的包');
+  const dependencies = new Map(metadata.resolve.nodes.map(item => [item.id, item.dependencies]));
+  const pending = [selected];
+  const visited = new Set();
+  while (pending.length) {
+    const current = pending.pop();
+    if (visited.has(current)) continue;
+    visited.add(current);
+    assert.notEqual(current, application, '验签不得编译主应用或执行其 build.rs');
+    pending.push(...dependencies.get(current));
+  }
+});
 
 function fixture(t) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ag-relay-release-flow-'));

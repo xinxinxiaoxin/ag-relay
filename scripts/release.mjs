@@ -82,11 +82,13 @@ export function verify(config, artifacts, production = false, { sourceRoot = roo
   verifySignatures(config, artifacts, { env });
 }
 
-function verifyUpdaterSignatures(config, artifacts, { env }) {
-  const result = spawnSync('cargo', ['run', '--locked', '-j', '2', '--manifest-path',
-    path.join(root, 'src-tauri/Cargo.toml'), '--example', 'verify-update', '--', config, artifacts],
+export function verifyUpdaterSignatures(config, artifacts, { env, runCargo = spawnSync }) {
+  const started = Date.now();
+  const result = runCargo('cargo', ['run', '--locked', '-j', '2', '--manifest-path',
+    path.join(root, 'src-tauri/Cargo.toml'), '--package', 'ag-relay-update-verifier', '--', config, artifacts],
   { cwd: root, env, stdio: 'inherit' });
   if (result.status !== 0) throw new Error('更新物验签未通过');
+  console.log(`验签（含工具准备）耗时：${((Date.now() - started) / 1000).toFixed(2)} 秒`);
 }
 
 function installerNames(version) {
@@ -251,6 +253,7 @@ function auditPaths(file) {
 }
 
 function build(options, testOnly) {
+  const preparationStarted = Date.now();
   const storedConfig = JSON.parse(fs.readFileSync(configPath, 'utf8'));
   if (!testOnly) options = { ...options, ...releasePaths(storedConfig.version, options) };
   if (process.platform !== 'win32' || process.arch !== 'x64') throw new Error('仅支持 Windows x64 构建');
@@ -261,6 +264,7 @@ function build(options, testOnly) {
   const signingEnv = testOnly ? process.env : signingEnvironment(storedConfig.plugins?.updater?.pubkey);
   const config = testOnly ? storedConfig : preflight(configPath, { env: signingEnv });
   if (testOnly) checkBuildInputs(config);
+  console.log(`发布预检耗时：${((Date.now() - preparationStarted) / 1000).toFixed(2)} 秒`);
   fs.mkdirSync(path.dirname(path.resolve(options.out)), { recursive: true });
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'ag-relay-build-'));
   const tauri = path.join(root, 'node_modules/@tauri-apps/cli/tauri.js');
@@ -309,6 +313,7 @@ function build(options, testOnly) {
     for (const secret of secrets.filter(Boolean)) output = output.replaceAll(secret, '[签名材料已隐藏]');
     process.stdout.write(output);
     if (result.status !== 0) throw new Error('Tauri 签名构建失败，未生成发布清单');
+    console.log(`前端、Rust 与安装包构建耗时：${((Date.now() - started) / 1000).toFixed(2)} 秒`);
     const releaseDir = path.join(target, 'x86_64-pc-windows-msvc/release');
     auditPaths(path.join(releaseDir, 'ag-relay.exe'));
     const bundleDir = path.join(releaseDir, 'bundle');
@@ -322,12 +327,15 @@ function build(options, testOnly) {
 }
 
 function main() {
+  const started = Date.now();
+  let operation;
   try {
     const { values, positionals } = parseArgs({ allowPositionals: true, options: {
       config: { type: 'string' }, artifacts: { type: 'string' },
       'bundle-dir': { type: 'string' }, out: { type: 'string' }, notes: { type: 'string' },
       production: { type: 'boolean', default: false }, binary: { type: 'string' },
     } });
+    operation = positionals[0];
     if (positionals[0] === 'preflight') {
       const settings = JSON.parse(fs.readFileSync(values.config || configPath, 'utf8'));
       preflight(values.config, { env: signingEnvironment(settings.plugins?.updater?.pubkey) });
@@ -359,6 +367,10 @@ function main() {
   } catch (error) {
     console.error(error.message);
     process.exitCode = 1;
+  } finally {
+    if (['build', 'test-build', 'upload', 'verify'].includes(operation)) {
+      console.log(`发布 ${operation} 总耗时：${((Date.now() - started) / 1000).toFixed(2)} 秒`);
+    }
   }
 }
 
