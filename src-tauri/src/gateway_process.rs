@@ -922,7 +922,7 @@ mod tests {
             // status.config 暴露的配置项与环境变量表逐项对上（端到端证明环境变量生效；
             // max_attempts 默认值是 5，110 只能来自 PROXY_MAX_ATTEMPTS）
             assert_eq!(status.config.max_attempts, 110, "PROXY_MAX_ATTEMPTS 未生效");
-            assert_eq!(status.config.total_budget_ms, 500_000, "PROXY_TOTAL_BUDGET_MS 未生效");
+            assert_eq!(status.config.total_budget_ms, 300_000, "PROXY_TOTAL_BUDGET_MS 未生效");
             assert_eq!(status.config.connect_timeout_ms, 220_000, "PROXY_CONNECT_TIMEOUT_MS 未生效");
             assert_eq!(status.config.status_interval_ms, 20_000, "PROXY_STATUS_INTERVAL_MS 未生效");
             assert_eq!(status.config.stream_idle_ms, 90_000, "PROXY_STREAM_IDLE_MS 未生效");

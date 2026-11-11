@@ -60,6 +60,24 @@ const recoveredToolHistory = {
   model: 'fixture-model', input: [toolHistory.input[0], toolHistory.input[2], toolHistory.input[3]],
 }
 
+for (const [name, env] of [
+  ['独立核心', {}],
+  ['策略默认', { PROXY_POLICY_JSON: JSON.stringify({ schemaVersion: 1 }) }],
+  ['桌面策略', { PROXY_POLICY_JSON: readFileSync(new URL('../tests/fixtures/policy-settings.json', import.meta.url), 'utf8') }],
+]) {
+  test(`policy ${name}总重试预算默认为三百秒`, async t => {
+    const f = await startGatewayFixture(t, {
+      env,
+      respond: (_, res) => res.end('fixture response'),
+    })
+    const status = await f.status()
+    assert.equal(status.config.totalBudgetMs, 300000)
+    for (const profile of Object.values(status.policy.settings.profiles)) {
+      assert.equal(profile.totalBudgetMs, 300000)
+    }
+  })
+}
+
 for (const client of ['claude', 'codex']) {
   for (const carrier of ['http', 'json', 'sse']) {
     test(`恢复机会：部署错误第九次成功 ${client}/${carrier}`, async t => {

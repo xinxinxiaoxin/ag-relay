@@ -12,7 +12,7 @@
  *   1. 在本地先自己对这两类失败做指数退避重试；
  *   2. 本地重试仍失败时，改写成一个真正的 429（带 retry-after），
  *      交给 ZCode 自身的重试机制继续兜底。
- *   3. 缓冲开场、空占位、Claude/Codex 内部加密推理及 Codex 未完成搜索；可见内容或工具开始即下发；
+ *   3. 缓冲开场、空占位及明确 Claude/Codex 的正文前思考和只读服务器搜索；正文、拒绝或客户端工具开始即下发；
  *      下发前错误可处理，下发后错误只能透传，不能保证整条流成功。
  *
  * 用法：
@@ -41,7 +41,7 @@ const cfg = {
   deployDelayMs: num(process.env.PROXY_DEPLOY_DELAY_MS, 800),  // 通道抖动用更短间隔，快速换通道
   // 响应头等待与重试准入预算；已经下发的流使用独立进展超时。
   // 不按总耗时截断仍在生成正文、推理或工具参数的长请求。
-  totalBudgetMs: num(process.env.PROXY_TOTAL_BUDGET_MS, 500000),
+  totalBudgetMs: num(process.env.PROXY_TOTAL_BUDGET_MS, 300000),
   baseDelayMs: num(process.env.PROXY_BASE_DELAY_MS, 2000),
   maxDelayMs: num(process.env.PROXY_MAX_DELAY_MS, 30000),
   peekIdleMs: num(process.env.PROXY_PEEK_IDLE_MS, 45000),   // 单次读取最长等待
@@ -1079,16 +1079,8 @@ function contentBearing(obj, codexResponses = false) {
     return parts != null && (!Array.isArray(parts) || parts.some(responsePartHasContent));
   }
   if (t === 'response.content_part.added') return responsePartHasContent(obj.part);
-  // 失败搜索没有可交付结果，留给后续响应错误走原有分类与重试。
-  if (codexResponses && ['response.output_item.added', 'response.output_item.done'].includes(t)
-      && obj.item?.type === 'web_search_call' && obj.item.status === 'failed') return false;
-  // 搜索已完成就交付，不能为隐藏后续限流而重新执行整轮搜索。
-  if (codexResponses && (t === 'response.web_search_call.completed'
-      || (t === 'response.output_item.done' && obj.item?.type === 'web_search_call'))) return true;
-  // Codex 的只读搜索开始不等于已有结果；客户端工具和未知状态仍保守交付。
-  if (codexResponses && t === 'response.output_item.added' && obj.item?.type === 'web_search_call') {
-    return obj.item.status != null && !['in_progress', 'searching'].includes(obj.item.status);
-  }
+  // 未进入前置缓冲的搜索结果保持原保守交付边界。
+  if (codexResponses && t === 'response.output_item.done' && obj.item?.type === 'web_search_call') return true;
   if (t === 'response.output_item.added') return true;
 
   if (nonEmptyStr(obj.content) || nonEmptyStr(obj.text)) return true;
@@ -1102,6 +1094,63 @@ function encryptedReasoningOnly(obj) {
   return [obj.item.summary, obj.item.content].every(parts => parts == null
     || (Array.isArray(parts) && parts.every(part =>
       ['summary_text', 'reasoning_text'].includes(part?.type) && !nonEmptyStr(part.text))));
+}
+
+function responsePreludeKind(obj) {
+  if (['response.reasoning_summary_text.delta', 'response.reasoning_text.delta'].includes(obj.type)
+      && typeof obj.delta === 'string') return 'reasoning';
+  if (['response.reasoning_summary_text.done', 'response.reasoning_text.done'].includes(obj.type)
+      && typeof obj.text === 'string') return 'reasoning';
+  if (['response.reasoning_summary_part.added', 'response.reasoning_summary_part.done',
+    'response.content_part.added'].includes(obj.type)
+      && ['summary_text', 'reasoning_text'].includes(obj.part?.type)
+      && (obj.part.text == null || typeof obj.part.text === 'string')) return 'reasoning';
+  if (['response.output_item.added', 'response.output_item.done'].includes(obj.type)
+      && obj.item?.type === 'reasoning') {
+    const parts = [obj.item.summary, obj.item.content];
+    const known = parts.every(list => list == null || (Array.isArray(list) && list.every(part =>
+      ['summary_text', 'reasoning_text'].includes(part?.type)
+        && (part.text == null || typeof part.text === 'string'))));
+    if (known && (nonEmptyStr(obj.item.encrypted_content)
+        || parts.some(list => Array.isArray(list) && list.some(part => nonEmptyStr(part.text))))) return 'reasoning';
+  }
+  if (['response.web_search_call.in_progress', 'response.web_search_call.searching',
+    'response.web_search_call.completed'].includes(obj.type)) return 'search';
+  if (['response.output_item.added', 'response.output_item.done'].includes(obj.type)
+      && obj.item?.type === 'web_search_call'
+      && (['in_progress', 'searching', 'completed', 'failed'].includes(obj.item.status)
+          || (obj.type === 'response.output_item.added' && obj.item.status == null))) return 'search';
+  return null;
+}
+
+function nativePreludeKind(obj, blocks) {
+  if (!Number.isInteger(obj.index)) return null;
+  if (obj.type === 'content_block_start') {
+    blocks.delete(obj.index);
+    const block = obj.content_block;
+    if ((block?.type === 'server_tool_use' && block.name === 'web_search')
+        || block?.type === 'web_search_tool_result') blocks.set(obj.index, 'search');
+    else if (['thinking', 'redacted_thinking'].includes(block?.type)) blocks.set(obj.index, 'reasoning');
+    return blocks.get(obj.index) || null;
+  }
+  const kind = blocks.get(obj.index);
+  if (obj.type === 'content_block_stop') { blocks.delete(obj.index); return kind || null; }
+  if (obj.type === 'content_block_delta'
+      && ((kind === 'search' && obj.delta?.type === 'input_json_delta')
+          || (kind === 'reasoning' && ['thinking_delta', 'signature_delta'].includes(obj.delta?.type)))) return kind;
+  return null;
+}
+
+function searchCompletionKey(obj) {
+  if (obj.type === 'response.web_search_call.completed'
+      || (obj.type === 'response.output_item.done' && obj.item?.type === 'web_search_call'
+          && obj.item.status === 'completed')) {
+    return 'responses:' + String(obj.item_id ?? obj.item?.id ?? obj.output_index ?? 'completed');
+  }
+  if (obj.type === 'content_block_start' && obj.content_block?.type === 'web_search_tool_result') {
+    return 'messages:' + String(obj.content_block.tool_use_id ?? obj.index);
+  }
+  return null;
 }
 
 /** 非流式响应是否为「空回应」 */
@@ -1248,7 +1297,7 @@ function generationProgress(obj, seenReasoning) {
   return false;
 }
 
-async function peekAndCommit(upstream, res, onCommit = () => {}, state, codexResponses = false, bufferReasoning = false) {
+async function peekAndCommit(upstream, res, onCommit = () => {}, state, codexResponses = false, bufferPrelude = false) {
   const reader = upstream.body.getReader();
   const decoder = new TextDecoder();
   let pending = '';
@@ -1267,6 +1316,9 @@ async function peekAndCommit(upstream, res, onCommit = () => {}, state, codexRes
   let reachedEof = false;
   let stopReading = false;
   const seenReasoning = new Set();
+  const seenSearches = new Set();
+  const nativeBlocks = new Map();
+  const responseStream = state.path === '/v1/responses';
 
   const commit = () => {
     committed = true;
@@ -1338,7 +1390,7 @@ async function peekAndCommit(upstream, res, onCommit = () => {}, state, codexRes
         state.eventCount++;
         if (!payload) continue;
         if (payload.done) {
-          if (!committed && bufferedReasoning) commit();
+          if (!committed && (bufferedReasoning || bufferedSearch)) commit();
           sawTerminal = true; terminalKind = 'done_marker'; stopReading = true; continue;
         }
         if (!payload.obj) continue;
@@ -1359,23 +1411,32 @@ async function peekAndCommit(upstream, res, onCommit = () => {}, state, codexRes
           if (RESPONSES_TERMINAL.has(terminalType) || terminalType === 'message_stop') stopReading = true;
         }
         const madeProgress = !err && generationProgress(payload.obj, seenReasoning);
-        if (madeProgress) lastProgress = Date.now();
-        const internalReasoning = bufferReasoning && encryptedReasoningOnly(payload.obj);
+        const preludeKind = bufferPrelude && !committed && !err
+          ? (responseStream ? responsePreludeKind(payload.obj) : nativePreludeKind(payload.obj, nativeBlocks)) : null;
+        const internalReasoning = bufferPrelude && ((responseStream && encryptedReasoningOnly(payload.obj)) || preludeKind === 'reasoning');
+        const internalSearch = preludeKind === 'search';
+        const completedSearchKey = internalSearch ? searchCompletionKey(payload.obj) : null;
+        const completedSearch = completedSearchKey !== null && !seenSearches.has(completedSearchKey);
+        if (completedSearch) seenSearches.add(completedSearchKey);
+        if (madeProgress || completedSearch) {
+          lastProgress = Date.now();
+          state.lastProgress = lastProgress;
+        }
+        const internalPrelude = internalReasoning || internalSearch;
         if (!committed && !err && internalReasoning) {
-          // 加密推理保持在本轮缓冲中；后续完整推理仍按原规则刷新生成进展。
+          // 已知推理留在本轮缓冲中，生成进展仍独立刷新等待窗口。
           if (!bufferedReasoning && !bufferedSearch) lastProgress = Date.now();
           bufferedReasoning = true;
         }
-        const hasContent = !err && !committed && !internalReasoning && contentBearing(payload.obj, codexResponses);
-        if (codexResponses && !committed && !err && !hasContent
-            && payload.obj.type === 'response.output_item.added' && payload.obj.item?.type === 'web_search_call') {
+        const hasContent = !err && !committed && !internalPrelude && contentBearing(payload.obj, codexResponses);
+        if (!committed && !err && internalSearch) {
           // 只推迟下发，等待容忍度仍从首次搜索开始沿用旧版已交付流的参数。
           if (!bufferedSearch && !bufferedReasoning) lastProgress = Date.now();
           bufferedSearch = true;
         }
-        // 明确的 incomplete 终态保留原语义，不能将其当作断流重试。
-        if (!err && !committed && ((madeProgress && !internalReasoning) || hasContent
-            || ((bufferedSearch || bufferedReasoning) && payload.obj.type === 'response.incomplete'))) commit();
+        // 明确终态保留原语义，不能将已结束的搜索或思考当作静默断流。
+        if (!err && !committed && ((madeProgress && !internalPrelude) || hasContent
+            || ((bufferedSearch || bufferedReasoning) && isTerminalEvent(payload.obj)))) commit();
         if (madeProgress) {
           state.lastProgress = Date.now();
           const kind = progressKind(payload.obj);
@@ -1447,8 +1508,9 @@ async function handle(req, res, state) {
   let historyRepairRefusal = '';
   const historyErrorCounts = new Map();
   const isResponses = req.method === 'POST' && pathname === '/v1/responses';
+  const isMessages = req.method === 'POST' && pathname === '/v1/messages';
   const clientCodex = isResponses && strictCodex(headers);
-  const bufferReasoning = isResponses && (clientCodex || strictClaude(headers));
+  const bufferPrelude = (isResponses && clientCodex) || ((isResponses || isMessages) && strictClaude(headers));
   // Classification must not change when a user disables a recovery action.
   const eligibleCodex = clientCodex && (hasPolicySettings || cfg.codexResourceRetry);
   const policy = isResponses ? policySettings.profiles[eligibleCodex ? 'codex' : 'general'] : defaultPolicyProfile(false);
@@ -2018,7 +2080,7 @@ async function handle(req, res, state) {
 
       if (ct.includes('text/event-stream')) {   // 流式
         state.phase = 'waiting_first_content';
-        const outcome = await peekAndCommit(upstream, res, () => diagnose('sse_committed', { status: 200 }), state, clientCodex, bufferReasoning);
+        const outcome = await peekAndCommit(upstream, res, () => diagnose('sse_committed', { status: 200 }), state, clientCodex, bufferPrelude);
         if (outcome.committed) {
           observeRequest(state, 'terminal', outcome.terminalKind);
           observeRequest(state, 'result', outcome.terminalKind === 'response.completed' ? 'stream_completed' : 'stream_failed');

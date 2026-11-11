@@ -378,7 +378,7 @@ fn 策略缺失_只读返回分组默认且不创建文件() {
         assert_eq!(profile["maxAttempts"], 110);
         assert_eq!(profile["baseDelayMs"], 500);
         assert_eq!(profile["maxDelayMs"], 1000);
-        assert_eq!(profile["totalBudgetMs"], 500000);
+        assert_eq!(profile["totalBudgetMs"], 300000);
         assert_eq!(profile["connectTimeoutMs"], 220000);
         assert_eq!(profile["historyMode"], "on_error");
         assert_eq!(profile["historyConfirmations"], 1);

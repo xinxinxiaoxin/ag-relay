@@ -16,9 +16,24 @@
 | 会话绑定失效 | 仅严格 Codex 的明确绑定失效错误，按确认次数做一次当次去编号；身份与推理保留，不登记有损缓存，不升级删推理 | [会话绑定恢复](#session-binding-recovery) |
 | 账号绑定推理 | 仅 Responses 且同时出现“upstream account bound to this conversation”和“without previous encrypted reasoning items”：去旧推理后连续同错最多再试两次，混入普通临时错误沿既有预算；不按客户端或模型写死，保留消息、工具与身份 | [账号绑定推理](#account-reasoning-unavailable) |
 | 历史安全 | 完整代理消息、工具配对与搜索载荷保留；未知条目、服务端引用或不完整历史不能盲删，有损降级不等于还原完整历史 | [代理消息兼容](#agent-message-history)、[策略设置与安全边界](#policy-settings) |
-| 取消与交付 | 已知空占位、Claude/Codex 不可见加密推理及 Codex 未完成搜索继续缓冲；可见思考、正文、搜索完成、客户端工具或未知载荷交付后不重放；等待可取消，重试总预算不截断正常长流 | [加密推理缓冲](#encrypted-reasoning-buffer)、[Codex 搜索交付边界](#codex-search-commit)、[空占位交付边界](#empty-placeholder-commit)、[取消验证记录](#cancellation-record)、[定向验证流程](gateway-core-maintenance.md#快速工作流与定向验证) |
+| 取消与交付 | 明确 Claude/Codex 的正文前思考和只读服务器搜索继续缓冲；正文、拒绝、客户端工具或未知载荷交付后不重放；明确终态保留，等待可取消，重试总预算不截断健康长流 | [正文前恢复](#prebody-search-recovery)、[空占位交付边界](#empty-placeholder-commit)、[取消验证记录](#cancellation-record)、[定向验证流程](gateway-core-maintenance.md#快速工作流与定向验证) |
 
 验证优先使用 `gateway-policy.test.mjs`、`gateway-history.test.mjs` 的相关用例；选择范围与补贯通测试的条件以 [核心维护说明](gateway-core-maintenance.md#快速工作流与定向验证) 为准。源码规则、发布版本和正在运行的核心是不同状态，现场判断须核对 `loadedVersion` 与实际生效策略。
+
+<a id="prebody-search-recovery"></a>
+
+## v0.3.24：正文前思考与只读搜索在网关内恢复
+
+- 严格识别的 Codex／Claude `POST /v1/responses`，以及 Claude 原生 `POST /v1/messages`，将正文前的已知思考和服务器网页搜索保持在本轮缓冲。搜索开始、进度和完成结果不提前耗掉内部重试机会；失败轮不下发，成功轮按原字节顺序交付。
+- 原生 Messages 按内容块编号区分 `server_tool_use(name=web_search)`、搜索参数与 `web_search_tool_result`；思考块同样按编号处理。客户端工具、其他服务器工具、未知载荷和未知搜索状态不参与缓冲。
+- 正文、拒绝内容或客户端执行工具开始时立即交付，不等待整段回答结束。明确完成、不完整、结束标记和 `message_stop` 保留原终态；只有搜索或思考的完整终态仍正常下发。
+- 健康思考与新的搜索完成继续刷新原进展等待；重复搜索状态／完成通知及心跳不无限续期。沿用流空闲90秒、进展180秒与64MiB缓冲；取消、发送次数和既有历史恢复上限保持。
+- 独立核心及桌面默认总重试预算恢复为300秒，常规110次发送不变。预算约束新尝试准入，不截断仍有健康进展的长回复；保存设置不等于运行实例已应用。
+- ZCode、未知／身份冲突客户端及其他接口保留原行为。请求身份、当前历史与 `prompt_cache_key` 不因本项恢复改变，不新增开关或跨请求记忆。
+
+取舍：正文前的思考和搜索进度晚一点显示，内部重试可能重新执行上游只读搜索；已经交付的正文与客户端工具不重放。
+
+验证使用 `scripts/gateway-history.test.mjs` 的隔离真实核心 HTTP/SSE 接缝，覆盖三类客户端路径、同一客户端请求内六次搜索限流后成功、原请求与身份、终态、取消、即时交付、慢流和旧／新客户端对照；本次110项定向检查全部通过，无失败或必需跳过。
 
 <a id="policy-budget-priority"></a>
 
