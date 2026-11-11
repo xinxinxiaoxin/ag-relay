@@ -173,7 +173,30 @@ node scripts/release.mjs test-build --out C:\Temp\ag-relay-test-artifacts
 
 注：网关核心的四个 `.mjs` 与 `gateway-config.bat` 已由 `.gitattributes` 固定为不做换行符转换（`-text`），因此任何机器上检出内容与仓库内容一致、哈希唯一。此前 `.bat` 未固定：仓库内容为 LF、Windows 检出为 CRLF，两者哈希不同。下表 v0.2.0/v0.3.1 条目记录的是当时**磁盘检出**（CRLF）的值 `102865c8…`，属历史留档不回填；v0.3.2 及以后记录的是**仓库内容**（LF）的值 `9a8a483e…`。
 
-### v0.3.23（当前）
+### v0.3.24（当前）
+
+| 项 | 值 |
+| --- | --- |
+| 打包日期 | 2026-11-12 07:43（UTC+8） |
+| 本仓构建提交 | `5366bf88be696ef960106980eac8b20aa6f7a195`（tag `v0.3.24`） |
+| 构建方式 | 维护者本机签名构建，独立工具核验两种安装器签名 |
+| `relay-retry-proxy.mjs` sha256 | `0701d0b0ae649e43c196f18bb6e73f516f32cbe6134c677cc68faa66571d0a69` |
+| `relay-supervisor.mjs` sha256 | `f2f030b46999f84afc77f7f92643075c1d1f1ddf7ad3c327fbd92f5593dff77c` |
+| `relay-start-check.mjs` sha256 | `bb54cc7255b4f570ba1bdcfda255f19f0ca0a70fa6d028d0ed4e44f8146037c4` |
+| `bounded-file-log.mjs` sha256 | `3841b877ce76e6ff37497bfbcd65e3dd4f478442dc7fff9eaf4b39612b25c205` |
+| `gateway-config.bat` sha256 | `76062a2b926810cdbf0522ddb610ddeaf4b365911d8b708dd06076b7619ceac9` |
+| `ag-relay_0.3.24_x64-setup.exe` sha256 | `bafe5eedd299371179e2ad2e34058f266fe3088a4a8e9e639a8b61df8113bb1d` |
+| `ag-relay_0.3.24_x64-setup.exe.sig` sha256 | `42dc6feecc0be56c2a11c0bc08496df0f8f76f49fae9970e03f5fe2d265ed206` |
+| `ag-relay_0.3.24_x64_zh-CN.msi` sha256 | `f27baf27d093a4f6d8ce2db144cd7ccba67bf4e6acc6bee7700fec542b168993` |
+| `ag-relay_0.3.24_x64_zh-CN.msi.sig` sha256 | `83061bc0ba6bf98dc5529f990114258faa8a331898b924c143339da4bc493c1d` |
+| `latest.json` sha256 | `de67d7b499ba909b641649daf4c5e23dd447b0f5e95edc341c0c362f2bd8347b` |
+| `SHA256SUMS` sha256 | `ed38518a685308fc57e2504942075610c0664f048e57499fbb36f73c22ec7d11` |
+| `third-party-sources.tar.gz` sha256 | `f94f6d58d011462a8db019cfd0657bea73c7e65c39d465e6788b479df910761e` |
+| Release | [v0.3.24](https://github.com/xinxinxiaoxin/ag-relay/releases/tag/v0.3.24)（NSIS + MSI + 各自签名 + 更新清单 + 第三方源码附件 + 校验清单） |
+
+正文前思考与只读搜索继续在网关内恢复，默认总预算恢复300秒。相关118项定向验证通过；发布资产、两种签名与匿名更新清单已核实。
+
+### v0.3.23（历史）
 
 | 项 | 值 |
 | --- | --- |
