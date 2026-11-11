@@ -173,7 +173,28 @@ node scripts/release.mjs test-build --out C:\Temp\ag-relay-test-artifacts
 
 注：网关核心的四个 `.mjs` 与 `gateway-config.bat` 已由 `.gitattributes` 固定为不做换行符转换（`-text`），因此任何机器上检出内容与仓库内容一致、哈希唯一。此前 `.bat` 未固定：仓库内容为 LF、Windows 检出为 CRLF，两者哈希不同。下表 v0.2.0/v0.3.1 条目记录的是当时**磁盘检出**（CRLF）的值 `102865c8…`，属历史留档不回填；v0.3.2 及以后记录的是**仓库内容**（LF）的值 `9a8a483e…`。
 
-### v0.3.21（当前）
+### v0.3.22（当前）
+
+| 项 | 值 |
+| --- | --- |
+| 打包日期 | 2026-11-11（UTC+8） |
+| 发布日期 | 2026-11-11 15:35（UTC+8） |
+| 本仓构建提交 | `4c24923288cae3b96d65fa733256be369236fb17`（tag `v0.3.22`） |
+| 构建方式 | 维护者本机，原生产更新签名；构建及验签 312.52 秒 |
+| 验证 | 9 项代理消息回归及 15 项相邻边界检查通过；726 项许可材料通过；正式预检、两种安装器验签、版本绑定和产物路径检查通过；7 份远端文件与本地一致；匿名更新清单返回 0.3.22。 |
+| `relay-retry-proxy.mjs` sha256 | `245653ef7a6b775dd2ba9e80ade38cc804d1d170eb4c98c0a2f97fd457f39d70` |
+| `relay-supervisor.mjs` sha256 | `f2f030b46999f84afc77f7f92643075c1d1f1ddf7ad3c327fbd92f5593dff77c` |
+| `relay-start-check.mjs` sha256 | `bb54cc7255b4f570ba1bdcfda255f19f0ca0a70fa6d028d0ed4e44f8146037c4` |
+| `bounded-file-log.mjs` sha256 | `3841b877ce76e6ff37497bfbcd65e3dd4f478442dc7fff9eaf4b39612b25c205` |
+| `gateway-config.bat` sha256 | `5eff32b941b63708fa64104f09d7e28e15ff8dd569a49dc5c9d40bb1859b84f7` |
+| `ag-relay_0.3.22_x64-setup.exe` sha256 | `0b495b2f03406eecefdf3720e0cf72763d421662726fb8d8223a63f0bef37adf` |
+| `ag-relay_0.3.22_x64_zh-CN.msi` sha256 | `297834d00e31f0ce2b0d426aaaa552a9ca91211c4fa2a4660af13f9ad4fc1f84` |
+| `third-party-sources.tar.gz` sha256 | `3fc1b5509a30005744b5c06fbcdc432a5697523e382dfc88bb2c333053f34d90` |
+| Release | [v0.3.22](https://github.com/xinxinxiaoxin/ag-relay/releases/tag/v0.3.22)（NSIS、MSI、各自签名、更新清单、SHA256SUMS、第三方源码附件） |
+
+**代理消息历史恢复**：Codex 和经 Responses 通道转发的 Claude 均支持完整 `agent_message` 参与历史兼容，保留正文、路由及扩展元数据；历史重试耗尽时说明拒绝修复的原因。详见 [v0.3.22](docs/releases/v0.3.22.md) 与[构建记录](docs/releases/v0.3.22-build.md)。
+
+### v0.3.21（历史）
 
 | 项 | 值 |
 | --- | --- |
