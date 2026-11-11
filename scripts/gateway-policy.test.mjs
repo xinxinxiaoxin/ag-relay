@@ -1,18 +1,10 @@
 // 只在 HTTP 网关→假上游和 /_relay/status 接缝验证策略，不读取核心私有函数。
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import http from 'node:http'
-import { spawn } from 'node:child_process'
-import { once } from 'node:events'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { readFileSync } from 'node:fs'
 import { setTimeout as delay } from 'node:timers/promises'
+import { startGatewayFixture } from './helpers/gateway-fixture.mjs'
 
-const core = fileURLToPath(new URL('../src-tauri/resources/gateway/relay-retry-proxy.mjs', import.meta.url))
-const runtime = process.platform === 'win32'
-  ? fileURLToPath(new URL('../src-tauri/binaries/node-x86_64-pc-windows-msvc.exe', import.meta.url)) : process.execPath
 const success = { status: 200, body: { ok: true } }
 const missingReasoning = "Item 'ws_policy' of type 'web_search_call' was provided without its required 'reasoning' item: 'rs_policy'."
 const history = {
@@ -68,6 +60,34 @@ const recoveredToolHistory = {
   model: 'fixture-model', input: [toolHistory.input[0], toolHistory.input[2], toolHistory.input[3]],
 }
 
+for (const client of ['claude', 'codex']) {
+  for (const carrier of ['http', 'json', 'sse']) {
+    test(`恢复机会：部署错误第九次成功 ${client}/${carrier}`, async t => {
+      const reply = classificationError('当前分组下模型 fixture-model 无可用渠道', carrier, undefined, 'new_api_error', 503)
+      const f = await fixture(t, (_, count) => count <= 8 ? reply : success,
+        policy({ maxAttempts: 110, stripItemIds: false }, { maxAttempts: 110 }),
+        { PROXY_DEPLOY_MAX_ATTEMPTS: '8' })
+      const response = await f.request(toolHistory, { 'x-relay-client': client })
+      assert.equal(response.status, 200, response.body)
+      assert.equal(f.captured.length, 9, '常规预算允许时，第八次部署错误不能阻断下一次成功')
+      assert.ok(f.captured.every(request => JSON.stringify(request.body) === JSON.stringify(toolHistory)))
+    })
+    for (const code of ['invalid_api_key', 'insufficient_quota', 'rate_limit_exceeded', 'server_error']) {
+      test(`恢复机会：账号错误包装码不妨碍既有修复 ${client}/${carrier}/${code}`, async t => {
+        const message = 'the upstream account bound to this conversation is unavailable; start a new conversation without previous encrypted reasoning items'
+        const f = await fixture(t, body => body.input.some(item => item.type === 'reasoning')
+          ? classificationError(message, carrier, code) : success,
+        policy({ stripItemIds: false }))
+        const response = await f.request(toolHistory, { 'x-relay-client': client })
+        assert.equal(response.status, 200, response.body)
+        assert.equal(f.captured.length, 2)
+        assert.deepEqual(f.captured[1].body, recoveredToolHistory)
+        assert.equal(f.diagnostics().filter(row => row.event === 'repair_applied').length, 1)
+      })
+    }
+  }
+}
+
 function classificationError(message, carrier = 'http', code, type = 'invalid_request_error', status = 400) {
   const body = { error: { message, type, ...(code === undefined ? {} : { code }) } }
   return {
@@ -81,22 +101,19 @@ function historyError(message = missingReasoning) {
   return classificationError(message)
 }
 
-async function listen(server) {
-  server.listen(0, '127.0.0.1')
-  await once(server, 'listening')
-  const port = server.address().port
-  assert.notEqual(port, 8787, '测试不得使用真实网关默认端口')
-  return port
-}
-
 const legacyPolicy = Symbol('不设置新策略环境变量')
 
 async function fixture(t, respond, settings = policy(), extraEnv = {}, startupOnly = false) {
-  const dir = mkdtempSync(join(tmpdir(), 'ag-relay-policy-'))
   const captured = []
-  let upstreamError
-  const upstream = http.createServer(async (req, res) => {
-    try {
+  const { url, diagnostics, status: getStatus } = await startGatewayFixture(t, {
+    startupOnly,
+    env: {
+      PROXY_MAX_ATTEMPTS: '5', PROXY_DEPLOY_MAX_ATTEMPTS: '5', PROXY_BASE_DELAY_MS: '10',
+      PROXY_MAX_DELAY_MS: '10', PROXY_DEPLOY_DELAY_MS: '10', PROXY_TOTAL_BUDGET_MS: '10000',
+      PROXY_MIN_RETRY_WINDOW_MS: '100', PROXY_CONNECT_TIMEOUT_MS: '2000',
+      ...(settings === legacyPolicy ? {} : { PROXY_POLICY_JSON: JSON.stringify(settings) }), ...extraEnv,
+    },
+    respond: async (req, res) => {
       const chunks = []
       for await (const chunk of req) chunks.push(chunk)
       const raw = Buffer.concat(chunks).toString('utf8')
@@ -105,74 +122,11 @@ async function fixture(t, respond, settings = policy(), extraEnv = {}, startupOn
       const reply = await respond(body, captured.length, req)
       res.writeHead(reply.status, { 'content-type': reply.type ?? 'application/json', connection: 'close', ...(reply.headers ?? {}) })
       res.end(typeof reply.body === 'string' ? reply.body : JSON.stringify(reply.body))
-    } catch (error) {
-      upstreamError = error
-      res.writeHead(500).end()
-    }
+    },
   })
-  let child
-  let closed
-  t.after(async () => {
-    try {
-      if (child && child.exitCode === null && child.signalCode === null) {
-        if (child.connected) child.send({ type: 'shutdown' })
-        await Promise.race([closed, delay(1500)])
-        // 只清理本测试持有的子进程，绝不通过真实端口、PID 搜索或进程名杀进程。
-        if (child.exitCode === null && child.signalCode === null) child.kill()
-        await Promise.race([closed, delay(3000).then(() => { throw new Error('策略测试隔离核心未退出') })])
-      }
-    } finally {
-      upstream.closeAllConnections()
-      await new Promise(resolve => upstream.close(resolve))
-      if (!child || child.exitCode !== null || child.signalCode !== null) {
-        rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
-      }
-    }
-    if (upstreamError) throw upstreamError
-  })
-  const upstreamPort = await listen(upstream)
-  const reservation = http.createServer()
-  const port = await listen(reservation)
-  await new Promise(resolve => reservation.close(resolve))
-  // 不继承用户 API 凭据、NODE_OPTIONS 或其真实网关配置。
-  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => /^(SystemRoot|WINDIR|TEMP|TMP)$/i.test(key)))
-  Object.assign(env, {
-    PROXY_HOST: '127.0.0.1', PROXY_PORT: String(port), PROXY_UPSTREAM: `http://127.0.0.1:${upstreamPort}`,
-    PROXY_DIAGNOSTICS_FILE: join(dir, 'diagnostics.jsonl'), PROXY_VERBOSE: '0', PROXY_SUPERVISED: '1',
-    PROXY_MAX_ATTEMPTS: '5', PROXY_DEPLOY_MAX_ATTEMPTS: '5', PROXY_BASE_DELAY_MS: '10',
-    PROXY_MAX_DELAY_MS: '10', PROXY_DEPLOY_DELAY_MS: '10', PROXY_TOTAL_BUDGET_MS: '10000',
-    PROXY_MIN_RETRY_WINDOW_MS: '100', PROXY_CONNECT_TIMEOUT_MS: '2000',
-    ...(settings === legacyPolicy ? {} : { PROXY_POLICY_JSON: JSON.stringify(settings) }), ...extraEnv,
-  })
-  child = spawn(runtime, [core], { cwd: dir, env, windowsHide: true, stdio: ['ignore', 'ignore', 'pipe', 'ipc'] })
-  closed = new Promise(resolve => child.once('close', resolve))
-  let stderr = ''
-  child.stderr.on('data', chunk => { stderr = (stderr + chunk).slice(-4096) })
-  await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`策略测试隔离核心就绪超时：${stderr}`)), 5000)
-    child.once('error', error => { clearTimeout(timer); reject(error) })
-    child.once('exit', code => { clearTimeout(timer); reject(new Error(`策略测试隔离核心退出 ${code}：${stderr}`)) })
-    child.once('message', message => {
-      clearTimeout(timer)
-      if (message.type === 'ready') resolve()
-      else reject(new Error('策略测试隔离核心未报告 ready'))
-    })
-  })
-  // 无效配置测试只观察持有子进程的启动结果，绝不发 HTTP 探测请求。
-  if (startupOnly) assert.fail('无效策略意外到达 ready：必须在监听前拒绝')
-  // IPC 是自己持有的进程通道。绑定失败不访问端口，ready 后核对 PID 才发送业务请求。
-  const url = `http://127.0.0.1:${port}`
-  const getStatus = async () => {
-    const response = await fetch(`${url}/_relay/status`, { signal: AbortSignal.timeout(2000) })
-    assert.equal(response.status, 200)
-    const status = await response.json()
-    assert.equal(status.pid, child.pid)
-    return status
-  }
-  await getStatus()
   return {
     captured, status: getStatus,
-    diagnostics: () => readFileSync(join(dir, 'diagnostics.jsonl'), 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse),
+    diagnostics: () => readFileSync(diagnostics, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse),
     async summaries(count = 1) {
       const deadline = Date.now() + 2000
       while (Date.now() < deadline) {
@@ -1259,8 +1213,7 @@ for (const carrier of ['http', 'json', 'sse']) {
   })
 }
 
-// 生产回归：中文站点把「该模型在该分组没有通道」说成「无可用渠道」，原分类只认英文，
-// 于是落进通用 503 重试，把 Codex 后台辅助请求拖满 110 次、约 200 秒才放弃。
+// 中文部署错误沿用通道重试间隔；本例常规与部署预算均为5。
 test('错误分类 中文无可用渠道按通道抖动快速换道并收手', async t => {
   const reply = { status: 503, body: { error: { message: '当前分组 core 下模型 gpt-5.6-terra 无可用渠道', type: 'new_api_error' } } }
   const f = await fixture(t, () => reply)
@@ -1268,7 +1221,7 @@ test('错误分类 中文无可用渠道按通道抖动快速换道并收手', a
   const response = await f.request(toolHistory, { 'x-relay-client': 'codex' })
   const elapsed = Date.now() - started
   assert.equal(response.status, 429, '通道抖动耗尽按可重试的错误返回：' + response.body)
-  assert.ok(f.captured.length <= 8, `应在通道抖动预算内收手，实际发送 ${f.captured.length} 次`)
+  assert.equal(f.captured.length, 5, '耗尽本例配置的尝试预算')
   assert.ok(elapsed < 5000, `不应拖满通用重试预算，实际 ${elapsed}ms`)
   assert.ok(!f.captured.some(request => JSON.stringify(request.body).includes('"id"')),
     '通道抖动不得改写或删除历史')

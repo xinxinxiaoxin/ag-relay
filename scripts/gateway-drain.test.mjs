@@ -1,90 +1,27 @@
 // 仅验证自持隔离核心：临时目录、随机回环端口、假上游，不接触现用网关。
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import http from 'node:http'
-import { spawn } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { once } from 'node:events'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { readFileSync } from 'node:fs'
 import { setTimeout as delay } from 'node:timers/promises'
+import { startGatewayFixture } from './helpers/gateway-fixture.mjs'
 
-const core = resolve('src-tauri/resources/gateway/relay-retry-proxy.mjs')
-const runtime = process.platform === 'win32'
-  ? resolve('src-tauri/binaries/node-x86_64-pc-windows-msvc.exe') : process.execPath
 const token = () => randomBytes(16).toString('hex')
 const options = { timeout: 12000 }
 
-async function listen(server) {
-  server.listen(0, '127.0.0.1')
-  await once(server, 'listening')
-  return server.address().port
-}
-
 async function fixture(t, respond = async (_, res) => res.end('{"ok":true}')) {
-  const dir = mkdtempSync(join(tmpdir(), 'ag-relay-drain-'))
-  const diagnostics = join(dir, 'diagnostics.jsonl')
-  let upstreamError
-  const upstream = http.createServer(async (req, res) => {
-    try {
+  const { child, closed, url, diagnostics, status, output } = await startGatewayFixture(t, {
+    env: {
+      PROXY_VERBOSE: '1', PROXY_MAX_ATTEMPTS: '1',
+      PROXY_TOTAL_BUDGET_MS: '5000', PROXY_CONNECT_TIMEOUT_MS: '5000',
+    },
+    respond: async (req, res) => {
       for await (const _ of req) { /* consume fixture request */ }
       res.setHeader('content-type', 'application/json')
       await respond(req, res)
-    } catch (error) {
-      upstreamError = error
-      res.destroy()
-    }
+    },
   })
-  let child
-  let closed
-  let output = ''
-  t.after(async () => {
-    try {
-      if (child && child.exitCode === null && child.signalCode === null) {
-        if (child.connected) child.send({ type: 'shutdown' })
-        await Promise.race([closed, delay(300)])
-        // 清理只使用本测试亲自创建的进程句柄，绝不按端口或进程名操作。
-        if (child.exitCode === null && child.signalCode === null) child.kill()
-        await Promise.race([closed, delay(2000).then(() => { throw new Error('隔离核心未退出') })])
-      }
-    } finally {
-      upstream.closeAllConnections()
-      await new Promise(resolve => upstream.close(resolve))
-      if (!child || child.exitCode !== null || child.signalCode !== null) {
-        rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
-      }
-    }
-    if (upstreamError) throw upstreamError
-  })
-  const upstreamPort = await listen(upstream)
-  const reservation = http.createServer()
-  const port = await listen(reservation)
-  await new Promise(resolve => reservation.close(resolve))
-  assert.notEqual(port, 8787)
-  assert.notEqual(upstreamPort, 8787)
-  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => /^(SystemRoot|WINDIR|TEMP|TMP)$/i.test(key)))
-  Object.assign(env, {
-    PROXY_HOST: '127.0.0.1', PROXY_PORT: String(port), PROXY_UPSTREAM: `http://127.0.0.1:${upstreamPort}`,
-    PROXY_DIAGNOSTICS_FILE: diagnostics, PROXY_SUPERVISED: '1', PROXY_VERBOSE: '1',
-    PROXY_MAX_ATTEMPTS: '1', PROXY_TOTAL_BUDGET_MS: '5000', PROXY_CONNECT_TIMEOUT_MS: '5000',
-  })
-  child = spawn(runtime, [core], { cwd: dir, env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] })
-  closed = new Promise(resolve => child.once('close', (code, signal) => resolve({ code, signal })))
-  child.stdout.on('data', chunk => { output += chunk })
-  child.stderr.on('data', chunk => { output += chunk })
-  await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`隔离核心就绪超时：${output}`)), 5000)
-    child.once('error', error => { clearTimeout(timer); reject(error) })
-    child.once('exit', code => { clearTimeout(timer); reject(new Error(`隔离核心退出 ${code}：${output}`)) })
-    child.once('message', message => {
-      clearTimeout(timer)
-      if (message.type === 'ready') resolve()
-      else reject(new Error('隔离核心未报告 ready'))
-    })
-  })
-  // 本测试子进程 ready 以后才发 HTTP；绑定失败时不探测占位的实例。
-  const url = `http://127.0.0.1:${port}`
   const request = async (path, headers = {}, method = 'POST') => {
     const response = await fetch(`${url}${path}`, {
       method, signal: AbortSignal.timeout(2000),
@@ -93,11 +30,9 @@ async function fixture(t, respond = async (_, res) => res.end('{"ok":true}')) {
     })
     return { status: response.status, body: await response.json() }
   }
-  const status = async () => (await request('/_relay/status', {}, 'GET')).body
-  assert.equal((await status()).pid, child.pid)
   return {
     child, closed, url, request, status,
-    logs: () => output + readFileSync(diagnostics, 'utf8'),
+    logs: () => output() + readFileSync(diagnostics, 'utf8'),
     forward: () => request('/v1/responses', { authorization: 'Bearer fixture-only' }),
     drain: (action, operation, headers = {}) => request('/_relay/drain', {
       'x-relay-control': '1', 'x-relay-pid': String(child.pid),

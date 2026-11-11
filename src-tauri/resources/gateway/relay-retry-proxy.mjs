@@ -255,10 +255,8 @@ function isPermanentError(info) {
     || PERMANENT_TEXT.test(errorCauseText(info.message)));
 }
 
-// 「找不到部署 / 上游没有该模型部署」——通道抖动，重试换通道即可，值得多试几次。
-// 中文站点常把同一件事说成「无可用渠道 / 无可用模型」：模型名在该分组下没有通道，
-// 属于通道问题而非限流。以前只认英文，中文文案会落进通用 503 重试，白白跑满
-// 110 次、约 200 秒才放弃（实测 Codex 后台辅助请求整晚如此），现按通道抖动快速收手。
+// 「找不到部署 / 无可用渠道」仍可能通过重试命中可用通道。
+// 使用通道重试间隔，并补足最低尝试机会；不降低用户配置的常规次数。
 const DEPLOYMENT_TEXT = /\b(?:no deployment|deployment to match)\b|无可用渠道|无可用模型|无可用线路|模型不存在/i;
 function isDeploymentError(info) {
   return !!info && DEPLOYMENT_TEXT.test(errorCauseText(info.message));
@@ -389,21 +387,47 @@ function healDiagnosticsRotation() {
  * Neither fallback is portable Responses validation.
  * Server-side history cannot be reconstructed or proven complete by this proxy.
  *
- * options:
- *   stripItemIds      – drop inline item handles; includes search handles in the Codex fallback
- *   stripReasoningIds – drop the id handle on reasoning items but keep the items
- *   stripMessageType  – drop the redundant `type: "message"` tag (role/content stay)
- *   dropReasoning     – remove reasoning items entirely (lossy)
- *   allowUnchanged    – return the original body instead of erroring when nothing changed
- *   codexHistory      – validate complete inline tool/search history for Codex (default off)
+ * Callers select a repair purpose and the already-established Codex history eligibility.
+ * Field removal and completeness requirements belong to that purpose, not its callers.
  *
  * Ordinary optional-id/type removals preserve inline content. The Codex fallback
  * additionally sacrifices old reasoning continuity and resource-bound search linkage.
  */
-function repairResponsesItems(bodyBuf, options = {}) {
+function repairResponsesItems(bodyBuf, purpose, codexHistory = false) {
+  let options;
+  switch (purpose) {
+    case 'preflight':
+      options = { stripItemIds: true, dropReasoning: true, allowUnchanged: true, requireCompleteTools: true };
+      break;
+    case 'session_compat':
+      options = { stripItemIds: true, dropReasoning: true, allowUnchanged: true };
+      break;
+    case 'session_binding_invalidated':
+      codexHistory = true;
+      options = { stripItemIds: true, stripReasoningIds: true };
+      break;
+    case 'account_reasoning_unavailable':
+    case 'stale_reasoning_item':
+      options = { stripItemIds: codexHistory, dropReasoning: true };
+      break;
+    case 'azure_resource_mismatch':
+      options = { stripItemIds: true, dropReasoning: true };
+      break;
+    case 'empty_stream_shape':
+    case 'empty_stream_reasoning':
+      codexHistory = false;
+      options = { stripItemIds: true, stripReasoningIds: true, stripMessageType: true,
+        dropReasoning: purpose === 'empty_stream_reasoning' };
+      break;
+    case 'uncovered_error_fallback':
+      options = { stripItemIds: true, dropReasoning: true, requireCompleteTools: true };
+      break;
+    default:
+      throw new Error(`Unknown history repair purpose: ${purpose}`);
+  }
   const {
     stripItemIds = false, stripReasoningIds = false, stripMessageType = false,
-    dropReasoning = false, allowUnchanged = false, codexHistory = false, requireCompleteTools = false,
+    dropReasoning = false, allowUnchanged = false, requireCompleteTools = false,
   } = options;
   // Removing both handle sets may retain the complete reasoning payload; only
   // the explicit binding-error recovery opts into that combination.
@@ -1457,10 +1481,7 @@ async function handle(req, res, state) {
   if (isResponses && policy.historyMode === 'always') {
     // Commit the entire candidate or none of it, including the optional ID cleanup.
     // An unsupported reference must keep the caller's original bytes intact.
-    const cleaned = repairResponsesItems(body, {
-      stripItemIds: true, dropReasoning: true, allowUnchanged: true, codexHistory: eligibleCodex,
-      requireCompleteTools: true,
-    });
+    const cleaned = repairResponsesItems(body, 'preflight', eligibleCodex);
     if (cleaned.error) {
       preflightRefused = true;
       preserveResourceHistory = true;
@@ -1483,7 +1504,7 @@ async function handle(req, res, state) {
       }
     }
     if (knownCompatibility(compatibility, compatibilityCache)) {
-      const cleaned = repairResponsesItems(activeBody, { stripItemIds: true, dropReasoning: true, allowUnchanged: true, codexHistory: eligibleCodex });
+      const cleaned = repairResponsesItems(activeBody, 'session_compat', eligibleCodex);
       if (cleaned.error) {
         diagnose('session_compat_refused', { reason: 'unsafe_inline_history' });
         if (!codexResourceRetry) {
@@ -1558,7 +1579,7 @@ async function handle(req, res, state) {
         diagnose('repair_refused', { kind, source, status, refusal });
         return null;
       };
-      if (bindingIdRepairApplied || repairedItems) return refuse('repair_exhausted');
+      if (repairedItems) return refuse('repair_exhausted');
       if (preflightRefused) return refuse('unsafe_inline_history');
       if (deadline - Date.now() < cfg.minRetryWindowMs + cfg.deployDelayMs) return refuse('time_budget');
       const confirmations = (historyErrorCounts.get(kind) || 0) + 1;
@@ -1566,9 +1587,7 @@ async function handle(req, res, state) {
       if (confirmations < policy.historyConfirmations) {
         return attempt < maxAttempts ? 'retry' : refuse('time_budget');
       }
-      const repaired = repairResponsesItems(activeBody, {
-        stripItemIds: true, stripReasoningIds: true, codexHistory: true,
-      });
+      const repaired = repairResponsesItems(activeBody, kind);
       if (repaired.error) return refuse('unsafe_inline_history');
       activeBody = repaired.body;
       bindingIdRepairApplied = true;
@@ -1604,9 +1623,7 @@ async function handle(req, res, state) {
       if (accountReasoningRetries >= 2) return stop('two retries exhausted');
       if (deadline - Date.now() < cfg.minRetryWindowMs + cfg.deployDelayMs) return stop('insufficient time budget', 'time_budget');
       if (accountReasoningRetries === 0) {
-        const repaired = repairResponsesItems(activeBody, {
-          stripItemIds: eligibleCodex, dropReasoning: true, codexHistory: eligibleCodex,
-        });
+        const repaired = repairResponsesItems(activeBody, kind, eligibleCodex);
         if (repaired.error) return stop(repaired.error, 'unsafe_inline_history');
         activeBody = repaired.body;
         repairedItems = true;
@@ -1618,6 +1635,7 @@ async function handle(req, res, state) {
         log(`attempt ${attempt}: ${kind}: retry ${accountReasoningRetries + 1}/2 with the same repaired request`);
       }
       accountReasoningRetries++;
+      maxAttempts = Math.max(maxAttempts, attempt + 1);
       return 'retry';
     }
     if (classification.kind !== 'history' || (classification.missingSearchReasoning && !eligibleCodex)) return null;
@@ -1673,7 +1691,7 @@ async function handle(req, res, state) {
     const confirmations = (historyErrorCounts.get(kind) || 0) + 1;
     historyErrorCounts.set(kind, confirmations);
     if (eligibleCodex && confirmations >= policy.historyConfirmations) historyRepairChecked = true;
-    const repaired = repairResponsesItems(activeBody, { stripItemIds: azure || eligibleCodex, dropReasoning: true, codexHistory: eligibleCodex });
+    const repaired = repairResponsesItems(activeBody, kind, eligibleCodex);
     if (repaired.error) return fail(repaired.error);
     if (deadline - Date.now() < cfg.minRetryWindowMs + cfg.deployDelayMs) return fail('insufficient time budget for repair', 'time_budget');
     if (confirmations < policy.historyConfirmations) {
@@ -1695,32 +1713,15 @@ async function handle(req, res, state) {
     return 'retry';
   };
 
-  /**
-   * 首段内容之前的失败（静默丢弃 / 200 流内可重试错误 / 空回应）的统一处理。
-   *
-   * 同一份请求体换个通道往往就能成功，所以先按「通道抖动」处理：短间隔、多次数，
-   * 而不是指数退避 —— 退避会让一次 5 尝试的请求光睡觉就花掉约 30 秒。
-   *
-   * 连续失败说明不是通道问题，而是请求体形状本身。实测同一时间窗口的 25 个真实请求：
-   * 带 item id 的 91% 尝试被 `rate_limit_exceeded` 拒绝、平均 11.2 次尝试才成功、首试 0/15；
-   * 不带 id 的只有 29% 被拒、平均 1.4 次、首试 6/10。两个更早时段（1013 / 445 个请求）
-   * 也是同一方向（带 id 首试 48% / 9%，不带 id 81% / 73%）。也就是上游按「请求里有没有
-   * 引用句柄」限流，与 reasoning 无关（「剥掉 reasoning 但保留 id」没有任何改善）。
-   *
-   * 因此触发条件必须覆盖所有首段失败，而不只是静默丢弃那一条：修复分两级，先做无损的：
-   *   1 级（无损）：摘掉所有 item 的 id 句柄与 message 的 type 标签，reasoning 条目
-   *                 连同 encrypted_content/summary 原样保留；
-   *   2 级（有损）：仍然失败时才追加删除 reasoning 项，宁可损失推理连续性也不要拖到 429。
-   */
+  // 通用组的空流/空 JSON 回复按可配置门槛分级处理：先整理 id/type，
+  // 一级确实改动后才允许删除旧推理。明确限流和其他错误不累计到空回应门槛。
   let preCommitFailures = 0;
   let shapeRepairStage = 0;
   let shapeNormalized = false;   // 1 级是否确实改动过请求体（形状假设是否成立）
   const repairShape = (stage, attempt, source) => {
     const stripReasoning = stage === 2;
     const kind = stripReasoning ? 'empty_stream_reasoning' : 'empty_stream_shape';
-    const repaired = stripReasoning
-      ? repairResponsesItems(activeBody, { stripItemIds: true, stripReasoningIds: true, stripMessageType: true, dropReasoning: true })
-      : repairResponsesItems(activeBody, { stripItemIds: true, stripReasoningIds: true, stripMessageType: true });
+    const repaired = repairResponsesItems(activeBody, kind);
     const changed = repaired.removedIds || repaired.removedTypes || repaired.removedReasoning;
     if (repaired.error || !changed) {
       diagnose('repair_refused', { kind, source, status: 200,
@@ -1746,9 +1747,7 @@ async function handle(req, res, state) {
     // Codex history repair requires an explicit history error; empty replies alone
     // must neither trigger a lossy repair nor mutate the frozen/request-retained body.
     if (!isResponses || eligibleCodex || !policy.emptyResponseRepair) return;
-    // 1 级无损，2 次失败就做。2 级要牺牲推理连续性，所以要多 4 次失败的证据，
-    // 且只在 1 级确实改动过请求体时才做 —— 若 1 级无可改之处，说明形状假设不成立，
-    // 那是与形状无关的真实限流，不该拿推理连续性去赌。
+    // 一级没有实际改动时不能升级；二级使用本组更高的空回应门槛。
     if (shapeRepairStage === 0 && !repairedItems && preCommitFailures >= policy.emptyResponseNormalizeAfter) {
       shapeRepairStage = 1;
       if (!repairShape(1, attempt, source)) return;
@@ -1780,8 +1779,7 @@ async function handle(req, res, state) {
     return 'stop';
   };
   const tryUncoveredFallback = async (failure, attempt) => {
-    if (!fallbackEnabled || fallback.phase === 'closed' || repairedItems || repairedStatus || repairCount
-        || bindingIdRepairApplied || historyRepairChecked || historyRepairApplied || accountReasoningRetries
+    if (!fallbackEnabled || fallback.phase === 'closed' || repairedItems || repairedStatus || historyRepairChecked
         || resourceFailures || historyErrorCounts.size || shapeRepairStage || preflightRefused || preserveResourceHistory) {
       resetFallbackConfirmation();
       return null;
@@ -1795,9 +1793,7 @@ async function handle(req, res, state) {
     }
     diagnose('item_error', { kind: fallbackKind, source: failure.source, status: failure.status,
       shape: summarizeResponsesBody(activeBody) });
-    const repaired = repairResponsesItems(activeBody, {
-      stripItemIds: true, dropReasoning: true, codexHistory: eligibleCodex, requireCompleteTools: true,
-    });
+    const repaired = repairResponsesItems(activeBody, fallbackKind, eligibleCodex);
     if (repaired.error) return finishFallbackFailure(failure, 'unsafe_inline_history');
     if (!canRetryFallback(attempt, delayMs)) return finishFallbackFailure(failure, 'time_budget');
     activeBody = repaired.body;
@@ -1948,6 +1944,8 @@ async function handle(req, res, state) {
       state.phase = 'waiting_headers';
       diagnose('attempt_started');
       let upstream;
+      let buf;
+      let ct;
       try {
         // 每条上游请求都用新连接。实测：网关自己重试 8 次、磨 110–180 秒全部失败，而 1–3 秒后
         // 客户端同样的新请求就能成功——1–3 秒不可能是限流窗口恢复的时间，说明重试沿用的那条
@@ -1967,37 +1965,46 @@ async function handle(req, res, state) {
           redirect: 'manual',
           signal: attemptAc.signal,
         });
+        clearTimeout(connectTimer);
+        state.phase = 'reading_body';
+        diagnose('upstream_response', { status: upstream.status });
+        ct = (upstream.headers.get('content-type') || '').toLowerCase();
+        // 完整收包前的传输失败仍属于本次尝试；SSE 由独立交付与读取逻辑接管。
+        if (!upstream.ok || !ct.includes('text/event-stream')) {
+          buf = Buffer.from(await upstream.arrayBuffer());
+        }
       } catch (e) {
         resetFallbackConfirmation();
-        if (ac.signal.aborted) return;
+        if (ac.signal.aborted || res.destroyed) return;
         if (outOfBudget()) {
           lastReason = `total budget ${policy.totalBudgetMs}ms exhausted`;
           log(`attempt ${attempt}: ${lastReason}`);
           observeRequest(state, 'result', 'retry_exhausted');
           return sendRetryable(res, 503, lastReason, attempt, policy);
         }
-        lastReason = connectTimedOut
-          ? `upstream connect timeout after ${attemptTimeoutMs}ms`
+        lastReason = upstream ? `upstream response body read failed: ${describeFetchError(e)}`
+          : connectTimedOut ? `upstream connect timeout after ${attemptTimeoutMs}ms`
           : `upstream connect failed: ${describeFetchError(e)}`;
         log(`attempt ${attempt}: ${lastReason}`);
+        if (upstream && classifyError(null, upstream.status).permanent) {
+          observeRequest(state, 'result', 'permanent_error');
+          return sendRetryable(res, 502, lastReason, attempt, policy);
+        }
         if (fallbackSpent()) {
           diagnose('repair_refused', { kind: fallbackKind, refusal: 'repair_exhausted' });
           observeRequest(state, 'result', 'retry_exhausted');
           return sendRetryable(res, 502, lastReason, attempt, policy);
         }
-        // 连接超时/失败属于通道抖动：放宽次数、缩短间隔，快速换通道
+        // 连接或完整收包前的传输失败沿用通道重试机会。
         maxAttempts = Math.max(maxAttempts, cfg.deployMaxAttempts);
         if (attempt < maxAttempts) { await retrySleep(cfg.deployDelayMs); continue; }
         observeRequest(state, 'result', 'retry_exhausted');
         return sendRetryable(res, 502, lastReason, attempt, policy);
       } finally {
-        clearTimeout(connectTimer);   // 已拿到响应头，后续由 peek 的读取超时接管
+        clearTimeout(connectTimer);
       }
 
-      state.phase = 'reading_body';
-      diagnose('upstream_response', { status: upstream.status });
       if (!upstream.ok) {                       // 真实的 HTTP 错误
-        const buf = Buffer.from(await upstream.arrayBuffer());
         const text = buf.toString('utf8');
 
         let errorInfo = null;
@@ -2008,8 +2015,6 @@ async function handle(req, res, state) {
         if (action === 'retry') continue;
         return;
       }
-
-      const ct = (upstream.headers.get('content-type') || '').toLowerCase();
 
       if (ct.includes('text/event-stream')) {   // 流式
         state.phase = 'waiting_first_content';
@@ -2029,7 +2034,6 @@ async function handle(req, res, state) {
       }
 
       // 非流式
-      const buf = Buffer.from(await upstream.arrayBuffer());
       let obj = null;
       try { obj = JSON.parse(buf.toString('utf8')); } catch { /* 非 JSON */ }
 

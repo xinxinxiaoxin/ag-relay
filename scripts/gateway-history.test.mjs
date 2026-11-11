@@ -1,17 +1,11 @@
 // 隔离验证真实核心：随机回环端口、临时日志、假上游与假凭据，不依赖 Tauri 构建。
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import http from 'node:http'
-import { spawn } from 'node:child_process'
-import { once } from 'node:events'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { mkdirSync, readFileSync, rmSync, statSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
+import { gatewayCore as core, startGatewayFixture } from './helpers/gateway-fixture.mjs'
 
-const core = resolve('src-tauri/resources/gateway/relay-retry-proxy.mjs')
-const runtime = process.platform === 'win32'
-  ? resolve('src-tauri/binaries/node-x86_64-pc-windows-msvc.exe') : process.execPath
 const missingReasoning = "Item 'ws_fixture' of type 'web_search_call' was provided without its required 'reasoning' item: 'rs_fixture'. [trace_id=fixture]"
 const success = { status: 200, body: { ok: true } }
 const history = {
@@ -39,19 +33,16 @@ const recoveredHistory = {
   ],
 }
 
-async function listen(server) {
-  server.listen(0, '127.0.0.1')
-  await once(server, 'listening')
-  return server.address().port
-}
-
 async function fixture(t, respond, config = {}, script = core) {
-  const dir = mkdtempSync(join(tmpdir(), 'ag-relay-history-'))
-  const diagnostics = join(dir, 'diagnostics.jsonl')
   const captured = []
-  let upstreamError
-  const upstream = http.createServer(async (req, res) => {
-    try {
+  const { url, diagnostics } = await startGatewayFixture(t, {
+    script,
+    env: {
+      PROXY_MAX_ATTEMPTS: '5', PROXY_DEPLOY_MAX_ATTEMPTS: '5', PROXY_BASE_DELAY_MS: '10',
+      PROXY_MAX_DELAY_MS: '10', PROXY_DEPLOY_DELAY_MS: '10', PROXY_TOTAL_BUDGET_MS: '10000',
+      PROXY_MIN_RETRY_WINDOW_MS: '100', PROXY_CONNECT_TIMEOUT_MS: '2000', ...config,
+    },
+    respond: async (req, res) => {
       const chunks = []
       for await (const chunk of req) chunks.push(chunk)
       const raw = Buffer.concat(chunks).toString('utf8')
@@ -61,62 +52,8 @@ async function fixture(t, respond, config = {}, script = core) {
       if (reply === undefined) return // 流式用例自行控制分包和结束时机。
       res.writeHead(reply.status, { 'content-type': reply.type ?? 'application/json', connection: 'close' })
       res.end(typeof reply.body === 'string' ? reply.body : JSON.stringify(reply.body))
-    } catch (error) {
-      upstreamError = error
-      res.writeHead(500).end()
-    }
+    },
   })
-  let child
-  let closed
-  t.after(async () => {
-    try {
-      if (child && child.exitCode === null && child.signalCode === null) {
-        if (child.connected) child.send({ type: 'shutdown' })
-        await Promise.race([closed, delay(1500)])
-        // 只终止本测试持有的子进程，不按端口/进程名清理。
-        if (child.exitCode === null && child.signalCode === null) child.kill()
-        await Promise.race([closed, delay(3000).then(() => { throw new Error('隔离核心未退出') })])
-      }
-    } finally {
-      upstream.closeAllConnections()
-      await new Promise(resolve => upstream.close(resolve))
-      if (!child || child.exitCode !== null || child.signalCode !== null) {
-        rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
-      }
-    }
-    if (upstreamError) throw upstreamError
-  })
-  const upstreamPort = await listen(upstream)
-  const reservation = http.createServer()
-  const port = await listen(reservation)
-  await new Promise(resolve => reservation.close(resolve))
-  assert.notEqual(port, 8787)
-  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => /^(SystemRoot|WINDIR|TEMP|TMP)$/i.test(key)))
-  Object.assign(env, {
-    PROXY_HOST: '127.0.0.1', PROXY_PORT: String(port), PROXY_UPSTREAM: `http://127.0.0.1:${upstreamPort}`,
-    PROXY_DIAGNOSTICS_FILE: diagnostics, PROXY_VERBOSE: '0', PROXY_SUPERVISED: '1',
-    PROXY_MAX_ATTEMPTS: '5', PROXY_DEPLOY_MAX_ATTEMPTS: '5', PROXY_BASE_DELAY_MS: '10',
-    PROXY_MAX_DELAY_MS: '10', PROXY_DEPLOY_DELAY_MS: '10', PROXY_TOTAL_BUDGET_MS: '10000',
-    PROXY_MIN_RETRY_WINDOW_MS: '100', PROXY_CONNECT_TIMEOUT_MS: '2000', ...config,
-  })
-  child = spawn(runtime, [script], { cwd: dir, env, windowsHide: true, stdio: ['ignore', 'ignore', 'pipe', 'ipc'] })
-  closed = new Promise(resolve => child.once('close', resolve))
-  let stderr = ''
-  child.stderr.on('data', chunk => { stderr = (stderr + chunk).slice(-4096) })
-  await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`隔离核心就绪超时：${stderr}`)), 5000)
-    child.once('error', error => { clearTimeout(timer); reject(error) })
-    child.once('exit', code => { clearTimeout(timer); reject(new Error(`隔离核心退出 ${code}：${stderr}`)) })
-    child.once('message', message => {
-      clearTimeout(timer)
-      if (message.type === 'ready') resolve()
-      else reject(new Error('隔离核心未报告 ready'))
-    })
-  })
-  // 收到自己启动的核心 ready 后才访问端口；绑定失败绝不探测可能占位的其他实例。
-  const url = `http://127.0.0.1:${port}`
-  const status = await (await fetch(`${url}/_relay/status`)).json()
-  assert.equal(status.pid, child.pid)
   return {
     url,
     captured,
@@ -930,6 +867,23 @@ test('账号绑定推理不可用：409后混合限流沿原预算且不记忆�
   assert.equal((await f.request(accountHistory, claudeHeaders)).status, 200)
   assert.deepEqual(f.captured[4].body, accountHistory, '下一请求不能自动删推理')
 })
+
+for (const client of [claudeHeaders, codexHeaders]) {
+  for (const carrier of ['http', 'json', 'sse']) {
+    test(`账号绑定推理不可用：末次混合错误仍完成第二次恢复 ${client['x-relay-client']}/${carrier}`, async t => {
+      const f = await fixture(t, (_, count) => count === 1 || count === 3
+        ? historyError(accountReasoningUnavailable, carrier)
+        : count === 2
+          ? { status: 429, body: { error: { code: 'rate_limit_exceeded', message: 'token rate limit exceeded' } } }
+          : success, { PROXY_MAX_ATTEMPTS: '3', PROXY_DEPLOY_MAX_ATTEMPTS: '3' })
+      const response = await f.request(accountHistory, client, { signal: AbortSignal.timeout(2000) })
+      assert.equal(response.status, 200, response.body)
+      assert.equal(f.captured.length, 4, '最后一次账号恢复必须实际发送并结束响应')
+      assert.deepEqual(f.captured[3].body, f.captured[1].body, '追加发送沿用同一份已修复历史')
+      assert.equal(f.rows().filter(row => row.event === 'repair_applied').length, 1)
+    })
+  }
+}
 
 // 未覆盖错误仅允许一次安全历史候选。期望值直接列出必须保留的完整载荷，
 // 不调用核心修复器或按核心算法生成期望；编号和旧推理只添加到输入样本中。
