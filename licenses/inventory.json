@@ -1,27 +1,27 @@
 {
   "schemaVersion": 1,
   "target": "x86_64-pc-windows-msvc",
-  "verifiedAt": "2026-11-10",
+  "verifiedAt": "2026-11-11",
   "scope": "锁定安装的 npm 完整依赖树（含开发工具）、Windows cargo metadata 已解析依赖树（含构建/宏）、随包 Node、Rust 标准库和 WebView2Loader SDK。其他平台 npm 可选二进制单列排除；并非精确二进制 SBOM。",
   "inputs": [
     {
       "path": "package.json",
-      "sha256": "55c3e4faa8100e72b2d38cc8860c9aa869196cb53d7291712ac9644d207d6fe8",
+      "sha256": "3c543bc69151f4976ae956a8843e8e79bd90109dd5782d1a755bba86d946f8ce",
       "normalizeLf": true
     },
     {
       "path": "package-lock.json",
-      "sha256": "8fae577c75be437d45d724627f2bb92471b86ce16c48b203a75a6ed8a3effbec",
+      "sha256": "e3c02cc9c6dc86fbe573a5d5385798edfe8f1807f34685e76514d1f7559216c9",
       "normalizeLf": true
     },
     {
       "path": "src-tauri/Cargo.lock",
-      "sha256": "f6a274cef4a3dc88fe236982fdc9398a4fd75d27fe97df82c284beea9b8e9762",
+      "sha256": "d5867b393993e0e3495a3a380e8e2cafe3e1c1b1b388fa712e79ec2a284ee7a9",
       "normalizeLf": true
     },
     {
       "path": "src-tauri/Cargo.toml",
-      "sha256": "f62ea6d9d8dd301c1e0a935be04375955df580f3274e55de75abe0c0c265637d",
+      "sha256": "cc0ff4acf42b2ebeba84b9e189d4076e72181eb7f9eda97e9e0d7a0c8b20fc71",
       "normalizeLf": true
     },
     {
@@ -16632,25 +16632,25 @@
     {
       "ecosystem": "toolchain-runtime",
       "name": "Rust standard library",
-      "version": "1.99.1",
+      "version": "1.99.0",
       "license": "MIT OR Apache-2.0; third-party exceptions in COPYRIGHT-library.html",
       "scope": "Rust 标准库及其内含第三方，按实际 rustc 工具链快照",
-      "source": "https://github.com/rust-lang/rust/tree/58cf8f9c35b355199727627d07ae34a4e2846d67",
+      "source": "https://github.com/rust-lang/rust/tree/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4",
       "materials": [
         {
           "path": "licenses/rust-std/LICENSE-MIT",
           "sha256": "b71bd43a069ca0641a9ecfe585ca7b3c53b5cc1608f8b68321168698e28b5ea1",
-          "source": "https://raw.githubusercontent.com/rust-lang/rust/58cf8f9c35b355199727627d07ae34a4e2846d67/LICENSE-MIT"
+          "source": "https://raw.githubusercontent.com/rust-lang/rust/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/LICENSE-MIT"
         },
         {
           "path": "licenses/rust-std/LICENSE-APACHE",
           "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a",
-          "source": "https://raw.githubusercontent.com/rust-lang/rust/58cf8f9c35b355199727627d07ae34a4e2846d67/LICENSE-APACHE"
+          "source": "https://raw.githubusercontent.com/rust-lang/rust/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/LICENSE-APACHE"
         },
         {
           "path": "licenses/rust-std/COPYRIGHT-library.html",
           "sha256": "5647be074c8edf7339fd863055923a8fc80bc5610a8d4661ec3b767b9d392c27",
-          "source": "rustup toolchain 1.99.1: share/doc/rust/COPYRIGHT-library.html"
+          "source": "rustup toolchain 1.99.0: share/doc/rust/COPYRIGHT-library.html"
         }
       ]
     },

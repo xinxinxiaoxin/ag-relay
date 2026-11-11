@@ -458,6 +458,11 @@ function repairResponsesItems(bodyBuf, options = {}) {
         delete item.type;
         removedTypes++;
       }
+    } else if (item.type === 'agent_message') {
+      if (!nonEmptyStr(item.author) || !nonEmptyStr(item.recipient)
+          || !(nonEmptyStr(item.content) || Array.isArray(item.content) && item.content.length > 0)) {
+        return { error: 'agent_message does not contain inline author/recipient/content' };
+      }
     } else if (item.type === 'function_call') {
       if (!nonEmptyStr(item.call_id) || !nonEmptyStr(item.name) || typeof item.arguments !== 'string'
           || calls.has(item.call_id)) return { error: 'function_call is incomplete or has a duplicate call_id' };
@@ -1415,6 +1420,7 @@ async function handle(req, res, state) {
   let preflightRefused = false;
   let repairedStatus = false;
   let resourceFailures = 0;
+  let historyRepairRefusal = '';
   const historyErrorCounts = new Map();
   const isResponses = req.method === 'POST' && pathname === '/v1/responses';
   const clientCodex = isResponses && strictCodex(headers);
@@ -1622,10 +1628,12 @@ async function handle(req, res, state) {
     if ((codexResourceRetry || (hasPolicySettings && eligibleCodex)) && ++resourceFailures >= 5) {
       diagnose('codex_resource_exhausted', { kind, source, status, resourceFailures, refusal: 'resource_attempt_limit' });
       log(`attempt ${attempt}: ${kind}; stopping after ${resourceFailures} resource attempts`);
-      sendPermanent(res, `${kind}: stopping after ${resourceFailures} resource attempts; upstream could not access the retained response history.`);
+      const refusalDetail = historyRepairRefusal ? ` history repair was refused: ${historyRepairRefusal}.` : '';
+      sendPermanent(res, `${kind}: stopping after ${resourceFailures} resource attempts; upstream could not access the retained response history.${refusalDetail}`);
       return 'stop';
     }
     const fail = (reason, refusal = 'unsafe_inline_history') => {
+      historyRepairRefusal = reason;
       diagnose('repair_refused', { kind, source, status, refusal });
       if (codexResourceRetry) {
         preserveResourceHistory = true;

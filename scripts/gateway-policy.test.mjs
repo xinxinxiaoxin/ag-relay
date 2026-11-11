@@ -224,6 +224,68 @@ for (const client of ['claude', 'codex']) {
   }
 }
 
+for (const carrier of ['http', 'json', 'sse']) {
+  for (const fallback of [false, true]) {
+    test(`Codex 代理消息 ${carrier}/${fallback ? '未覆盖错误保底' : '跨资源'} 保留正文和路由并剥离旧推理`, async t => {
+      const agentMessage = {
+        type: 'agent_message', id: 'agent_message_fixture', author: 'fixture_agent', recipient: 'all',
+        content: [{ type: 'input_text', text: 'fixture agent result', id: 'nested_content_id' }],
+        internal_chat_message_metadata_passthrough: { turn_id: 'fixture_turn', create_time: 123 },
+      }
+      const body = { ...history, input: [...history.input, agentMessage] }
+      const expectedAgent = {
+        type: 'agent_message', author: 'fixture_agent', recipient: 'all',
+        content: agentMessage.content,
+        internal_chat_message_metadata_passthrough: agentMessage.internal_chat_message_metadata_passthrough,
+      }
+      const expected = { ...recoveredHistory, input: [...recoveredHistory.input, expectedAgent] }
+      const f = await fixture(t, candidate => candidate.input.some(item => item.type === 'reasoning' || Object.hasOwn(item, 'id'))
+        ? classificationError(fallback ? 'Opaque envelope rejected' : crossResource, carrier,
+          fallback ? 'fresh_provider_error' : undefined) : success)
+      const response = await f.request(body)
+      assert.equal(response.status, 200, response.body)
+      assert.equal(f.captured.length, fallback ? 3 : 2)
+      assert.deepEqual(f.captured[0].body.input.at(-1), agentMessage, '正常首发不提前改写代理消息')
+      if (fallback) assert.equal(f.captured[1].raw, f.captured[0].raw, '保底先原样确认一次')
+      assert.deepEqual(f.captured.at(-1).body, expected)
+      const repairs = f.diagnostics().filter(row => row.event === 'repair_applied')
+      assert.equal(repairs.length, 1)
+      assert.equal(repairs[0].kind, fallback ? 'uncovered_error_fallback' : 'azure_resource_mismatch')
+      assert.equal(repairs[0].removedReasoning, 1)
+      assert.equal(repairs[0].removedIds, 2)
+    })
+  }
+}
+
+for (const fallback of [false, true]) {
+  test(`Claude 代理消息 ${fallback ? '未覆盖错误保底' : '跨资源'} 保留完整消息并恢复`, async t => {
+    const agent = { type: 'agent_message', id: 'agent_claude', author: 'fixture_agent',
+      recipient: 'all', content: [{ type: 'input_text', text: 'fixture agent result' }] }
+    const body = { model: 'fixture-model', input: [toolHistory.input[0], toolHistory.input[1], agent] }
+    const f = await fixture(t, candidate => candidate.input.some(item => item.type === 'reasoning')
+      ? classificationError(fallback ? 'Opaque envelope rejected' : crossResource,
+        fallback ? 'sse' : 'http', fallback ? 'fresh_provider_error' : undefined) : success)
+    assert.equal((await f.request(body, { 'x-relay-client': 'claude' })).status, 200)
+    assert.equal(f.captured.length, fallback ? 3 : 2)
+    assert.deepEqual(f.captured.at(-1).body, { model: 'fixture-model', input: [toolHistory.input[0],
+      { type: 'agent_message', author: 'fixture_agent', recipient: 'all', content: agent.content }] })
+    assert.equal(f.diagnostics().filter(row => row.event === 'repair_applied').length, 1)
+  })
+}
+
+test('Codex 缺少代理消息正文时说明剥离被拒', async t => {
+  const body = { ...history, input: [...history.input,
+    { type: 'agent_message', id: 'agent_reference', author: 'fixture_agent', recipient: 'all' }] }
+  const f = await fixture(t, () => classificationError(crossResource))
+  const response = await f.request(body)
+  assert.equal(response.status, 400)
+  assert.equal(f.captured.length, 5)
+  assert.match(response.body, /history repair was refused/)
+  assert.match(response.body, /agent_message does not contain inline author\/recipient\/content/)
+  assert.ok(f.captured.every(item => item.raw === f.captured[0].raw))
+  assert.equal(f.diagnostics().some(row => row.event === 'repair_applied'), false)
+})
+
 test('未覆盖错误保底：Claude 原样确认后一次去旧推理，下一请求不继承', async t => {
   const body = { ...toolHistory, prompt_cache_key: 'fallback-client-cache' }
   const expected = { ...recoveredToolHistory, prompt_cache_key: body.prompt_cache_key }

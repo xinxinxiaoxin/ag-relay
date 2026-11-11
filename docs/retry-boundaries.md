@@ -13,10 +13,20 @@
 | 未覆盖错误保底 | 仅Claude/Codex，在两次连续合格的未覆盖错误后一次安全去旧推理/编号；候选最多实际发送两次，不加预算、不跨请求记忆；明确限流/鉴权等不触发 | [资格与两次发送上限](#uncovered-error-fallback) |
 | 会话绑定失效 | 仅严格 Codex 的明确绑定失效错误，按确认次数做一次当次去编号；身份与推理保留，不登记有损缓存，不升级删推理 | [会话绑定恢复](#session-binding-recovery) |
 | 账号绑定推理 | 仅 Responses 且同时出现“upstream account bound to this conversation”和“without previous encrypted reasoning items”：去旧推理后连续同错最多再试两次，混入普通临时错误沿既有预算；不按客户端或模型写死，保留消息、工具与身份 | [账号绑定推理](#account-reasoning-unavailable) |
-| 历史安全 | 完整工具配对与搜索载荷保留；未知条目、服务端引用或不完整历史不能盲删，有损降级不等于还原完整历史 | [策略设置与安全边界](#policy-settings) |
+| 历史安全 | 完整代理消息、工具配对与搜索载荷保留；未知条目、服务端引用或不完整历史不能盲删，有损降级不等于还原完整历史 | [代理消息兼容](#agent-message-history)、[策略设置与安全边界](#policy-settings) |
 | 取消与交付 | 已知空占位、Claude/Codex 不可见加密推理及 Codex 未完成搜索继续缓冲；可见思考、正文、搜索完成、客户端工具或未知载荷交付后不重放；等待可取消，重试总预算不截断正常长流 | [加密推理缓冲](#encrypted-reasoning-buffer)、[Codex 搜索交付边界](#codex-search-commit)、[空占位交付边界](#empty-placeholder-commit)、[取消验证记录](#cancellation-record)、[定向验证流程](gateway-core-maintenance.md#快速工作流与定向验证) |
 
 验证优先使用 `gateway-policy.test.mjs`、`gateway-history.test.mjs` 的相关用例；选择范围与补贯通测试的条件以 [核心维护说明](gateway-core-maintenance.md#快速工作流与定向验证) 为准。源码规则、发布版本和正在运行的核心是不同状态，现场判断须核对 `loadedVersion` 与实际生效策略。
+
+<a id="agent-message-history"></a>
+
+## v0.3.22：完整代理消息参与历史兼容
+
+Responses 历史中的 `agent_message` 由共享剥离器识别，适用于 Codex 和经 Responses 通道转发的 Claude。要求非空 `author`、`recipient` 和内联 `content`；保持条目类型、正文、发送方、接收方及扩展元数据，仅按既有修复选项去掉顶层 `id`。正常首发不新增代理消息清理。
+
+- 专用历史恢复与未覆盖错误保底复用同一处理；错误分类、确认次数、候选次数和客户端身份保持原有规则。
+- 服务端引用、压缩历史、不完整工具配对和非推理密文继续拒绝有损改写；五次历史重试耗尽的返回错误附上首次拒绝修复的原因。原因来自固定校验文案，不包含对话内容或任意条目值。
+- Claude 原生 `/v1/messages` 不进入这套 Responses 历史处理。
 
 <a id="encrypted-reasoning-buffer"></a>
 
@@ -46,7 +56,7 @@
 - **流程**：合格的未覆盖错误首次发生后原样确认一次；第二次仍属未覆盖错误时，只调用一次现有安全历史修复器。两次文案不必相同，但中间的已知错误、网络异常或空回应会重置确认。正常首发及独立的Codex编号预清理不因保底改变。
 - **资格**：200必须有真实JSON错误信封或下发前SSE `stream_error`；400/409/422允许有效错误字段或非空纯文本；404/500必须结构化。HTML错误页、无有效字段、空流、读取超时、缓冲超限不算候选；401/402/403/408/413/429/502/503/504不启动保底。
 - **明确排除**：同时检查code与type，并仅用去掉编号/URL干扰后的错误原因，排除鉴权、余额/额度、内容限制、模型/上下文/请求大小、真实限流、超时/网络/普通拥堵及部署缺失。通用包装码、单个 `unavailable`、泛化 `not supported` 或item/resource不存在不能单独构成否决。旧全局分类不变，避免新保底改变其他客户端行为。
-- **剥离与保留**：复用 `repairResponsesItems` 去旧reasoning和适用item id，要求完整工具配对。Codex按既有规则配套去搜索编号并保留action/status/扩展；Claude不新增未知历史类型处理。正文、工具参数/结果、`call_id`、身份、模型、元数据和 `prompt_cache_key` 保留，不修改本地聊天。
+- **剥离与保留**：复用 `repairResponsesItems` 去旧reasoning和适用item id，要求完整工具配对。Codex按既有规则配套去搜索编号并保留action/status/扩展；Claude保留原有搜索边界，完整代理消息按[共享历史兼容](#agent-message-history)处理。正文、工具参数/结果、`call_id`、身份、模型、元数据和 `prompt_cache_key` 保留，不修改本地聊天。
 - **拒绝条件**：服务端引用、未知/压缩项、非推理密文、不完整工具历史或没有可安全删除的内容，直接返回当前错误。专用修复/绑定恢复的拒绝或停止、已做过的有损处理、会话预清理和其他改体路径不能被新保底绕过。
 - **真实两次上限**：候选只在本请求内使用，发送前固定至多两次、且不超过剩余原次数；紧贴fetch扣减，网络失败及混合429/503也计数。候选冻结，不再进入status/account/shape修复，不登记兼容记忆。最后一次失败不再退避等待，也不能靠部署/网络扩次绕过上限。
 - **收尾**：HTTP/JSON保留末次状态/错误载荷；下发前SSE以502错误信封保留末次code/type/message，不把陌生错误伪装成429。网络/预算耗尽仍用既有封装。取消立即生效，已交付内容或工具后不重放，不截断健康长流。
