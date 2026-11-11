@@ -173,7 +173,30 @@ node scripts/release.mjs test-build --out C:\Temp\ag-relay-test-artifacts
 
 注：网关核心的四个 `.mjs` 与 `gateway-config.bat` 已由 `.gitattributes` 固定为不做换行符转换（`-text`），因此任何机器上检出内容与仓库内容一致、哈希唯一。此前 `.bat` 未固定：仓库内容为 LF、Windows 检出为 CRLF，两者哈希不同。下表 v0.2.0/v0.3.1 条目记录的是当时**磁盘检出**（CRLF）的值 `102865c8…`，属历史留档不回填；v0.3.2 及以后记录的是**仓库内容**（LF）的值 `9a8a483e…`。
 
-### v0.3.22（当前）
+### v0.3.23（当前）
+
+| 项 | 值 |
+| --- | --- |
+| 打包日期 | 2026-11-11 17:53（UTC+8） |
+| 本仓构建提交 | `619815302911f45476e810eb500ae7774c99963f`（tag `v0.3.23`） |
+| 构建方式 | 维护者本机签名构建，独立工具核验两种安装器签名 |
+| `relay-retry-proxy.mjs` sha256 | `95be454c9ac6aab00edb311afdd051cff5b2fce73503a516af3ccedd5466e40f` |
+| `relay-supervisor.mjs` sha256 | `f2f030b46999f84afc77f7f92643075c1d1f1ddf7ad3c327fbd92f5593dff77c` |
+| `relay-start-check.mjs` sha256 | `bb54cc7255b4f570ba1bdcfda255f19f0ca0a70fa6d028d0ed4e44f8146037c4` |
+| `bounded-file-log.mjs` sha256 | `3841b877ce76e6ff37497bfbcd65e3dd4f478442dc7fff9eaf4b39612b25c205` |
+| `gateway-config.bat` sha256 | `5eff32b941b63708fa64104f09d7e28e15ff8dd569a49dc5c9d40bb1859b84f7` |
+| `ag-relay_0.3.23_x64-setup.exe` sha256 | `9586483a065531bcc6ae475b525cf572f7d1e104de239a6efbaca9531527c26c` |
+| `ag-relay_0.3.23_x64-setup.exe.sig` sha256 | `9c761e1d387958f5210f7998943b6e5b263c2409e42098550f31f68e9ce78972` |
+| `ag-relay_0.3.23_x64_zh-CN.msi` sha256 | `a2ba2829b022fc52e1f1b6821bfe161fecc0d1fa3caa7add565c1d05d7ea4142` |
+| `ag-relay_0.3.23_x64_zh-CN.msi.sig` sha256 | `980c63fc053d5a4fd1b6ed0524ca0d8e64f32251f25f60c3d06ea613011f679b` |
+| `latest.json` sha256 | `bf5aaa34063a951ba7759b3ed6874e22693a56fc62b2765fac08a3ddc257d445` |
+| `SHA256SUMS` sha256 | `214af663b3b39ebc6429201fb98298b5464f3b11b56998742bda214fb6493c4c` |
+| `third-party-sources.tar.gz` sha256 | `9d5a2b27e427bcf6a0df3e117c693500a268ac9f1e3d7668b47ed1f7747877b7` |
+| Release | [v0.3.23](https://github.com/xinxinxiaoxin/ag-relay/releases/tag/v0.3.23)（NSIS + MSI + 各自签名 + 更新清单 + 第三方源码附件 + 校验清单） |
+
+修复账号末次恢复遗漏与非流式正文断线跳过重试，统一历史修复用途入口并共享隔离测试工具。相关 178 项定向验证通过；发布文件与匿名更新清单均已核实。
+
+### v0.3.22（历史）
 
 | 项 | 值 |
 | --- | --- |
