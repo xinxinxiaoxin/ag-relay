@@ -1569,10 +1569,12 @@ async function handle(req, res, state) {
       const cleaned = repairResponsesItems(activeBody, 'session_compat', eligibleCodex);
       if (cleaned.error) {
         diagnose('session_compat_refused', { reason: 'unsafe_inline_history' });
-        if (!codexResourceRetry) {
+        // A remembered repair is optional for general clients. Let the upstream resolve its own references.
+        if (codexResourceRetry) {
+          diagnose('codex_session_passthrough', { reason: 'unsafe_inline_history' });
+        } else if (clientCodex) {
           return sendPermanent(res, 'Session compatibility requires complete inline message and tool history; server-side references or unsupported items cannot be discarded.');
         }
-        diagnose('codex_session_passthrough', { reason: 'unsafe_inline_history' });
       } else {
         activeBody = cleaned.body;
         rememberCompatibility(compatibility, compatibilityCache);

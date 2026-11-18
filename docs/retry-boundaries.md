@@ -13,12 +13,21 @@
 | 正文传输失败 | 非流式成功正文与 HTTP 错误正文中途断线，沿用当前尝试的网络恢复；按实际发送次数报告，保留取消、总预算与已有恢复上限 | [非流式正文恢复](#response-body-recovery) |
 | 历史处理 | 桌面默认 `on_error`；独立可选编号清理不等于整组推理剥离，明确历史错误仍走专用恢复；另有可关闭的未覆盖错误保底 | [策略设置与安全边界](#policy-settings)、[未覆盖错误保底](#uncovered-error-fallback) |
 | 未覆盖错误保底 | 仅Claude/Codex，在两次连续合格的未覆盖错误后一次安全去旧推理/编号；候选最多实际发送两次，不加预算、不跨请求记忆；明确限流/鉴权等不触发 | [资格与两次发送上限](#uncovered-error-fallback) |
+| 会话记忆预清理 | 通用 Responses 组遇到无法安全清理的历史，保留原请求发给上游，由本次响应决定是否重试 | [会话引用原样转发](#session-preclean-forward) |
 | 会话绑定失效 | 仅严格 Codex 的明确绑定失效错误，按确认次数做一次当次去编号；身份与推理保留，不登记有损缓存，不升级删推理 | [会话绑定恢复](#session-binding-recovery) |
 | 账号绑定推理 | 仅 Responses 且同时出现“upstream account bound to this conversation”和“without previous encrypted reasoning items”：去旧推理后连续同错最多再试两次，混入普通临时错误沿既有预算；不按客户端或模型写死，保留消息、工具与身份 | [账号绑定推理](#account-reasoning-unavailable) |
 | 历史安全 | 完整代理消息、工具配对与搜索载荷保留；未知条目、服务端引用或不完整历史不能盲删，有损降级不等于还原完整历史 | [代理消息兼容](#agent-message-history)、[策略设置与安全边界](#policy-settings) |
 | 取消与交付 | 明确 Claude/Codex 的正文前思考和只读服务器搜索继续缓冲；正文、拒绝、客户端工具或未知载荷交付后不重放；明确终态保留，等待可取消，重试总预算不截断健康长流 | [正文前恢复](#prebody-search-recovery)、[空占位交付边界](#empty-placeholder-commit)、[取消验证记录](#cancellation-record)、[定向验证流程](gateway-core-maintenance.md#快速工作流与定向验证) |
 
 验证优先使用 `gateway-policy.test.mjs`、`gateway-history.test.mjs` 的相关用例；选择范围与补贯通测试的条件以 [核心维护说明](gateway-core-maintenance.md#快速工作流与定向验证) 为准。源码规则、发布版本和正在运行的核心是不同状态，现场判断须核对 `loadedVersion` 与实际生效策略。
+
+<a id="session-preclean-forward"></a>
+
+## v0.3.25 通用组保留历史引用续聊
+
+通用 Responses 请求命中会话记忆时，若历史可以安全清理，首发沿用记住的处理方式。遇到 `previous_response_id`、`conversation` 或其他无法安全改写的历史时，网关保留请求体的原始字节，由上游服务解析引用。该次跳过预清理后，同一会话仍可复用已有记忆。
+
+上游接受时直接返回结果。上游限流时按本组预算原样重试。明确的历史错误交给原有历史恢复规则。Codex 的原样重试由该组的独立开关控制。
 
 <a id="prebody-search-recovery"></a>
 

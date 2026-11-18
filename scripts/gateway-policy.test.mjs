@@ -1413,6 +1413,45 @@ for (const rememberSession of [false, true]) {
   })
 }
 
+for (const [client, scenario, replies, expectedStatus] of [
+  ['claude', '上游接受', [success], 200],
+  ['zcode', '先限流再成功', [cacheRateError('sse'), success], 200],
+  ['claude', '上游拒绝历史引用', [historyError(crossResource)], 400],
+]) {
+  test(`通用组会话预清理遇到历史引用：${scenario}`, async t => {
+    const headers = { 'x-relay-client': client, 'x-relay-session-id': 'fixture-general-session' }
+    const responses = [historyError(crossResource), success, ...replies, success]
+    const f = await fixture(t, (_, count) => responses[count - 1])
+    assert.equal((await f.request(toolHistory, headers)).status, 200)
+    assert.deepEqual(f.captured[1].body, recoveredToolHistory)
+    assert.ok(f.diagnostics().some(row => row.event === 'session_compat_enabled'))
+
+    const raw = JSON.stringify({ ...toolHistory, previous_response_id: 'resp_fixture_prior' }, null, 2)
+    const response = await f.request(raw, headers)
+    assert.deepEqual(f.captured.slice(2).map(sent => sent.raw), replies.map(() => raw))
+    assert.equal(response.status, expectedStatus)
+    if (expectedStatus === 200) assert.deepEqual(JSON.parse(response.body), success.body)
+    else assert.match(response.body, /previous_response_id/)
+    assert.ok(f.diagnostics().some(row => row.event === 'session_compat_refused'))
+
+    assert.equal((await f.request(toolHistory, headers)).status, 200)
+    assert.deepEqual(f.captured.at(-1).body, recoveredToolHistory)
+  })
+}
+
+for (const retryHistory of [false, true]) {
+  test(`Codex 会话预清理遇到历史引用：原样再试${retryHistory ? '开启' : '关闭'}`, async t => {
+    const f = await fixture(t, (_, count) => count === 1 ? historyError(crossResource) : success,
+      policy({ stripItemIds: false, retryHistory }))
+    const headers = { 'x-relay-session-id': 'fixture-codex-session' }
+    assert.equal((await f.request(toolHistory, headers)).status, 200)
+    assert.deepEqual(f.captured[1].body, recoveredToolHistory)
+    const raw = JSON.stringify({ ...toolHistory, previous_response_id: 'resp_fixture_prior' }, null, 2)
+    assert.equal((await f.request(raw, headers)).status, retryHistory ? 200 : 400)
+    assert.deepEqual(f.captured.slice(2).map(sent => sent.raw), retryHistory ? [raw] : [])
+  })
+}
+
 for (const stripItemIds of [false, true]) {
   test(`policy history off 与首发编号清理 ${stripItemIds ? 'on' : 'off'} 互相独立`, async t => {
     const raw = ` \n${JSON.stringify(history)}\n `
